@@ -1,0 +1,13 @@
+# Pinned Rust toolchain for the Tauri v2 shell.
+#
+# `dtolnay/rust-toolchain` in .github/workflows/{ci,release}.yml reads this file
+# when no explicit `toolchain:` input is given, so CI and local builds resolve
+# to the same toolchain instead of "whatever stable is today".
+#
+# CI runs on windows-latest, whose default host toolchain is MSVC. A local
+# GNU toolchain also compiles the shell (see docs/RELEASING.md for the MinGW
+# linker requirement) but produces non-standard Windows binaries.
+
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

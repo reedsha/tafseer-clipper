@@ -4,6 +4,33 @@ This document is the operational runbook for producing a signed v0.1.x Windows
 installer and its auto-updater artifacts. The product gate itself (what must be
 verified before publishing) lives in [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md).
 
+## 0. Repository setup (one time)
+
+The release pipeline assumes these repository settings. Apply them in
+**Settings → Repository** (or with the `gh` CLI as an admin).
+
+| Setting | Value | Why |
+|---|---|---|
+| Default branch | `main` | Release Please targets `main` |
+| Merge strategy | **Squash merging**, enforced | Release Please's history is designed for squash merges |
+| Actions permissions | "Allow GitHub Actions to create and approve pull requests" | Release Please must open its `chore(release):` pull request |
+| Branch protection on `main` | Require a PR; require the `CI` and `PR Title Lint` checks; block force-pushes | No version bump or tag may skip CI |
+| `production` environment | Required reviewer approval | Scope the signing secrets to the environment, not the repository |
+
+### Open release blockers
+
+These are **not** CI problems - they are prerequisites for a *public* release and
+are tracked in `docs/CICD_AUDIT.md` §5.3:
+
+- **Rotate the updater signing keypair.** The public key currently in
+  `src-tauri/tauri.conf.json` was generated locally for wiring; rotate it
+  before the first public release and keep the private half only in CI secrets.
+- **Configure Authenticode credentials.** Without them the installer is
+  unsigned and Windows SmartScreen warns on every install.
+  `REQUIRE_CODE_SIGNING=1` already fails the build instead of shipping one.
+- **Point the updater endpoint at a real host.** The configured
+  `https://updates.tafseer-clipper.app/...` does not yet serve `latest.json`.
+
 ## 1. One-time setup
 
 | Item | How |
@@ -19,17 +46,47 @@ The public key currently configured in `tauri.conf.json` was generated locally
 for wiring; **rotate it before the first public release** and store the new
 private key only in CI.
 
-## 2. Version bump (all four must match)
+## 2. Versioning and tagging (automated)
+
+Versions are **not** edited by hand. [Release Please](https://github.com/googleapis/release-please)
+owns every version anchor and `CHANGELOG.md`; the configuration lives in
+`release-please-config.json` and `.release-please-manifest.json`.
+
+The four anchors that must stay in sync are updated automatically by the
+`chore(release): vX.Y.Z` pull request:
 
 ```
-package.json           "version": "0.1.0"
-src-tauri/tauri.conf.json  "version": "0.1.0"
-src-tauri/Cargo.toml   version = "0.1.0"
-backend/config.py      APP_VERSION = "0.1.0"
+package.json                 "version": "0.1.0"
+src-tauri/tauri.conf.json    "version": "0.1.0"
+src-tauri/Cargo.toml         version = "0.1.0"
+backend/config.py            APP_VERSION = "0.1.0"
 ```
 
-Then tag: `git tag v0.1.0 && git push --tags` (the release workflow builds a
-draft GitHub Release from the tag).
+### The flow
+
+1. Merge a Conventional Commit (`feat:`, `fix:`, `chore:`, …) into `main`.
+2. `.github/workflows/release-please.yml` opens or updates a
+   `chore(release): vX.Y.Z` pull request that bumps all four anchors and
+   regenerates `CHANGELOG.md`.
+3. **Review and merge that pull request.** Release Please then creates the git
+   tag `vX.Y.Z` and a **draft** GitHub Release carrying the changelog.
+4. The tag push triggers `.github/workflows/release.yml`, which builds the
+   frozen sidecar and the signed NSIS installer and uploads them into that
+   draft release, together with the updater artifacts and the GPU acceleration
+   pack.
+5. Publish the draft release, then run §7 below.
+
+> Never run `git tag vX.Y.Z && git push --tags` by hand: the tag must carry the
+> Release Please changelog, and a hand-made tag leaves `main` without the
+> matching version bump.
+
+### Making a release without a code change
+
+```bash
+git commit --allow-empty -m "chore: release 0.2.0"
+```
+
+Merge that commit; Release Please will propose `v0.2.0`.
 
 ## 3. Local build (one command)
 

@@ -1,7 +1,13 @@
 name: Release
 
-# Tag a commit (e.g. `git tag v0.1.0 && git push --tags`) to build the signed
-# Windows installer + auto-updater artifacts and publish a draft GitHub Release.
+# Build the signed Windows installer + auto-updater artifacts and attach them
+# to the draft release for the pushed tag.
+#
+# The tag is created by Release Please (see .github/workflows/release-please.yml),
+# which also opens a DRAFT GitHub Release carrying the changelog. tauri-action
+# reuses that existing draft (it matches on tag name) and uploads the built
+# artifacts into it, so there is exactly one release per version. A human
+# publishes the draft once the assets are in place.
 #
 # Required repository secrets (see docs/RELEASING.md):
 #   TAURI_SIGNING_PRIVATE_KEY            updater signing key (minisign, from `npx tauri signer generate`)
@@ -29,19 +35,20 @@ jobs:
     name: Build and publish Windows release
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.4.0
         with:
           version: 11
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # No `toolchain:` input: dtolnay/rust-toolchain reads src-tauri/rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
 
@@ -65,7 +72,8 @@ jobs:
           Copy-Item C:\ffmpeg-ci\ffmpeg\bin\ffprobe.exe "src-tauri\binaries\ffprobe-$triple.exe" -Force
 
       - name: Build, sign and publish
-        uses: tauri-apps/tauri-action@v0
+        id: tauri
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # action-v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -93,6 +101,32 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
         run: |
-          gh release upload "${{ github.ref_name }}" "dist/accel/accel-manifest.json" --clobber
-          gh release upload "${{ github.ref_name }}" dist/accel/files/* --clobber
+          # Upload by release ID rather than by tag: `gh release upload <tag>`
+          # resolves the release through the "get release by tag" endpoint, which
+          # does not return DRAFT releases - and the release for this tag is a
+          # draft at this point.
+          if (-not $env:RELEASE_ID) { throw "tauri-action did not report a releaseId." }
+          $assets = @(Get-ChildItem "dist\accel\files" -File -ErrorAction SilentlyContinue)
+          $assets += @(Get-Item "dist\accel\accel-manifest.json")
+          foreach ($asset in $assets) {
+            $name = [System.Uri]::EscapeDataString($asset.Name)
+            gh api --method POST "repos/${{ github.repository }}/releases/$env:RELEASE_ID/assets?name=$name" `
+              --header "Content-Type: application/octet-stream" `
+              --input $asset.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Failed to upload $($asset.Name)" }
+          }
+          Write-Host "Uploaded $($assets.Count) acceleration-pack assets."
+
+      - name: Name the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+        run: |
+          # Release Please creates the release with the tag as its title; give it
+          # the product name. The changelog body is left untouched.
+          gh api --method PATCH "repos/${{ github.repository }}/releases/$env:RELEASE_ID" `
+            -f "name=Tafseer Clipper ${{ github.ref_name }}"
+          if ($LASTEXITCODE -ne 0) { Write-Warning "Could not rename the release; continuing." }

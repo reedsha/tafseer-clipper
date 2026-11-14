@@ -44,11 +44,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "externalBin": ["binaries/backend", "binaries/ffmpeg", "binaries/ffprobe"],
+    "targets": [
+      "nsis"
+    ],
+    "externalBin": [
+      "binaries/backend",
+      "binaries/ffmpeg",
+      "binaries/ffprobe"
+    ],
     "createUpdaterArtifacts": true,
     "publisher": "Tafseer Clipper",
-    "copyright": "Copyright Ac 2026 Tafseer Clipper",
+    "copyright": "Copyright © 2026 Tafseer Clipper",
     "category": "Video",
     "shortDescription": "Find, subtitle and export Tafseer lecture clips",
     "longDescription": "A precision workstation for long-form Tafseer lectures: AI clip discovery, bilingual Thai/Arabic subtitle studio and GPU-accelerated batch export with burned-in dual-style subtitles.",
