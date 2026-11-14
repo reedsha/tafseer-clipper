@@ -7,9 +7,11 @@
 **Auditor scope:** CI/CD pipeline, versioning, release engineering, deployment hygiene only.
 **Product/UI code was not reviewed** (out of scope for this skill; see `AUDIT_REPORT.md` for that).
 
-> **Status: PHASE 1 + PHASE 2 COMPLETE — AWAITING APPROVAL.**
-> Per SKILL.md §1.4 (Hard Trust Boundary #4), **no project file was modified** during this audit.
-> The only file added is this report. Every proposed change in §6 is staged, not applied.
+> **Status: PHASES 1–4 COMPLETE.**
+> Phase 1 (read-only hygiene check) and Phase 2 (detect → route → audit) were executed as a
+> read-only audit; the Audit & Trust Plan in §6 was approved as **Option C**; Phase 3 was applied
+> on the `chore/cicd-pipeline` branch and Phase 4 (local proof-of-work) is recorded in **§11**.
+> The GitHub Settings checklist (Phase 5) is **§8**.
 
 ---
 
@@ -323,7 +325,7 @@ gitignored dev keypair. No secret is printed, deleted, or leaked by either workf
 | **A10** | Add `pr-title-lint.yml` from `assets/pr-title-lint.yml` (Conventional Commit enforcement) | `.github/workflows/pr-title-lint.yml` (new) | P3.2 | 🔴 P1 | Closes F3; required by `github-settings.md` branch protection (see §8) |
 | **A11** | Add `release-please.yml` + `release-please-config.json` + `.release-please-manifest.json` — `release-type: node`, `extra-files` for `tauri.conf.json` (json), `Cargo.toml` (toml), `backend/config.py` (python); `bootstrap-sha` = the A1 initial commit | new (3 files) | P3.2 / P3.3 | 🔴 P1 | Closes F2 — automates all 4 version anchors |
 | **A12** | Verify the FFmpeg download against a pinned SHA-256 before use | both workflows | P3.3 | 🟠 P1 | Closes F8 — unverified binary flows into a signed installer |
-| **A13** | Add `cargo test --locked` and `cargo clippy -- -D warnings` (+ `cargo fmt --check`) to the `tauri-check` job | `.github/workflows/ci.yml` | P3.2 | 🟠 P1 | Activates the 8 dormant Rust unit tests |
+| **A13** | Add `cargo test --locked` to the `tauri-check` job (clippy/fmt are **not** gated — see §11) | `.github/workflows/ci.yml` | P3.2 | 🟠 P1 | Activates the 11 dormant Rust unit tests |
 | **A14** | Generate `SHA256SUMS.txt` in the release workflow and upload it as a release asset | `.github/workflows/release.yml` | P3.2 | 🟡 P2 | Closes F11 — satisfies `target-desktop-cli.md`; today it exists only in the gitignored `release/` folder |
 | **A15** | Add `actions/attest-build-provenance` (`id-token: write`, `attestations: write`) | `.github/workflows/release.yml` | P3.2 | 🟡 P2 | Closes F11 — satisfies `target-desktop-cli.md` |
 | **A16** | Add `.github/dependabot.yml` — `github-actions` (weekly) + `npm` + `cargo` + `pip` | `.github/dependabot.yml` (new) | P3.2 | 🟡 P2 | Closes F15 |
@@ -463,7 +465,7 @@ cargo build --manifest-path src-tauri/Cargo.toml --release --locked
 
 **Baseline before any change** (to be captured at the start of Phase 4) is: `tsc --noEmit` 0,
 `vite build` 0, Playwright 6/6, backend E2E 40/40, `cargo check --locked` 0, Rust unit tests
-**not currently run by any pipeline** (8 present).
+**not currently run by any pipeline** (11 present).
 
 **Known environment caveat:** local Node is v24 while CI is Node 22, and local pnpm is 12.18.0
 while CI is 11 — Phase 4 results on the *local* toolchain may not be identical to CI. A3 resolves
@@ -544,10 +546,99 @@ companion edit (A21, included in option B/C scope).
 
 - Adding Linux/macOS release targets (§5.4).
 - Replacing the bespoke `release.yml` with a generic deploy template (K1).
-- Adding a heavyweight linter (ESLint/Biome/Ruff) beyond `tsc --noEmit` + `cargo clippy` +
+- Adding a heavyweight linter (ESLint/Biome/Ruff) beyond `tsc --noEmit` +
   `python -m compileall` — it would add dependencies and risk a `AGENTS.md` stack-contract dispute
   for modest gain. *Optional add-on available on request.*
 
 ---
 
-**End of report.** No project file was modified. Execution awaits explicit approval per §6.2.
+## 11. Execution Record (Phase 3 + Phase 4)
+
+**Approved scope:** Option C (A + A8, A10, A11 + A21). Executed on `chore/cicd-pipeline`
+against `reedsha/tafseer-clipper` (public).
+
+### 11.1 Files changed
+
+| Kind | Files |
+|---|---|
+| **New (10)** | `.gitattributes` · `.nvmrc` · `.python-version` · `src-tauri/rust-toolchain.toml` · `.github/workflows/pr-title-lint.yml` · `.github/workflows/release-please.yml` · `release-please-config.json` · `.release-please-manifest.json` · `CHANGELOG.md` · `docs/CICD_AUDIT.md` |
+| **Modified (9)** | `.gitignore` · `package.json` · `.github/workflows/ci.yml` · `.github/workflows/release.yml` · `src-tauri/tauri.conf.json` · `backend/config.py` · `README.md` · `docs/RELEASING.md` · `AGENTS.md` |
+
+### 11.2 Two integration hazards found and resolved by inspection (not assumption)
+
+1. **`skip-github-release: true` would have dead-ended the release pipeline.** It skips the *tag*
+   as well as the GitHub Release (`src/strategies/base.ts` → `buildRelease()` returns early), so
+   `release.yml`'s `push: tags: ["v*"]` trigger would never fire. Resolved by letting Release
+   Please create the tag **and** a draft release; `tauri-action`'s `getOrCreateRelease()` was read
+   and confirmed to **reuse** an existing release with the same tag (it scans the release list for
+   drafts), so there is exactly one release per version.
+2. **`gh release upload <tag>` cannot resolve a draft release** (it uses the by-tag endpoint, which
+   does not return drafts). The acceleration-pack upload was changed to upload **by release id**
+   from `tauri-action`'s own `releaseId` output, via `gh api .../releases/$RELEASE_ID/assets`.
+
+### 11.3 Version-updater verification (executed, not assumed)
+
+`release-please@17.11.2` was installed locally and its real updaters were run against the actual
+repository files with a sentinel version `9.9.9`:
+
+| File | Updater | Result |
+|---|---|---|
+| `src-tauri/tauri.conf.json` | `generic-json`, `$.version` | **1 line changed** — PASS |
+| `src-tauri/Cargo.toml` | `generic-toml`, `$.package.version` | **1 line changed** — PASS |
+| `backend/config.py` | `generic` + `# x-release-please-version` | **1 line changed** — PASS |
+| `backend/config.py` (control, annotation removed) | `generic` | unchanged — PASS (proves the annotation is what enables it) |
+
+`src-tauri/tauri.conf.json` was reformatted to `JSON.stringify(_, null, 2)` so that
+release-please's `jsonStringify` produces a **one-line** diff per release instead of reflowing
+arrays. There is **no** `python` updater in release-please v17, hence the annotation-based
+`generic` updater for `backend/config.py`.
+
+### 11.4 Phase 4 — local proof-of-work (exact exit codes)
+
+| Command | Exit | Result |
+|---|---|---|
+| `pnpm lint` (`tsc --noEmit` + `compileall backend`) | `0` | clean |
+| `pnpm build` (`tsc && vite build`) | `0` | built in 972 ms |
+| `cargo check --locked` | `0` | Tauri shell compiles; reformatted `tauri.conf.json` still parses |
+| `cargo test --locked` | `0` | **11 passed**, 0 failed |
+| `py -3.12 backend/test_phase1_e2e.py` | `0` | **40/40 checks passed** |
+| `pnpm exec playwright test` | `0` | **6 passed** (18.9 s) |
+
+### 11.5 Two gates deliberately **not** added
+
+`cargo clippy -- -D warnings` and `cargo fmt --check` **fail on the pre-existing code**
+(`clippy::collapsible_if` in `src-tauri/src/acceleration.rs`; unformatted Rust throughout).
+Gating CI on them would have made the pipeline red on day one. They are therefore **not** in the
+`lint` script or the `CI` workflow. A separate source-cleanup change can enable them later —
+that is a code change, not a CI change, and was outside the approved scope.
+
+### 11.6 Pre-push safety scan (public repository)
+
+- Staged tree: **131 files, 1.54 MB**; largest single file `src-tauri/Cargo.lock` (0.13 MB).
+- **No** secrets: scan for `sk-*`, `BEGIN * PRIVATE KEY`, `ghp_*`, `AKIA*`, `AIza*` across every
+  staged blob returned **zero** real hits.
+- **No** `backend/.e2e/` — the scratch workspace contains byte-identical copies of the Microsoft
+  system fonts `tahoma.ttf` and `LeelawUI.ttf` (SHA-256 verified against `C:\Windows\Fonts`).
+  Committing them would have redistributed proprietary fonts and contradicted
+  `THIRD_PARTY_NOTICES.md:89` ("The application does not bundle font files").
+- **No** `__pycache__/*.pyc`, no `node_modules`, no `dist/`, no `release/`, no
+  `src-tauri/binaries/*.exe`, no `.release-secrets/`.
+- The updater private key remains **only** in `.release-secrets/updater.key` (gitignored).
+
+### 11.7 Residual risks carried forward
+
+| # | Risk | Status |
+|---|---|---|
+| R1 | Updater key rotation still pending | **Open** — must happen before the first public release |
+| R2 | Authenticode credentials not configured | **Open** — `REQUIRE_CODE_SIGNING=1` already fails the build without them |
+| R3 | Updater hosting URL is a placeholder | **Open** — `latest.json` must be served from a real host |
+| R4 | The release pipeline has never executed in CI | **Open** — now possible: dispatch `release.yml` on a throwaway tag to prove it |
+| — | FFmpeg is still downloaded without checksum verification (A12) | **Open** — deferred to a follow-up PR |
+| — | No build provenance attestation, no CI-generated `SHA256SUMS.txt` (A14, A15) | **Open** — deferred |
+| — | `release.yml` has no `concurrency` block (A9) | **Open** — deferred |
+| — | No `dependabot.yml` (A16) | **Open** — deferred |
+
+---
+
+**End of report.** Phases 1–4 are complete; the change set is on `chore/cicd-pipeline` awaiting
+the pull request. Phase 5 (GitHub Settings checklist) is §8 above.
