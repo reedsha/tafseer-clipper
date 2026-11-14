@@ -1,9 +1,16 @@
-name: Release
+﻿name: Release
 
-# Tag a commit (e.g. `git tag v0.1.0 && git push --tags`) to build the signed
-# Windows installer + auto-updater artifacts and publish a draft GitHub Release.
+# Build the signed Windows installer + auto-updater artifacts and attach them
+# to the draft release for the pushed tag.
 #
-# Required repository secrets (see docs/RELEASING.md):
+# The tag is created by Release Please (see .github/workflows/release-please.yml),
+# which also opens a DRAFT GitHub Release carrying the changelog. tauri-action
+# reuses that existing draft (it matches on tag name) and uploads the built
+# artifacts into it, so there is exactly one release per version. A human
+# publishes the draft once the assets are in place.
+#
+# Required repository secrets (see docs/RELEASING.md). They live in the
+# `production` ENVIRONMENT, not at repository level:
 #   TAURI_SIGNING_PRIVATE_KEY            updater signing key (minisign, from `npx tauri signer generate`)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   password for that key (empty string if none)
 #   REQUIRE_CODE_SIGNING                 "1" to fail the build instead of shipping unsigned
@@ -18,8 +25,17 @@ on:
 permissions:
   contents: write
 
+# Never let two release builds race on the same draft release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
-  FFMPEG_URL: https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+  # gyan.dev "essentials" FFmpeg build (GPL, includes libx264 + ffprobe).
+  # Pinned to a specific version and verified against gyan.dev's published
+  # SHA-256 before it is bundled into the signed installer.
+  FFMPEG_URL: https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.2-essentials_build.zip
+  FFMPEG_SHA256: 60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba
   # The GPU acceleration pack is uploaded to the same GitHub release; the app
   # looks it up at runtime. Override for a custom CDN (docs/GPU_PACK.md).
   VITE_ACCEL_PACK_MANIFEST_URL: https://github.com/${{ github.repository }}/releases/latest/download/accel-manifest.json
@@ -28,20 +44,39 @@ jobs:
   release:
     name: Build and publish Windows release
     runs-on: windows-latest
+    # The production environment is the release gate:
+    #   - a required reviewer must approve the deployment before this job runs;
+    #   - the updater signing key and the Authenticode credentials live in the
+    #     ENVIRONMENT (not at repository level), so they are only injected into
+    #     this job after that approval.
+    # The `staging` environment exists as the reserved non-production target
+    # (no reviewer, no wait timer); the draft GitHub Release produced by this
+    # workflow is the de-facto staging area until it is published.
+    environment:
+      name: production
+    permissions:
+      contents: write
+      # Provenance attestation needs a GitHub-issued OIDC token.
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      # No `version` input on purpose: pnpm/action-setup reads the
+      # `packageManager` field from package.json, which is the single source
+      # of truth for the pnpm version. Passing both makes the action fail with
+      # "Multiple versions of pnpm specified".
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.4.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           cache: pnpm
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # No `toolchain` input: dtolnay/rust-toolchain reads
+      # src-tauri/rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
 
@@ -54,18 +89,26 @@ jobs:
           python -m pip install --disable-pip-version-check -r backend/requirements.txt pyinstaller
           python -m PyInstaller --noconfirm --clean backend/build_sidecar.spec
 
-      - name: Download FFmpeg + stage external binaries
+      - name: Setup FFmpeg
+        id: ffmpeg
+        uses: ./.github/actions/setup-ffmpeg
+        with:
+          ffmpeg-url: ${{ env.FFMPEG_URL }}
+          ffmpeg-sha256: ${{ env.FFMPEG_SHA256 }}
+
+      - name: Stage external binaries
         shell: pwsh
+        env:
+          FFMPEG_DIR: ${{ steps.ffmpeg.outputs.ffmpeg-dir }}
         run: |
-          Invoke-WebRequest -Uri $env:FFMPEG_URL -OutFile ffmpeg.zip -UseBasicParsing
-          Expand-Archive ffmpeg.zip -DestinationPath C:\ffmpeg-ci -Force
           $triple = "x86_64-pc-windows-msvc"
           Copy-Item dist/backend.exe "src-tauri\binaries\backend-$triple.exe" -Force
-          Copy-Item C:\ffmpeg-ci\ffmpeg\bin\ffmpeg.exe "src-tauri\binaries\ffmpeg-$triple.exe" -Force
-          Copy-Item C:\ffmpeg-ci\ffmpeg\bin\ffprobe.exe "src-tauri\binaries\ffprobe-$triple.exe" -Force
+          Copy-Item "$env:FFMPEG_DIR\ffmpeg.exe" "src-tauri\binaries\ffmpeg-$triple.exe" -Force
+          Copy-Item "$env:FFMPEG_DIR\ffprobe.exe" "src-tauri\binaries\ffprobe-$triple.exe" -Force
 
       - name: Build, sign and publish
-        uses: tauri-apps/tauri-action@v0
+        id: tauri
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # action-v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -85,6 +128,36 @@ jobs:
           prerelease: false
           args: --bundles nsis
 
+      - name: Generate SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          # Checksums for every downloadable artifact of this release, published
+          # next to the files so a user can verify what they downloaded.
+          $bundle = "src-tauri\target\release\bundle\nsis"
+          if (-not (Test-Path $bundle)) { $bundle = ".cargo-target\release\bundle\nsis" }
+          $files = @(Get-ChildItem $bundle -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in ".exe", ".sig" })
+          $files += @(Get-Item "dist\backend.exe" -ErrorAction SilentlyContinue)
+          $files = $files | Where-Object { $_ }
+          if ($files.Count -eq 0) { throw "No release artifacts found to checksum." }
+          $lines = $files | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
+          $lines | Set-Content "SHA256SUMS.txt" -Encoding utf8
+          Get-Content "SHA256SUMS.txt"
+
+      - name: Upload SHA256SUMS.txt to the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+        run: |
+          gh api --method POST "repos/${{ github.repository }}/releases/$env:RELEASE_ID/assets?name=SHA256SUMS.txt" `
+            --header "Content-Type: application/octet-stream" --input SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw "Failed to upload SHA256SUMS.txt" }
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: "src-tauri/target/release/bundle/nsis/*.exe"
+
       - name: Build GPU acceleration pack
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts/build-accel-pack.ps1 -OutDir dist/accel -Python python
@@ -93,6 +166,32 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
         run: |
-          gh release upload "${{ github.ref_name }}" "dist/accel/accel-manifest.json" --clobber
-          gh release upload "${{ github.ref_name }}" dist/accel/files/* --clobber
+          # Upload by release ID rather than by tag: `gh release upload <tag>`
+          # resolves the release through the "get release by tag" endpoint, which
+          # does not return DRAFT releases - and the release for this tag is a
+          # draft at this point.
+          if (-not $env:RELEASE_ID) { throw "tauri-action did not report a releaseId." }
+          $assets = @(Get-ChildItem "dist\accel\files" -File -ErrorAction SilentlyContinue)
+          $assets += @(Get-Item "dist\accel\accel-manifest.json")
+          foreach ($asset in $assets) {
+            $name = [System.Uri]::EscapeDataString($asset.Name)
+            gh api --method POST "repos/${{ github.repository }}/releases/$env:RELEASE_ID/assets?name=$name" `
+              --header "Content-Type: application/octet-stream" `
+              --input $asset.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Failed to upload $($asset.Name)" }
+          }
+          Write-Host "Uploaded $($assets.Count) acceleration-pack assets."
+
+      - name: Name the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+        run: |
+          # Release Please creates the release with the tag as its title; give it
+          # the product name. The changelog body is left untouched.
+          gh api --method PATCH "repos/${{ github.repository }}/releases/$env:RELEASE_ID" `
+            -f "name=Tafseer Clipper ${{ github.ref_name }}"
+          if ($LASTEXITCODE -ne 0) { Write-Warning "Could not rename the release; continuing." }

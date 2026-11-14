@@ -23,10 +23,61 @@ fn main() {
 
 #[cfg(windows)]
 fn embed_windows_manifest() {
-    // Kept in sync with tauri-build's default `windows-app-manifest.xml`.
-    let mut resource = tauri_winres::WindowsResource::new();
-    resource.set_manifest(
-        r#"<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+    // Why this does not use `tauri_winres`:
+    //
+    // `tauri-build` always compiles a Windows resource on Windows and links it
+    // into the binaries with `cargo:rustc-link-arg-bins`. The `tauri_winres`
+    // helper always writes that resource script to `OUT_DIR/resource.rc` and
+    // compiles it to `OUT_DIR/resource.lib`, and its `compile_for_everything()`
+    // links the SAME library into EVERY target with `cargo:rustc-link-arg`.
+    //
+    // The binaries therefore end up linking `resource.lib` twice, and a
+    // resource library linked twice is duplicated inside the binary. MSVC
+    // rejects that outright:
+    //
+    //     CVTRES : fatal error CVT1100: duplicate resource. type:VERSION, name:1
+    //     LINK   : fatal error LNK1123: failure during conversion to COFF
+    //
+    // The GNU toolchain tolerates the duplicate, so the problem was invisible
+    // locally and only appeared on CI (and would have broken every MSVC
+    // release build).
+    //
+    // The fix is to compile a SECOND, separate resource that contains only the
+    // manifest - no `VERSIONINFO` block - under a different file name, so it
+    // becomes a different library:
+    //
+    //   binaries : resource.lib (tauri-build: VERSIONINFO)
+    //            + tafseer_manifest.lib (this file: the manifest)
+    //   tests    : tafseer_manifest.lib (the manifest - the whole point)
+    //
+    // Each target links each resource exactly once, and the resource ids do
+    // not collide (VERSION is type 16, the manifest is type 24).
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR is not set");
+    let rc_path = std::path::Path::new(&out_dir).join("tafseer_manifest.rc");
+    std::fs::write(&rc_path, manifest_rc()).expect("failed to write the manifest resource script");
+
+    embed_resource::compile_for_everything(&rc_path, embed_resource::NONE)
+        .manifest_required()
+        .expect("the compiled resource must contain a manifest");
+}
+
+/// The resource script: the Common Controls v6 manifest and nothing else.
+/// Deliberately no `VERSIONINFO` block - tauri-build already provides one.
+#[cfg(windows)]
+fn manifest_rc() -> String {
+    let mut rc = String::from("#pragma code_page(65001)\n1 24\n{\n");
+    for line in MANIFEST.lines() {
+        rc.push_str("\" ");
+        rc.push_str(&escape_rc(line.trim()));
+        rc.push_str(" \"\n");
+    }
+    rc.push_str("}\n");
+    rc
+}
+
+/// Kept in sync with tauri-build's default `windows-app-manifest.xml`.
+#[cfg(windows)]
+const MANIFEST: &str = r#"<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>
     <dependentAssembly>
       <assemblyIdentity
@@ -39,9 +90,23 @@ fn embed_windows_manifest() {
       />
     </dependentAssembly>
   </dependency>
-</assembly>"#,
-    );
-    resource
-        .compile_for_everything()
-        .expect("failed to embed the Windows application manifest");
+</assembly>"#;
+
+/// Escape a string for a quoted Windows resource-script string.
+/// Double quotes are doubled (the RC way); the rest is escaped C-style.
+#[cfg(windows)]
+fn escape_rc(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => escaped.push_str("\"\""),
+            '\'' => escaped.push_str("\\'"),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            '\r' => escaped.push_str("\\r"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }

@@ -2,7 +2,7 @@
 
 **Authoritative specification:** `tafseer_clipper_master_plan.md` (Sections 3, 6, 7). If anything in this file conflicts with the master plan, the master plan wins.
 
-**Current phase:** Phase 1 (backend core) is implemented under `backend/` and verified by `backend/test_phase1_e2e.py`. The Phase 2 shell (`StepperHeader`, `SettingsDrawer`, `CommandMenu`, `.tafseer` auto-save) and the full Phase 3 wizard (Steps 1–4: ingest, Keep & Re-roll discovery, bilingual subtitle studio, batch export) are implemented under `src/`, with the Tauri v2 shell under `src-tauri/` — this repository root is the canonical frontend root per the master plan's Section 7 layout. Phase 4 packaging is implemented and built in this checkout: frozen `backend.exe` (PyInstaller) + bundled `ffmpeg.exe`/`ffprobe.exe`, per-user NSIS installer with an Authenticode signing hook and signed auto-updater artifacts (see `release/0.1.0/`, `docs/RELEASING.md`, `docs/RELEASE_CHECKLIST.md`). **Do not write application code** (components, endpoints, services, stores, Tauri config) outside a phase the user explicitly instructs you to begin from Section 8.
+**Current phase:** Phase 1 (backend core) is implemented under `backend/` and verified by `backend/test_phase1_e2e.py`. The Phase 2 shell (`StepperHeader`, `SettingsDrawer`, `CommandMenu`, `.tafseer` auto-save) and the full Phase 3 wizard (Steps 1–4: ingest, Keep & Re-roll discovery, bilingual subtitle studio, batch export) are implemented under `src/`, with the Tauri v2 shell under `src-tauri/` — this repository root is the canonical frontend root per the master plan's Section 7 layout. Phase 4 packaging is implemented and built in this checkout: frozen `backend.exe` (PyInstaller) + bundled `ffmpeg.exe`/`ffprobe.exe`, per-user NSIS installer with an Authenticode signing hook and signed auto-updater artifacts (published as GitHub Release assets; see `docs/RELEASING.md`, `docs/RELEASE_CHECKLIST.md`). **Do not write application code** (components, endpoints, services, stores, Tauri config) outside a phase the user explicitly instructs you to begin from Section 8.
 
 Violation of any rule below is a defect. Do not propose alternatives; do not "improve" the stack.
 
@@ -80,3 +80,22 @@ These five libraries are pre-approved. Use each only for its assigned job:
 - Keep the 4-step linear wizard: `[1. Upload] -> [2. Find Clips] -> [3. Subtitles] -> [4. Export]`, with the Recent Lectures bar and Settings ⚙ entry as specified.
 - Release packaging is Windows-only: PyInstaller-frozen `backend.exe` + bundled `ffmpeg.exe`/`ffprobe.exe` via `bundle.externalBin`, a per-user NSIS installer, Authenticode signing through `src-tauri/sign-windows.ps1`, and updater artifacts signed with the minisign key in `plugins.updater`. Runbook: `docs/RELEASING.md`; gate: `docs/RELEASE_CHECKLIST.md`.
 - Placeholder files in this skeleton may be edited freely once a phase begins, but never silently change the stack, endpoints, or palette defined here.
+
+---
+
+## 5. CI/CD, Versioning & Release Rules
+
+1. **Never manually edit version numbers** in manifests; versions are managed automatically via Release Please PRs.
+2. **Always use Conventional Commit formatting** for PR titles (`feat:`, `fix:`, `chore:`, `feat!:`).
+3. **Never push directly to `main`**; always open a PR and ensure local `lint`, `test`, and `build` pass first.
+4. **Release lifecycle:** Merging to `main` updates Staging and refreshes the Release PR; merging the Release PR ships to Production.
+
+### Repository-specific detail
+
+- **Single source of truth for the version:** Release Please owns `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `backend/config.py` (`release-please-config.json`). Never hand-edit a version; open an empty conventional commit (`chore: release X.Y.Z`) instead. Runbook: `docs/RELEASING.md` §2.
+- **Standard entrypoints:** `pnpm lint` (type-check + backend byte-compile), `pnpm test` (Rust unit tests + backend E2E + Playwright E2E), `pnpm build`. The `CI` workflow runs the same three, so a green local run is what a green PR means.
+- **Toolchain is pinned:** Node 22 (`.nvmrc`), pnpm 11 (`packageManager`), Python 3.12 (`.python-version`), Rust stable (`src-tauri/rust-toolchain.toml`). Do not bump these in a feature branch; change them deliberately and in the same commit.
+- **All GitHub Actions are pinned to a commit SHA** with a `# vX.Y.Z` comment. Never introduce a floating tag — the tag is what gets audited, the SHA is what gets executed.
+- **Least privilege:** every workflow declares `permissions:` explicitly. CI is `contents: read`; only the release workflows get scoped write.
+- **Release Please owns the tag and the draft release.** `.github/workflows/release.yml` only *attaches* artifacts to the existing draft; it never creates a second release. Do not hand-run `git tag` — see `docs/RELEASING.md` §2.
+- **The Windows-only release matrix is deliberate.** Do not add Linux/macOS targets without an explicit instruction; the rationale is recorded in `docs/CICD_AUDIT.md` §5.4.

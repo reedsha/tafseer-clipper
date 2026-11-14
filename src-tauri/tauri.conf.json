@@ -44,11 +44,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "externalBin": ["binaries/backend", "binaries/ffmpeg", "binaries/ffprobe"],
+    "targets": [
+      "nsis"
+    ],
+    "externalBin": [
+      "binaries/backend",
+      "binaries/ffmpeg",
+      "binaries/ffprobe"
+    ],
     "createUpdaterArtifacts": true,
     "publisher": "Tafseer Clipper",
-    "copyright": "Copyright Ac 2026 Tafseer Clipper",
+    "copyright": "Copyright © 2026 Tafseer Clipper",
     "category": "Video",
     "shortDescription": "Find, subtitle and export Tafseer lecture clips",
     "longDescription": "A precision workstation for long-form Tafseer lectures: AI clip discovery, bilingual Thai/Arabic subtitle studio and GPU-accelerated batch export with burned-in dual-style subtitles.",
@@ -73,9 +79,9 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI3QjcxREJFNzIwQkUxQjcKUldTMzRRdHl2aDIzSjQyZlYzeEJzUHc2L0x4S2dNN2F3aXBhMlVPVTdCOTdpQWlrdEYwUEgzekYK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERDQzhCOTI2RUE5RjZGMkIKUldRcmI1L3FKcm5JM05LR0cxUkYzVHZkUy9kYnZLeklrUmc1RVJwNHJVQkF5bUZCbjVUT3pzZXoK",
       "endpoints": [
-        "https://updates.tafseer-clipper.app/{{target}}/{{arch}}/{{current_version}}"
+        "https://github.com/reedsha/tafseer-clipper/releases/latest/download/latest.json"
       ]
     }
   }

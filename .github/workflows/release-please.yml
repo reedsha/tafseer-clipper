@@ -1,0 +1,48 @@
+﻿name: Release Please
+
+# Keeps the version and CHANGELOG.md in sync with the commit history.
+#
+# Flow:
+#   1. A conventional commit lands on `main`.
+#   2. This workflow opens/updates a "chore(release): vX.Y.Z" pull request that
+#      bumps every version anchor and regenerates CHANGELOG.md.
+#   3. Merging that pull request makes Release Please create the git tag
+#      `vX.Y.Z` and a DRAFT GitHub Release carrying the changelog.
+#   4. The tag push triggers `.github/workflows/release.yml`, which builds the
+#      signed NSIS installer and uploads it into that draft release.
+#   5. A human publishes the draft.
+#
+# Release Please is only the *version and changelog manager*: the Windows
+# release pipeline in release.yml remains the single builder and signer.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Scoped write: Release Please creates the release PR, the tag and the draft
+# release. It never needs any other permission.
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Update version and changelog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # Release Please needs the full history and all tags to compute the
+          # changelog and the next version.
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: google-github-actions/release-please-action@e4dc86ba9405554aeba3c6bb2d169500e7d3b4ee # v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          target-branch: main

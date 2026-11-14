@@ -1,0 +1,60 @@
+# Normalize line endings and mark binary files.
+# Windows-only project, but LF is the canonical form in the repository so that
+# diffs stay clean regardless of each contributor's core.autocrlf setting.
+
+* text=auto eol=lf
+
+# Windows scripts that are executed by cmd.exe keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# PowerShell is safe with LF, but keep CRLF for Windows-only tooling that
+# assumes the platform default.
+*.ps1 text eol=crlf
+
+# Explicit per-type overrides (these must come after the * rules above).
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.rs    text eol=lf
+*.py    text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.svg   text eol=lf
+*.ass   text eol=lf
+*.nfo   text eol=lf
+
+# Binary assets - never touched by Git.
+*.exe   binary
+*.dll   binary
+*.so    binary
+*.dylib binary
+*.bin   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.icns  binary
+*.mp4   binary
+*.mov   binary
+*.mp3   binary
+*.wav   binary
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary
+*.zip   binary
+*.pdf   binary
+*.sig   binary
+
+# Lockfiles are generated - keep them LF but never rewrite line endings.
+pnpm-lock.yaml text eol=lf
+Cargo.lock      text eol=lf

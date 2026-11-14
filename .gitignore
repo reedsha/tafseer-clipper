@@ -42,3 +42,41 @@ release/
 *.sln
 *.sw?
 
+# --- Python caches and virtual environments ---------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Secrets ----------------------------------------------------------------
+# The backend reads configuration from the process environment only; it never
+# loads a .env file. These rules exist so that a stray local .env, a key or a
+# certificate can never be committed by accident.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+*.keystore
+
+# --- Generated test workspaces ----------------------------------------------
+# backend/.e2e/ is a scratch workspace created by backend/test_phase1_e2e.py.
+# It contains generated media AND copies of Microsoft system fonts
+# (tahoma.ttf, LeelawUI.ttf) that must never be redistributed - the app does
+# not bundle fonts (see THIRD_PARTY_NOTICES.md).
+backend/.e2e/
+backend/.tmp/
+
+# --- Rust / Tauri build output ----------------------------------------------
+# src-tauri/.gitignore already covers /target/ and /gen/schemas; these are the
+# belt-and-braces root rules.
+src-tauri/target/
+/src-tauri/gen/
+

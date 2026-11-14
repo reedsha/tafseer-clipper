@@ -19,16 +19,31 @@ Arabic) into short bilingual clips.
 ```powershell
 pnpm install          # frontend dependencies
 pnpm dev              # Vite dev server (http://localhost:1420)
-pnpm exec tsc --noEmit
+pnpm lint             # type-check + byte-compile the backend
+pnpm test             # Rust unit tests + backend E2E + Playwright E2E
 pnpm build            # production bundle in dist/
-pnpm exec playwright test   # browser E2E (starts the real sidecar + preview)
+pnpm exec playwright test   # browser E2E only (starts the real sidecar + preview)
 
 py -3.12 -m pip install -r backend/requirements.txt
 py -3.12 backend/main.py    # start the FastAPI sidecar directly (port 8008)
 py -3.12 backend/test_phase1_e2e.py   # Phase-1 backend E2E (needs ffmpeg)
 ```
 
+Toolchain versions are pinned: Node 22 (`.nvmrc`), pnpm 11 (`packageManager`
+in `package.json`), Python 3.12 (`.python-version`) and Rust stable
+(`src-tauri/rust-toolchain.toml`).
+
 ## Release
+
+Versions are **not** edited by hand. Merge a Conventional Commit into `main`
+and a `chore(release): vX.Y.Z` pull request appears that bumps every version
+anchor (`package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`,
+`backend/config.py`) and regenerates `CHANGELOG.md`. Merging that pull request
+creates the `vX.Y.Z` tag and starts the Windows release build, which produces a
+signed per-user NSIS installer plus the auto-updater artifacts and uploads them
+into a draft GitHub Release.
+
+Local release builds (no tag, no upload):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1            # sidecar -> staged binaries -> NSIS installer
@@ -40,6 +55,9 @@ The installer is per-user (no admin), ships `backend.exe`, `ffmpeg.exe` and
 [`docs/RELEASING.md`](docs/RELEASING.md) for the signing/updater secrets and
 [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) for the clean-VM gate.
 
+Built artifacts for the current version are published as GitHub Release assets:
+<https://github.com/reedsha/tafseer-clipper/releases>.
+
 ## GPU acceleration (optional)
 
 Transcription and encoding run on the CPU by default and always fall back to it.
@@ -49,8 +67,4 @@ which local transcription uses the GPU and rendering uses hardware encoding.
 No GPU model names or VRAM requirements are part of the UI; the app reports
 GPU/CPU state and the CPU fallback explicitly. Pack contents, hosting and
 security are documented in [`docs/GPU_PACK.md`](docs/GPU_PACK.md).
-
-Built artifacts for the current version live in [`release/0.1.0/`](release/0.1.0):
-the NSIS installer, its updater signature, the frozen sidecar, `latest.json` and
-`SHA256SUMS.txt`.
 
