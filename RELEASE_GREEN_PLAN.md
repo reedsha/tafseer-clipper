@@ -217,12 +217,12 @@ an explicit instruction.
 | 2 | S-2.5 GPU fallback regression test | **DONE** — 2 new checks; suite is 42/42 | — | — |
 | 3 | S-3.1 clippy/fmt gates | Optional · still blocked | — | ? |
 | 3 | S-3.2 docs nit | DONE — folded into this change set | — | — |
-| 4 | S-4.1 internal rebuild | **DONE** — fresh build, signing chain verified against `DCC8B926EA9F6F2B`, 3/3 checksums | — | — |
+| 4 | S-4.1 internal rebuild | **DONE** — fresh build; signing chain verified against `DCC8B926EA9F6F2B`; 3/3 checksums. One stale file was caught and corrected (see §9.4 correction in the readiness report) | — | — |
 | 4 | S-4.2 signed release | Optional | — | you |
-| 5 | S-5 Dependabot merge batch | TODO — do after S-1 lands on main | — | you |
-| 6 | S-6.1 artifacts check | TODO | after S-4 | me |
-| 6 | S-6.2 partial install smoke | TODO | after S-4 | me |
-| 6 | S-6.3 61-item VM walkthrough | TODO | after S-2,S-4 | you |
+| 5 | S-5 Dependabot merge batch | IN PROGRESS — `#14` merged; `#10`/`#8` re-running; `#5`/`#11` updated to pick up the flake fix | — | you |
+| 6 | S-6.1 artifacts check | **DONE** — signing chain + 3/3 checksums verified on the rebuilt set | — | — |
+| 6 | S-6.2 partial install smoke | **BLOCKED HERE** — frozen exes cannot be launched from the agent shell (`PYI … Could not create temporary directory!`, and a minimal PyInstaller build fails with `PermissionError`). Needs a normal terminal. | — | you |
+| 6 | S-6.3 61-item VM walkthrough | TODO | after S-6.2 | you |
 | 6 | S-6.4 sign-off | TODO | last | you |
 
 ### Also completed in this pass
