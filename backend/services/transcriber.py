@@ -415,6 +415,17 @@ class WhisperTranscriber:
                     "Install backend/requirements.txt or switch Settings to "
                     "Cloud STT."
                 ) from exc
+            except Exception as exc:  # pragma: no cover - env dependent
+                # An incompatible native dependency (for example PyAV 17+ dropping
+                # the `metadata_errors` argument that faster-whisper 1.2 passes)
+                # raises TypeError/AttributeError at import, not ImportError.
+                # Surface it as the documented 503 JSON contract instead of a bare
+                # 500 from an unhandled exception.
+                raise TranscriptionError(
+                    "faster-whisper could not be loaded in this sidecar build "
+                    f"({type(exc).__name__}: {exc}). Install a compatible "
+                    "backend/requirements.txt or switch Settings to Cloud STT."
+                ) from exc
 
             device = resolve_device(self.device_request)
             compute_type = resolve_compute_type(device, self.compute_request)
@@ -498,16 +509,56 @@ class WhisperTranscriber:
         model = self._ensure_model()
 
         try:
-            segments_iter, info = model.transcribe(
-                str(audio_path),
-                language=normalize_language(language),
-                task="transcribe",
-                beam_size=5,
-                vad_filter=vad_filter,
-                vad_parameters={"min_silence_duration_ms": 500},
-                initial_prompt=initial_prompt or None,
-                word_timestamps=False,
-            )
+            try:
+                segments_iter, info = self._run_transcribe(
+                    model, audio_path, initial_prompt, language, vad_filter
+                )
+            except Exception as exc:
+                # A GPU runtime can pass the readiness probe and still fail at
+                # INFERENCE: cuBLAS/cuDNN are only first touched inside
+                # encode(), so a missing cublas64_12.dll surfaces here rather
+                # than at model load. This is the same "GPU is optional, the CPU
+                # always works" contract that _ensure_model already honours -
+                # without this retry the whole request 500s on an NVIDIA machine
+                # that has not installed the acceleration pack.
+                if self._device != "cuda":
+                    raise TranscriptionError(
+                        f"Transcription failed on {self._device}/"
+                        f"{self._compute_type}: {exc}"
+                    ) from exc
+
+                cpu_compute_type = resolve_compute_type("cpu", self.compute_request)
+                logger.warning(
+                    "GPU transcription failed at inference (%s); retrying on the "
+                    "CPU with compute_type=%s. Enable GPU acceleration in Settings "
+                    "to install the optional CUDA runtime.",
+                    exc,
+                    cpu_compute_type,
+                )
+                # Drop the CUDA model first so its VRAM pool is released before
+                # the CPU model is allocated.
+                self.unload()
+                try:
+                    from faster_whisper import WhisperModel  # type: ignore
+
+                    model = WhisperModel(
+                        self.model_size,
+                        device="cpu",
+                        compute_type=cpu_compute_type,
+                    )
+                except Exception as cpu_exc:  # pragma: no cover - env dependent
+                    raise TranscriptionError(
+                        "Could not load faster-whisper "
+                        f"'{self.model_size}' on the CPU after the GPU failed: "
+                        f"{cpu_exc}. Switch Settings to Cloud STT and try again."
+                    ) from cpu_exc
+
+                self._model = model
+                self._device = "cpu"
+                self._compute_type = cpu_compute_type
+                segments_iter, info = self._run_transcribe(
+                    model, audio_path, initial_prompt, language, vad_filter
+                )
 
             raw: list[Segment] = []
             for index, item in enumerate(segments_iter):
@@ -547,6 +598,26 @@ class WhisperTranscriber:
             compute_type=self._compute_type,
             model=self.model_size,
             vram_unloaded=unloaded,
+        )
+
+    @staticmethod
+    def _run_transcribe(
+        model,
+        audio_path: str | Path,
+        initial_prompt: str,
+        language: str | None,
+        vad_filter: bool,
+    ):
+        """Issue the faster-whisper call. Split out so it can be retried on CPU."""
+        return model.transcribe(
+            str(audio_path),
+            language=normalize_language(language),
+            task="transcribe",
+            beam_size=5,
+            vad_filter=vad_filter,
+            vad_parameters={"min_silence_duration_ms": 500},
+            initial_prompt=initial_prompt or None,
+            word_timestamps=False,
         )
 
 

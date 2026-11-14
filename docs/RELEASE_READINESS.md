@@ -15,6 +15,11 @@ does not cover the product/UI audit (`AUDIT_REPORT.md`) or the CI/CD architectur
 
 ## 0. Verdict
 
+> **Updated 2026-11-15 after remediation — see §9.** The product defect (BL-1), the aborting
+> harness (BL-2) and the flaky gate (BL-7) are **fixed and verified**. What remains is process:
+> signing credentials, a rebuilt artifact, the 61-item VM gate, and the dependency queue.
+> The table below is the **original** measurement and is kept as the record.
+
 **NOT RELEASE READY — 1 product defect, 1 unstable required gate, 0/61 of the packaged gate.**
 
 *(Pipeline and dependency counts below are as measured at commit `f20ce71f`; they move as PRs land.)*
@@ -105,6 +110,14 @@ CI `cancel-in-progress: true` on `ci-…` groups is a separate, expected cause o
 
 ## 2. The blocker: GPU transcription does not fall back to CPU
 
+> **STATUS: FIXED** (2026-11-15). Kept as the record of the defect and its evidence.
+> The fix is in `backend/services/transcriber.py` (inference-time CPU fallback +
+> `TranscriptionError` for every unrecoverable path) and `backend/services/accel.py`
+> (the CUDA probe now loads the runtime instead of asking whether it was compiled
+> in). Verified on this machine: backend E2E **42/42**, and
+> `/extract-and-transcribe` returns **200 application/json on `device: cpu`**
+> where it used to return `500 text/plain`. See §9 for the verification log.
+
 This is the only defect found here that affects the **shipped product at runtime** (every other
 finding concerns test infrastructure or release tooling), and it is in the exact hardware
 configuration the product is built for.
@@ -185,6 +198,8 @@ Any release tagged now would carry a transcription path that 500s on an NVIDIA l
 the acceleration pack — i.e. on day one, before the user clicks *Enable GPU acceleration*.
 
 ### 2.5 Suggested fix (NOT applied)
+
+> **Applied on 2026-11-15** — all three items below are implemented; see §9.
 
 `AGENTS.md:5` forbids application-code changes outside an explicitly instructed phase, so this
 is a recommendation only:
@@ -371,3 +386,42 @@ The two systems most shifted by this work — "is CI green?" and "is the matrix 
 *"yes"* on a machine where the primary transcribe call returns HTTP 500 (§2.4), while the reverse
 case produced a red gate through no code change at all (§1.6). Both directions of the release signal
 are currently untrustworthy. That is the report's central finding.
+
+---
+
+## 9. Remediation log (2026-11-15)
+
+Applied after the report, on explicit instruction. This section supersedes the corresponding
+"open" rows in §0/§6; the original findings above are kept unchanged as the record.
+
+### 9.1 What changed
+
+| Blocker | Change | Files |
+|---|---|---|
+| **BL-7** (flaky gate) | The in-process test HTTP server had two Windows-specific defects: an accepted socket **inherits the listener's non-blocking mode** (so read/write could return `WouldBlock`, truncating the response into `error sending request`), and a transient `accept()` error **broke the loop**, killing the listener for the rest of the test. Both fixed. | `src-tauri/src/acceleration.rs` (test server) |
+| **BL-2** (aborting harness) | The E2E suite no longer raises past a check: a non-JSON error body is reported as a `FAIL` line via `error_detail()`, and each check group runs under `guarded()` so an exception becomes a recorded failure. A red run now prints the **whole** suite. | `backend/test_phase1_e2e.py` |
+| **BL-1** (GPU fallback) | Inference-time CPU fallback: `model.transcribe()` is wrapped, and a CUDA failure at inference (missing `cublas64_12.dll`) drops the CUDA model, loads CPU `int8`, and retries — mirroring the existing model-load fallback. Every unrecoverable path raises `TranscriptionError`, so the documented **503 + JSON** contract holds. A non-`ImportError` import failure (the `av 19` class) is also converted. | `backend/services/transcriber.py` |
+| **BL-1** (root cause) | `accel._probe_cuda_runtime()` used `ctranslate2.get_supported_compute_types("cuda")`, which reports *compiled-in* support and never loads cuBLAS — hence `cuda_runtime: true` beside `pack_installed: false`. It now loads a trivial CTranslate2 model on the CUDA device, so a missing pack fails the probe cheaply. | `backend/services/accel.py` |
+| — | MIT license, with an explicit note that bundled FFmpeg remains GPL v3. | `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md` |
+
+### 9.2 Verification (executed on this machine, RTX 3050, acceleration pack NOT installed)
+
+| Check | Result |
+|---|---|
+| `cargo test --locked --lib acceleration` × **20 consecutive** (GNU) | 0 failures |
+| `cargo +stable-x86_64-pc-windows-msvc test --locked --lib acceleration` × **15 consecutive** | 0 failures |
+| Full Rust suite (MSVC) | **11 passed** |
+| `backend/test_phase1_e2e.py` | **42/42 passed**, exit 0 (was 26/40 then abort) |
+| New regression: CUDA inference failure retries on CPU | PASS — `device=cpu loaded=['cpu'] cpu_calls=1` |
+| New regression: unrecoverable failure raises `TranscriptionError` | PASS |
+| `/health.acceleration` without the pack | `transcription: cpu · cuda_runtime: false · pack_installed: false · reason: cuda-runtime-missing` (was `cuda_runtime: true` + `transcription: gpu`) |
+| `POST /extract-and-transcribe` | **200 `application/json`, `device: cpu`** (was `500 text/plain`) |
+
+### 9.3 Still open
+
+| Blocker | State |
+|---|---|
+| BL-3 Authenticode credential | Open — publishing stays blocked by design |
+| BL-4 artifacts signed with the pre-rotation key | Open — needs a rebuild (Stream 4) |
+| BL-5 the 61-item clean-VM gate | Open — human walkthrough |
+| BL-6 Dependabot queue | Open — your review |

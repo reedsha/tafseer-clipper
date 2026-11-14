@@ -1002,6 +1002,87 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         engine.unload() is False and engine.loaded is False,
     )
 
+    # ---- transcriber: GPU failure at INFERENCE falls back to the CPU -------- #
+    # Regression guard for the defect where a CUDA runtime that passes the
+    # readiness probe still fails inside encode() (missing cublas64_12.dll).
+    # The fallback must kick in at transcription time, not only at model load,
+    # and the failure must surface as TranscriptionError (503 JSON) - never as a
+    # bare RuntimeError that becomes a 500 text/plain.
+    class _FakeCudaModel:
+        """Stands in for a CUDA WhisperModel whose inference blows up."""
+
+        def __init__(self, fail: bool):
+            self.fail = fail
+            self.calls = 0
+
+        def transcribe(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError(
+                    "Library cublas64_12.dll is not found or cannot be loaded"
+                )
+            info = type("Info", (), {"language": "th", "duration": 1.0,
+                                     "language_probability": 0.9})()
+            return iter(()), info
+
+    fallback_engine = transcriber.WhisperTranscriber(model_size="tiny", device="cpu")
+    cuda_model = _FakeCudaModel(fail=True)
+    fallback_engine._model = cuda_model
+    fallback_engine._device = "cuda"
+    fallback_engine._compute_type = "int8"
+    cpu_model = _FakeCudaModel(fail=False)
+    loaded_devices: list[str] = []
+
+    class _FakeWhisperModel:
+        def __init__(self, _size, device="cpu", compute_type="int8"):
+            loaded_devices.append(device)
+            self._inner = cpu_model
+
+        def transcribe(self, *args, **kwargs):
+            return self._inner.transcribe(*args, **kwargs)
+
+    fake_module = type(sys)("faster_whisper")
+    fake_module.WhisperModel = _FakeWhisperModel
+    real_module = sys.modules.get("faster_whisper")
+    sys.modules["faster_whisper"] = fake_module
+    try:
+        result = fallback_engine.transcribe(
+            source, auto_unload=False, vad_filter=False
+        )
+        check(
+            "transcriber: CUDA inference failure retries on the CPU",
+            result.device == "cpu" and loaded_devices == ["cpu"] and cpu_model.calls == 1,
+            f"device={result.device} loaded={loaded_devices} cpu_calls={cpu_model.calls}",
+        )
+    except Exception as exc:  # noqa: BLE001 - a raise here is the failure
+        check(
+            "transcriber: CUDA inference failure retries on the CPU",
+            False,
+            f"{type(exc).__name__}: {exc}",
+        )
+    finally:
+        if real_module is not None:
+            sys.modules["faster_whisper"] = real_module
+        else:
+            sys.modules.pop("faster_whisper", None)
+
+    # The non-GPU path must raise TranscriptionError (=> 503 JSON), not
+    # RuntimeError (=> 500 text/plain).
+    cpu_only = transcriber.WhisperTranscriber(model_size="tiny", device="cpu")
+    cpu_only._model = _FakeCudaModel(fail=True)
+    cpu_only._device = "cpu"
+    cpu_only._compute_type = "int8"
+    raised: Exception | None = None
+    try:
+        cpu_only.transcribe(source, auto_unload=False, vad_filter=False)
+    except Exception as exc:  # noqa: BLE001 - we are asserting the type
+        raised = exc
+    check(
+        "transcriber: unrecoverable failure raises TranscriptionError (503 JSON)",
+        isinstance(raised, transcriber.TranscriptionError),
+        type(raised).__name__ if raised else "no exception raised",
+    )
+
     # ---- analyzer (mock provider) ------------------------------------------ #
     provider = analyzer.ProviderConfig(
         base_url=os.environ["TAFSEER_LLM_BASE_URL"],

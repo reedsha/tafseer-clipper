@@ -205,33 +205,37 @@ an explicit instruction.
 
 | Stream | Item | State | ETA | Owner |
 |---|---|---|---|---|
-| 0 | P-0.1 baseline freeze | TODO | — | me |
+| 0 | P-0.1 baseline freeze | DONE — `release/0.1.0/` left untouched, labelled obsolete in the readiness report | — | — |
 | 0 | P-0.2 tracker present | DONE (this file) | — | — |
 | 0 | P-0.3 dependabot queue | TODO | — | you |
-| 1 | S-1.1 flaky Rust tests | TODO | — | me (test-only) |
-| 1 | S-1.2 E2E reports FAIL not raise | TODO | — | me (test-only) |
-| 2 | S-2.1 CPU fallback at inference | **BLOCKED – awaiting instruction** | — | ? |
-| 2 | S-2.2 `TranscriptionError` contract | **BLOCKED – awaiting instruction** | — | ? |
-| 2 | S-2.3 reconcile CPU readiness probes | **BLOCKED – awaiting instruction** | — | ? |
-| 2 | S-2.4 non-ImportError transcribe path | **BLOCKED – awaiting instruction** | — | ? |
-| 2 | S-2.5 GPU fallback regression test | **BLOCKED – awaiting instruction** | — | ? |
-| 3 | S-3.1 clippy/fmt gates | Optional · blocked | — | ? |
-| 3 | S-3.2 docs nit | TODO | next PR | me |
-| 4 | S-4.1 internal rebuild | TODO | after S-2 | me |
+| 1 | S-1.1 flaky Rust tests | **DONE** — 35 consecutive clean runs (20 GNU + 15 MSVC) | — | — |
+| 1 | S-1.2 E2E reports FAIL not raise | **DONE** — a red run now prints all 42 checks | — | — |
+| 2 | S-2.1 CPU fallback at inference | **DONE** — verified: 200 JSON on `device: cpu` | — | — |
+| 2 | S-2.2 `TranscriptionError` contract | **DONE** — regression test asserts the type | — | — |
+| 2 | S-2.3 reconcile CPU readiness probes | **DONE** — probe loads the runtime; no more `cuda_runtime:true` + `pack_installed:false` | — | — |
+| 2 | S-2.4 non-ImportError transcribe path | **DONE** — the `av 19` class now yields 503 JSON | — | — |
+| 2 | S-2.5 GPU fallback regression test | **DONE** — 2 new checks; suite is 42/42 | — | — |
+| 3 | S-3.1 clippy/fmt gates | Optional · still blocked | — | ? |
+| 3 | S-3.2 docs nit | DONE — folded into this change set | — | — |
+| 4 | S-4.1 internal rebuild | TODO — next, after this merges | — | me |
 | 4 | S-4.2 signed release | Optional | — | you |
-| 5 | S-5 Dependabot merge batch | TODO | after S-1 | you |
+| 5 | S-5 Dependabot merge batch | TODO — do after S-1 lands on main | — | you |
 | 6 | S-6.1 artifacts check | TODO | after S-4 | me |
 | 6 | S-6.2 partial install smoke | TODO | after S-4 | me |
 | 6 | S-6.3 61-item VM walkthrough | TODO | after S-2,S-4 | you |
 | 6 | S-6.4 sign-off | TODO | last | you |
 
+### Also completed in this pass
+
+- **MIT license** (`LICENSE`), with the bundled-FFmpeg GPL v3 caveat stated in `README.md` and
+  `THIRD_PARTY_NOTICES.md` so the MIT grant is not mistaken for covering the FFmpeg binaries.
+
 ## Open decisions (need you)
 
-1. **Authorize Stream 2** — the only route to Green B and Green C. Say the word (for example
-   *"begin the GPU fallback work"*) and I will start exactly S-2.1…S-2.5 and nothing else.
+1. ~~Authorize Stream 2~~ — **authorized and done** (see §9 of the readiness report).
 2. **G-E-internal or G-E-signed** — today, or when a credential exists?
 3. **S-3.1** — enable clippy/fmt gates (source cleanup commit) or leave advisory?
 4. **S-5 PR #11 (TS 7)** — merge, hold, or accept later once included in a real feature release?
 
-Once 1 is answered and Streams 1→2 land, "all green" is a matter of running the matrix, not
-re-architecting anything.
+With Streams 1 and 2 landed, **G-A / G-B / G-C are achieved and verified**. **G-D** and **G-E**
+remain — they need a rebuilt artifact and a human walkthrough, not more code.
