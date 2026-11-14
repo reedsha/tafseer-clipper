@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # gyan.dev "essentials" FFmpeg build (GPL, includes libx264 + ffprobe).
+  FFMPEG_URL: https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+
+jobs:
+  frontend:
+    name: Frontend (tsc, build, Playwright E2E)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+      - name: Type-check and build
+        run: |
+          pnpm exec tsc --noEmit
+          pnpm build
+      - name: Cache FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\ffmpeg-ci
+          key: ffmpeg-essentials-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+      - name: Install FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri $env:FFMPEG_URL -OutFile ffmpeg.zip -UseBasicParsing
+          Expand-Archive ffmpeg.zip -DestinationPath C:\ffmpeg-ci -Force
+          Get-ChildItem C:\ffmpeg-ci -Recurse -Filter ffmpeg.exe | Select-Object -First 1 -ExpandProperty DirectoryName |
+            Out-File -Encoding utf8 C:\ffmpeg-bin.txt
+      - name: Install backend deps for E2E (no faster-whisper needed)
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check -q fastapi==0.162.7 "uvicorn[standard]==0.54.0" pydantic==2.14.3 python-multipart==0.0.33 httpx==0.28.1 fonttools==4.68.0
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install chromium
+      - name: Run Playwright E2E
+        shell: pwsh
+        env:
+          PYTHON_BIN: python
+          TAFSEER_FFMPEG: C:\ffmpeg-ci\ffmpeg\bin\ffmpeg.exe
+          TAFSEER_FFPROBE: C:\ffmpeg-ci\ffmpeg\bin\ffprobe.exe
+        run: |
+          if (-not (Test-Path $env:TAFSEER_FFMPEG)) {
+            $dir = Get-ChildItem C:\ffmpeg-ci -Recurse -Filter ffmpeg.exe | Select-Object -First 1 -ExpandProperty DirectoryName
+            "TAFSEER_FFMPEG=$dir\ffmpeg.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            "TAFSEER_FFPROBE=$dir\ffprobe.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          }
+          pnpm exec playwright test
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+  backend:
+    name: Backend (Phase-1 E2E)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install backend deps
+        run: python -m pip install --disable-pip-version-check -r backend/requirements.txt
+      - name: Cache FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\ffmpeg-ci
+          key: ffmpeg-essentials-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+      - name: Install FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri $env:FFMPEG_URL -OutFile ffmpeg.zip -UseBasicParsing
+          Expand-Archive ffmpeg.zip -DestinationPath C:\ffmpeg-ci -Force
+      - name: Run Phase-1 E2E
+        shell: pwsh
+        run: |
+          $dir = Get-ChildItem C:\ffmpeg-ci -Recurse -Filter ffmpeg.exe | Select-Object -First 1 -ExpandProperty DirectoryName
+          $env:TAFSEER_FFMPEG = "$dir\ffmpeg.exe"
+          $env:TAFSEER_FFPROBE = "$dir\ffprobe.exe"
+          $env:PYTHONIOENCODING = "utf-8"
+          python backend/test_phase1_e2e.py
+
+  tauri-check:
+    name: Tauri shell (cargo check)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend dist
+        run: pnpm build
+      - name: Cache FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\ffmpeg-ci
+          key: ffmpeg-essentials-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+      - name: Stage external binaries (real FFmpeg, placeholder sidecar for check)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path C:\ffmpeg-ci\ffmpeg\bin\ffmpeg.exe)) {
+            Invoke-WebRequest -Uri $env:FFMPEG_URL -OutFile ffmpeg.zip -UseBasicParsing
+            Expand-Archive ffmpeg.zip -DestinationPath C:\ffmpeg-ci -Force
+          }
+          $triple = "x86_64-pc-windows-msvc"
+          Copy-Item C:\ffmpeg-ci\ffmpeg\bin\ffmpeg.exe "src-tauri\binaries\ffmpeg-$triple.exe" -Force
+          Copy-Item C:\ffmpeg-ci\ffmpeg\bin\ffprobe.exe "src-tauri\binaries\ffprobe-$triple.exe" -Force
+          # tauri-build requires every externalBin to exist; the real backend.exe
+          # is produced by the release workflow, cargo check only needs a file.
+          Copy-Item C:\Windows\System32\where.exe "src-tauri\binaries\backend-$triple.exe" -Force
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --locked

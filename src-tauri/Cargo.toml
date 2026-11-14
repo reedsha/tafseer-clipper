@@ -1,0 +1,53 @@
+[package]
+name = "tafseer-clipper"
+version = "0.1.0"
+description = "Tafseer Clipper — Tauri v2 desktop shell for the FastAPI sidecar"
+authors = ["muham"]
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "tafseer_clipper_lib"
+# Desktop-only build. The template's mobile crate types (`staticlib`, `cdylib`)
+# are not needed here and `cdylib` fails to link with the MinGW toolchain
+# ("export ordinal too large"), so keep the plain Rust library the desktop
+# binary links against.
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+# Used by build.rs to embed the Common Controls v6 manifest into test binaries.
+tauri-winres = "0.3"
+
+[dependencies]
+# `protocol-asset` backs `convertFileSrc(...)` for lecture video / WAV playback in the renderer.
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-process = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-updater = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Optional GPU acceleration pack downloader: HTTPS via rustls, streaming
+# SHA-256 verification, async file I/O. No CUDA/GPU access from Rust.
+# `rustls-no-provider` reuses the ring crypto provider the updater plugin already
+# builds (reqwest 0.13's `rustls` feature would pull in aws-lc-rs).
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread"] }
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

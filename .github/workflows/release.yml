@@ -1,0 +1,98 @@
+name: Release
+
+# Tag a commit (e.g. `git tag v0.1.0 && git push --tags`) to build the signed
+# Windows installer + auto-updater artifacts and publish a draft GitHub Release.
+#
+# Required repository secrets (see docs/RELEASING.md):
+#   TAURI_SIGNING_PRIVATE_KEY            updater signing key (minisign, from `npx tauri signer generate`)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   password for that key (empty string if none)
+#   REQUIRE_CODE_SIGNING                 "1" to fail the build instead of shipping unsigned
+#   AZURE_TRUSTED_SIGNING_*  or  WINDOWS_CERT_PFX + WINDOWS_CERT_PASSWORD  or
+#   SIGNTOOL_PATH + WINDOWS_CERT_THUMBPRINT   (Authenticode credentials)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FFMPEG_URL: https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+  # The GPU acceleration pack is uploaded to the same GitHub release; the app
+  # looks it up at runtime. Override for a custom CDN (docs/GPU_PACK.md).
+  VITE_ACCEL_PACK_MANIFEST_URL: https://github.com/${{ github.repository }}/releases/latest/download/accel-manifest.json
+
+jobs:
+  release:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frozen sidecar (backend.exe)
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt pyinstaller
+          python -m PyInstaller --noconfirm --clean backend/build_sidecar.spec
+
+      - name: Download FFmpeg + stage external binaries
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri $env:FFMPEG_URL -OutFile ffmpeg.zip -UseBasicParsing
+          Expand-Archive ffmpeg.zip -DestinationPath C:\ffmpeg-ci -Force
+          $triple = "x86_64-pc-windows-msvc"
+          Copy-Item dist/backend.exe "src-tauri\binaries\backend-$triple.exe" -Force
+          Copy-Item C:\ffmpeg-ci\ffmpeg\bin\ffmpeg.exe "src-tauri\binaries\ffmpeg-$triple.exe" -Force
+          Copy-Item C:\ffmpeg-ci\ffmpeg\bin\ffprobe.exe "src-tauri\binaries\ffprobe-$triple.exe" -Force
+
+      - name: Build, sign and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          REQUIRE_CODE_SIGNING: "1"
+          AZURE_TRUSTED_SIGNING_METADATA: ${{ secrets.AZURE_TRUSTED_SIGNING_METADATA }}
+          AZURE_TRUSTED_SIGNING_DLIB: ${{ secrets.AZURE_TRUSTED_SIGNING_DLIB }}
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+          WINDOWS_CERT_THUMBPRINT: ${{ secrets.WINDOWS_CERT_THUMBPRINT }}
+          SIGNTOOL_PATH: ${{ secrets.SIGNTOOL_PATH }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Tafseer Clipper ${{ github.ref_name }}"
+          releaseBody: "See the release notes for details."
+          releaseDraft: true
+          prerelease: false
+          args: --bundles nsis
+
+      - name: Build GPU acceleration pack
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/build-accel-pack.ps1 -OutDir dist/accel -Python python
+
+      - name: Upload GPU acceleration pack to the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" "dist/accel/accel-manifest.json" --clobber
+          gh release upload "${{ github.ref_name }}" dist/accel/files/* --clobber

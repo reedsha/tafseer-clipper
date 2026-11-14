@@ -1,0 +1,82 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tafseer Clipper",
+  "mainBinaryName": "Tafseer Clipper",
+  "version": "0.1.0",
+  "identifier": "com.muham.tafseer-clipper",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "Tafseer Clipper",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 1024,
+        "minHeight": 700,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$LOCALDATA/**",
+          "$APPDATA/**",
+          "$HOME/**",
+          "$VIDEO/**",
+          "$DOCUMENT/**",
+          "$DOWNLOAD/**",
+          "$TEMP/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "externalBin": ["binaries/backend", "binaries/ffmpeg", "binaries/ffprobe"],
+    "createUpdaterArtifacts": true,
+    "publisher": "Tafseer Clipper",
+    "copyright": "Copyright Ac 2026 Tafseer Clipper",
+    "category": "Video",
+    "shortDescription": "Find, subtitle and export Tafseer lecture clips",
+    "longDescription": "A precision workstation for long-form Tafseer lectures: AI clip discovery, bilingual Thai/Arabic subtitle studio and GPU-accelerated batch export with burned-in dual-style subtitles.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "compression": "lzma"
+      },
+      "signCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File sign-windows.ps1 %1"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI3QjcxREJFNzIwQkUxQjcKUldTMzRRdHl2aDIzSjQyZlYzeEJzUHc2L0x4S2dNN2F3aXBhMlVPVTdCOTdpQWlrdEYwUEgzekYK",
+      "endpoints": [
+        "https://updates.tafseer-clipper.app/{{target}}/{{arch}}/{{current_version}}"
+      ]
+    }
+  }
+}

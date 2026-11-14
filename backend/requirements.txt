@@ -1,0 +1,24 @@
+# FastAPI sidecar dependencies (Phase 1).
+# Install with:  python -m pip install -r requirements.txt
+
+# --- Web layer ------------------------------------------------------------- #
+fastapi==0.162.7
+uvicorn[standard]==0.54.0
+pydantic==2.14.3
+python-multipart==0.0.33
+httpx==0.28.1
+
+# --- Fonts ----------------------------------------------------------------- #
+# Reads family/style names from .ttf/.otf for /fonts/import.
+fonttools==4.68.0
+
+# --- Local AI (optional GPU acceleration) ---------------------------------- #
+# Optional: cloud-only setups can skip this. GPU transcription is optional -
+# the CPU fallback works out of the box; the app installs the CUDA runtime pack
+# separately and passes its directory as TAFSEER_CUDA_DIR.
+faster-whisper>=1.1,<2
+# PyAV is a faster-whisper dependency, but it must be pinned: faster-whisper
+# 1.2.x calls `av.open(..., metadata_errors="ignore")`, which PyAV 17+ removed
+# (TypeError at the first real transcription). 16.1.0 is the newest release that
+# still accepts the argument.
+av==16.1.0
