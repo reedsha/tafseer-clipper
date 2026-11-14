@@ -721,11 +721,12 @@ Phase 5 (GitHub Settings checklist) is §8; the applied settings are §12.
 | Default branch | `main` |
 | Merge strategy | Squash (recommended; release-please is squash-friendly) |
 | Actions permissions | "Allow GitHub Actions to create and approve pull requests" |
-| Branch protection on `main` | PR required · approvals **0** (solo repo — the author cannot approve their own PR) · conversation resolution · linear history · **enforce admins** · **no force-pushes** · **no deletions** |
-| Required status checks | `Frontend (tsc, build, Playwright E2E)`, `Backend (Phase-1 E2E)`, `Tauri shell (cargo check + unit tests)`, and `Conventional Commit title` (added after the first merge, because `pull_request_target` only runs once the workflow exists on `main`) |
+| Branch protection on `main` | PR required · approvals **0** (solo repo — the author cannot approve their own PR) · conversation resolution · linear history · **enforce admins** · **no force-pushes** · **no deletions** · **strict up-to-date** |
+| Required status checks | `Frontend (tsc, build, Playwright E2E)`, `Backend (Phase-1 E2E)`, `Tauri shell (cargo check + unit tests)`, `Conventional Commit title` — **all four verified as reporting before being made required** |
 | `production` environment | Required reviewer: `reedsha` · wait 0 · all branches · `can_admins_bypass: true` · secrets: `TAURI_SIGNING_PRIVATE_KEY` |
 | `staging` environment | No reviewer, no wait, all branches |
-| Tag ruleset | `v*` — **deletion and update** restricted (an existing release tag can never be removed or re-pointed, which would break the updater manifest links). Repository admins bypass. Tag **creation** is deliberately *not* restricted: Release Please creates the tag with `GITHUB_TOKEN`, and a creation rule would block it. The control against an unauthorised *release* is the `production` environment gate instead — no release build can publish without a required reviewer's approval, so even a rogue tag cannot ship anything. |
+| Tag ruleset | `v*` — **deletion and update** restricted. Creation deliberately unrestricted (Release Please must create the tag); the `production` environment gate is what stops an unauthorised release from publishing. |
+| Dependabot | 4 ecosystems · grouped GitHub Actions (one PR for all action bumps) · `av` major bumps **ignored** (deliberate pin) · all commits prefixed `ci` |
 
 > **Why approvals are 0:** GitHub does not count the author's own approval. With 1 required
 > approval and no other collaborators, the sole owner could open pull requests but never merge
