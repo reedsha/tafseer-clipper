@@ -34,6 +34,16 @@ jobs:
   release:
     name: Build and publish Windows release
     runs-on: windows-latest
+    # The production environment is the release gate:
+    #   - a required reviewer must approve the deployment before this job runs;
+    #   - the updater signing key and the Authenticode credentials live in the
+    #     ENVIRONMENT (not at repository level), so they are only injected into
+    #     this job after that approval.
+    # The `staging` environment exists as the reserved non-production target
+    # (no reviewer, no wait timer); the draft GitHub Release produced by this
+    # workflow is the de-facto staging area until it is published.
+    environment:
+      name: production
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.4.0

@@ -173,15 +173,35 @@ warns, so development builds still work.
 
 ## 6. GitHub secrets for the release workflow
 
-| Secret | Purpose |
-|---|---|
-| `TAURI_SIGNING_PRIVATE_KEY` | updater key (minisign, from `tauri signer generate`) |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | password for that key (`""` if none) |
-| `AZURE_TRUSTED_SIGNING_METADATA` / `AZURE_TRUSTED_SIGNING_DLIB` | Azure Trusted Signing |
-| `WINDOWS_CERT_PFX` / `WINDOWS_CERT_PASSWORD` | PFX Authenticode signing (alternative) |
-| `SIGNTOOL_PATH` / `WINDOWS_CERT_THUMBPRINT` | certificate-store signing (alternative) |
+These live in the **`production` environment**, not at repository level, so
+they are only injected into the release job after a reviewer approves the
+deployment. Add them under
+**Settings → Environments → production → Environment secrets**.
 
-`REQUIRE_CODE_SIGNING=1` is set by the workflow itself.
+| Secret | Status | Purpose |
+|---|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | ✅ **set** | updater key (minisign) — the key content, base64-encoded |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | not needed | the current key is unencrypted; the Tauri CLI assumes an empty password in CI |
+| `AZURE_TRUSTED_SIGNING_METADATA` / `AZURE_TRUSTED_SIGNING_DLIB` | ❌ **missing** | Azure Trusted Signing (recommended) |
+| `WINDOWS_CERT_PFX` / `WINDOWS_CERT_PASSWORD` | ❌ **missing** | PFX Authenticode signing (alternative) |
+| `WINDOWS_CERT_THUMBPRINT` | ❌ **missing** | certificate-store signing (alternative) |
+| `SIGNTOOL_PATH` | optional | path to `signtool.exe` when it is not on `PATH` |
+
+`REQUIRE_CODE_SIGNING=1` is set by the workflow itself, so **the build fails
+rather than shipping an unsigned installer** while the Authenticode secrets
+are missing. That is intentional — add one of the three credential sets above
+before the first release.
+
+> **Note on the key format.** `TAURI_SIGNING_PRIVATE_KEY` must be the **base64
+> text** of the minisign key (exactly the contents of `.release-secrets/updater.key`).
+> The Tauri CLI base64-decodes the value before loading it; passing the decoded
+> "untrusted comment: …" text instead will fail with a key-parse error.
+>
+> **Note on rotating the key.** The key currently stored is the locally
+> generated development key. Rotate it before the first public release: generate
+> a new pair, commit only the new `plugins.updater.pubkey` in
+> `src-tauri/tauri.conf.json`, and update `TAURI_SIGNING_PRIVATE_KEY` in the
+> `production` environment.
 
 ## 7. Post-release
 
