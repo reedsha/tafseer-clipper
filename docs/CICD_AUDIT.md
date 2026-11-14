@@ -625,7 +625,7 @@ that is a code change, not a CI change, and was outside the approved scope.
   `src-tauri/binaries/*.exe`, no `.release-secrets/`.
 - The updater private key remains **only** in `.release-secrets/updater.key` (gitignored).
 
-### 11.7 Two real bugs found by the first-ever CI run
+### 11.7 Three real bugs found by the first-ever CI run
 
 Because the repository did not exist before this work, **no CI run had ever happened** on this
 codebase. The first run of the new `CI` workflow failed and exposed two genuine defects:
@@ -645,6 +645,46 @@ codebase. The first run of the new `CI` workflow failed and exposed two genuine 
 A third issue was also fixed proactively: five actions still targeted the deprecated Node.js 20
 runtime, so they were upgraded to their Node 24 majors (`checkout@v5`, `setup-node@v5`,
 `setup-python@v6`, `cache@v5`, `upload-artifact@v5`).
+
+3. **`CVTRES: fatal error CVT1100: duplicate resource. type:VERSION, name:1` → `LNK1123`**
+   (Tauri job — and it would have broken every MSVC *release* build, not just CI).
+
+   `embed_resource::compile()` (used inside `tauri-build`) links its resource into the
+   binaries with `cargo:rustc-link-arg-bins`, while
+   `tauri_winres::compile_for_everything()` links into every target with
+   `cargo:rustc-link-arg` — **and both write to the same `OUT_DIR/resource.rc`, producing the
+   same `OUT_DIR/resource.lib`**. The binaries therefore linked `resource.lib` twice, and a
+   resource library linked twice is duplicated *inside* the binary.
+
+   The GNU toolchain tolerates that; MSVC's CVTRESS pipeline rejects it. Because the project
+   had only ever been built with GNU/MinGW locally, the defect was invisible.
+
+   **Fixed in `src-tauri/build.rs` / `src-tauri/Cargo.toml`:** `build.rs` now compiles its
+   *own* second resource file (`tafseer_manifest.rc`) containing **only** the manifest —
+   no `VERSIONINFO` block — under a different name, via the `embed-resource` crate, which is
+   now a direct build dependency. Each target then links each resource exactly once, and the
+   resource ids do not collide (VERSION = type 16, manifest = type 24).
+
+   **Verified locally, both toolchains** (Visual Studio 2022 MSVC **and** MinGW):
+
+   | Check | Result |
+   |---|---|
+   | `cargo +stable-x86_64-pc-windows-msvc test --locked` | **11 passed**, no `CVT1100` |
+   | `cargo test` (GNU/MinGW) | **11 passed** |
+   | app binary `tafseer-clipper.exe` | `Common-Controls` manifest present (UTF-8) · `VS_VERSION_INFO` present (UTF-16) |
+   | unit-test binary | `Common-Controls` manifest present — the original design goal survived |
+   | generated `resource.rc` / `tafseer_manifest.rc` | one has `VERSIONINFO` only, the other has the manifest only |
+
+   This bug was **found** because the pipeline finally ran. It had been shipped silently in
+   the source tree.
+
+### Ledger of CI-discovered defects
+
+| # | Symptom | Root cause | Status |
+|---|---|---|---|
+| 1 | `ModuleNotFoundError: No module named 'PIL'` | `pillow`/`numpy` used by `test_phase1_e2e.py` but never declared | ✅ fixed |
+| 2 | `Multiple versions of pnpm specified` | `packageManager` in `package.json` **and** a `version:` input | ✅ fixed |
+| 3 | `CVT1100 duplicate resource` → `LNK1123` | `resource.rc` written twice → same `.lib` linked twice | ✅ fixed, verified on MSVC + GNU |
 
 ### 11.8 Release-blocker closure
 

@@ -22,6 +22,12 @@ crate-type = ["rlib"]
 tauri-build = { version = "2", features = [] }
 # Used by build.rs to embed the Common Controls v6 manifest into test binaries.
 tauri-winres = "0.3"
+# Used directly by build.rs to compile a manifest-only resource file. It is
+# already in the tree through tauri-winres, but it has to be a direct
+# dependency: the helper wrapper always writes to OUT_DIR/resource.rc, which is
+# the same file (and therefore the same .lib) that tauri-build compiles. See
+# the long comment in build.rs.
+embed-resource = "3.0.12"
 
 [dependencies]
 # `protocol-asset` backs `convertFileSrc(...)` for lecture video / WAV playback in the renderer.
