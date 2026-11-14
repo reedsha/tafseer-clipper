@@ -685,7 +685,7 @@ Phase 5 (GitHub Settings checklist) is §8; the applied settings are §12.
 | Required status checks | `Frontend (tsc, build, Playwright E2E)`, `Backend (Phase-1 E2E)`, `Tauri shell (cargo check + unit tests)`, and `Conventional Commit title` (added after the first merge, because `pull_request_target` only runs once the workflow exists on `main`) |
 | `production` environment | Required reviewer: `reedsha` · wait 0 · all branches · `can_admins_bypass: true` · secrets: `TAURI_SIGNING_PRIVATE_KEY` |
 | `staging` environment | No reviewer, no wait, all branches |
-| Tag ruleset | `v*` — creation restricted, repository admins bypass |
+| Tag ruleset | `v*` — **deletion and update** restricted (an existing release tag can never be removed or re-pointed, which would break the updater manifest links). Repository admins bypass. Tag **creation** is deliberately *not* restricted: Release Please creates the tag with `GITHUB_TOKEN`, and a creation rule would block it. The control against an unauthorised *release* is the `production` environment gate instead — no release build can publish without a required reviewer's approval, so even a rogue tag cannot ship anything. |
 
 > **Why approvals are 0:** GitHub does not count the author's own approval. With 1 required
 > approval and no other collaborators, the sole owner could open pull requests but never merge
