@@ -435,9 +435,26 @@ The previous contents were signed by the pre-rotation key and are now **obsolete
 |---|---|
 | Installer | `Tafseer Clipper_0.1.0_x64-setup.exe` — 170,841,743 B (162.9 MiB), **unsigned** (Authenticode still absent, by design) |
 | Updater signature | `.sig` names `file:Tafseer Clipper_0.1.0_x64-setup.exe` + `version:0.1.0`, produced by the `DCC8B926EA9F6F2B` key generation ✅ |
-| `SHA256SUMS.txt` | **3/3 match** (installer, `backend.exe`, `accel/accel-manifest.json`) |
+| `SHA256SUMS.txt` | **3/3 match** — installer `DBED6DE7…`, `backend.exe` `4040F448…`, `accel/accel-manifest.json` `216D6492…` |
 | `latest.json` | carries the same signature as the `.sig`; URL points at the `v0.1.0` release asset |
 | GPU pack manifest | carried forward from the previous build — the pack is **versioned independently** of the app (`cuda12.9.79-cudnn9.28.1.4`, 18 files, 2.1 GB) per `docs/GPU_PACK.md:161` |
+
+**Correction to this section's first draft (kept visible on purpose).** The rebuild initially left a
+**stale `backend.exe`** in `release/0.1.0/`: `scripts/build-release.ps1` stages the frozen sidecar
+into `src-tauri/binaries/`, and `tauri build` then runs `npm run build`, which **wipes `dist/`** — so
+a copy step keyed on `dist/backend.exe` silently found nothing and the pre-fix sidecar from
+2026-11-14 survived. It was caught by comparing the file's timestamp against the fix's merge time,
+and fixed by copying the sidecar that is actually bundled
+(`src-tauri/binaries/backend-x86_64-pc-windows-gnu.exe`, built 05:36, after the 05:34 merge).
+The checksums above reflect the corrected set.
+
+**One thing this section cannot claim.** The frozen sidecar could not be *executed* from the agent
+shell used for this work: all three frozen builds (including the pre-fix ones) abort with
+`[PYI-…:ERROR] Could not create temporary directory!`, and a minimal PyInstaller onefile build from
+the same venv fails with `PermissionError` writing its spec file. That points at a restriction in
+that shell rather than at the artifact, so **no claim is made here about the frozen payload's
+runtime behaviour**. `scripts/smoke-installer.ps1` must be run from a normal terminal — it is the
+first item in §9.5.
 
 **What this does and does not mean.** The signing *chain* is now internally consistent: a build
 produced today verifies against the key `tauri.conf.json` advertises. It is still an **unsigned
@@ -447,3 +464,20 @@ GitHub Release has been published. That is the intended `G-E-internal` state, no
 **Anyone holding an installer from the old `release/0.1.0/` must reinstall** from this build: the
 old artifacts cannot be verified against the current key, and they contain the GPU defect fixed
 in §9.1.
+
+### 9.5 What remains, and exactly how to close it
+
+Every remaining item needs a normal interactive Windows session — none can be driven from an
+agent shell.
+
+| # | Action | Command | Closes |
+|---|---|---|---|
+| 1 | Packaged payload smoke (silent install → installed sidecar `/health` with the **bundled** ffmpeg → clean shutdown → uninstall) | `powershell -ExecutionPolicy Bypass -File scripts/smoke-installer.ps1` | part of BL-5 |
+| 2 | Same, plus the real window (`-TryGui`; SKIPs if the session cannot create a webview) | `… smoke-installer.ps1 -TryGui` | part of BL-5 |
+| 3 | Full frozen-sidecar self-test | `py -3.12 backend/smoke_frozen.py` | confidence in the frozen payload |
+| 4 | Walk `docs/RELEASE_CHECKLIST.md` §0/§1/§1b/§2–§9 on a clean Windows 11 VM | manual | **BL-5 (61 items)** |
+| 5 | Install the built installer on this machine and re-run the transcribe step once **without** the pack and once **with** it | manual | **G-C on packaged hardware** |
+| 6 | Authenticode credential, if a public release is wanted | Azure Trusted Signing / PFX / thumbprint → `production` environment | **BL-3** |
+
+Items 1–3 are the fastest signal: if the frozen sidecar starts and answers `/health` with the
+bundled ffmpeg, the packaging path is sound and only the interactive wizard walkthrough remains.
