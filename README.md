@@ -68,3 +68,13 @@ No GPU model names or VRAM requirements are part of the UI; the app reports
 GPU/CPU state and the CPU fallback explicitly. Pack contents, hosting and
 security are documented in [`docs/GPU_PACK.md`](docs/GPU_PACK.md).
 
+## License
+
+Source code: [MIT](LICENSE).
+
+Note that the **bundled FFmpeg binaries are GPL v3**, so an installer containing
+them carries the GPL's obligations regardless of the MIT license on this source.
+The optional GPU acceleration pack and the Whisper model weights are downloaded
+at runtime under their own (non-MIT) terms. Full inventory:
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
