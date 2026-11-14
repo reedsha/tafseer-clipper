@@ -1,4 +1,4 @@
-﻿name: Release
+name: Release
 
 # Build the signed Windows installer + auto-updater artifacts and attach them
 # to the draft release for the pushed tag.
@@ -60,7 +60,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # No `version` input on purpose: pnpm/action-setup reads the
       # `packageManager` field from package.json, which is the single source
       # of truth for the pnpm version. Passing both makes the action fail with

@@ -1,4 +1,4 @@
-﻿name: Release Please
+name: Release Please
 
 # Keeps the version and CHANGELOG.md in sync with the commit history.
 #
@@ -34,7 +34,7 @@ jobs:
     name: Update version and changelog
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Release Please needs the full history and all tags to compute the
           # changelog and the next version.
