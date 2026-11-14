@@ -422,6 +422,28 @@ Applied after the report, on explicit instruction. This section supersedes the c
 | Blocker | State |
 |---|---|
 | BL-3 Authenticode credential | Open — publishing stays blocked by design |
-| BL-4 artifacts signed with the pre-rotation key | Open — needs a rebuild (Stream 4) |
+| BL-4 artifacts signed with the pre-rotation key | **FIXED (Stream 4)** — see §9.4 |
 | BL-5 the 61-item clean-VM gate | Open — human walkthrough |
 | BL-6 Dependabot queue | Open — your review |
+
+### 9.4 Rebuilt artifacts (Stream 4, 2026-11-15)
+
+`release/0.1.0/` was replaced with a fresh local build (`scripts/build-release.ps1 -SkipSigning`).
+The previous contents were signed by the pre-rotation key and are now **obsolete**.
+
+| Check | Result |
+|---|---|
+| Installer | `Tafseer Clipper_0.1.0_x64-setup.exe` — 170,841,743 B (162.9 MiB), **unsigned** (Authenticode still absent, by design) |
+| Updater signature | `.sig` names `file:Tafseer Clipper_0.1.0_x64-setup.exe` + `version:0.1.0`, produced by the `DCC8B926EA9F6F2B` key generation ✅ |
+| `SHA256SUMS.txt` | **3/3 match** (installer, `backend.exe`, `accel/accel-manifest.json`) |
+| `latest.json` | carries the same signature as the `.sig`; URL points at the `v0.1.0` release asset |
+| GPU pack manifest | carried forward from the previous build — the pack is **versioned independently** of the app (`cuda12.9.79-cudnn9.28.1.4`, 18 files, 2.1 GB) per `docs/GPU_PACK.md:161` |
+
+**What this does and does not mean.** The signing *chain* is now internally consistent: a build
+produced today verifies against the key `tauri.conf.json` advertises. It is still an **unsigned
+internal build** — Windows SmartScreen will warn on any machine that did not build it, and no
+GitHub Release has been published. That is the intended `G-E-internal` state, not `G-E-signed`.
+
+**Anyone holding an installer from the old `release/0.1.0/` must reinstall** from this build: the
+old artifacts cannot be verified against the current key, and they contain the GPU defect fixed
+in §9.1.

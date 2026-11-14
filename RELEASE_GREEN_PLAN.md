@@ -217,7 +217,7 @@ an explicit instruction.
 | 2 | S-2.5 GPU fallback regression test | **DONE** — 2 new checks; suite is 42/42 | — | — |
 | 3 | S-3.1 clippy/fmt gates | Optional · still blocked | — | ? |
 | 3 | S-3.2 docs nit | DONE — folded into this change set | — | — |
-| 4 | S-4.1 internal rebuild | TODO — next, after this merges | — | me |
+| 4 | S-4.1 internal rebuild | **DONE** — fresh build, signing chain verified against `DCC8B926EA9F6F2B`, 3/3 checksums | — | — |
 | 4 | S-4.2 signed release | Optional | — | you |
 | 5 | S-5 Dependabot merge batch | TODO — do after S-1 lands on main | — | you |
 | 6 | S-6.1 artifacts check | TODO | after S-4 | me |
