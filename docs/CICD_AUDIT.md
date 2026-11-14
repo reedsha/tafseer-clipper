@@ -561,8 +561,8 @@ against `reedsha/tafseer-clipper` (public).
 
 | Kind | Files |
 |---|---|
-| **New (10)** | `.gitattributes` · `.nvmrc` · `.python-version` · `src-tauri/rust-toolchain.toml` · `.github/workflows/pr-title-lint.yml` · `.github/workflows/release-please.yml` · `release-please-config.json` · `.release-please-manifest.json` · `CHANGELOG.md` · `docs/CICD_AUDIT.md` |
-| **Modified (9)** | `.gitignore` · `package.json` · `.github/workflows/ci.yml` · `.github/workflows/release.yml` · `src-tauri/tauri.conf.json` · `backend/config.py` · `README.md` · `docs/RELEASING.md` · `AGENTS.md` |
+| **New (12)** | `.gitattributes` · `.nvmrc` · `.python-version` · `src-tauri/rust-toolchain.toml` · `.github/workflows/pr-title-lint.yml` · `.github/workflows/release-please.yml` · `.github/actions/setup-ffmpeg/action.yml` · `.github/dependabot.yml` · `release-please-config.json` · `.release-please-manifest.json` · `CHANGELOG.md` · `docs/CICD_AUDIT.md` |
+| **Modified (10)** | `.gitignore` · `package.json` · `backend/requirements.txt` · `.github/workflows/ci.yml` · `.github/workflows/release.yml` · `src-tauri/tauri.conf.json` · `backend/config.py` · `README.md` · `docs/RELEASING.md` · `AGENTS.md` |
 
 ### 11.2 Two integration hazards found and resolved by inspection (not assumption)
 
@@ -625,20 +625,68 @@ that is a code change, not a CI change, and was outside the approved scope.
   `src-tauri/binaries/*.exe`, no `.release-secrets/`.
 - The updater private key remains **only** in `.release-secrets/updater.key` (gitignored).
 
-### 11.7 Residual risks carried forward
+### 11.7 Two real bugs found by the first-ever CI run
+
+Because the repository did not exist before this work, **no CI run had ever happened** on this
+codebase. The first run of the new `CI` workflow failed and exposed two genuine defects:
+
+1. **`ModuleNotFoundError: No module named 'PIL'`** (Backend job) —
+   `backend/test_phase1_e2e.py:51` imports `PIL` and `:50` imports `numpy`, but neither was
+   declared in `backend/requirements.txt`. It only ever worked locally because Pillow 13.0.0
+   happened to be installed in the developer's environment. **Fixed**: `pillow==13.0.0` and
+   `numpy==2.5.3` are now declared (NumPy is also transitive via onnxruntime, but it is imported
+   directly so it must be declared).
+2. **`Error: Multiple versions of pnpm specified:`** (Frontend + Tauri jobs) — introduced by
+   this very change set: `pnpm/action-setup` was given a `version: 11` input *while*
+   `package.json` gained a `packageManager` field, and the action refuses to guess.
+   **Fixed**: the `version` input was removed so `packageManager` is the single source of truth.
+   Verified locally: `corepack pnpm --version` → `11.28.12`, `pnpm install --frozen-lockfile` → exit 0.
+
+A third issue was also fixed proactively: five actions still targeted the deprecated Node.js 20
+runtime, so they were upgraded to their Node 24 majors (`checkout@v5`, `setup-node@v5`,
+`setup-python@v6`, `cache@v5`, `upload-artifact@v5`).
+
+### 11.8 Release-blocker closure
+
+| Risk | Status |
+|---|---|
+| **R1** — updater key rotation | ✅ **Closed.** A new minisign keypair was generated, `plugins.updater.pubkey` in `src-tauri/tauri.conf.json` was updated, and the `production` environment secret was replaced. The old key was a password-less dev key that had never been published. |
+| **R3** — updater hosting URL was a placeholder | ✅ **Closed.** `plugins.updater.endpoints` now points at `https://github.com/reedsha/tafseer-clipper/releases/latest/download/latest.json`, which is where `tauri-action` uploads the manifest. The updater works without any self-hosted CDN. |
+| **A9** — no `concurrency` on the release workflow | ✅ Closed (`release-${{ github.ref }}`, no cancel). |
+| **A12** — FFmpeg downloaded without checksum verification | ✅ Closed. Pinned to the versioned build `ffmpeg-9.0.2-essentials_build.zip` and verified against gyan.dev's published SHA-256 **before** it is executed, in a shared composite action. |
+| **A14** — `SHA256SUMS.txt` not generated in CI | ✅ Closed. Generated and uploaded to the release. |
+| **A15** — no build provenance attestation | ✅ Closed (`actions/attest-build-provenance`, with `id-token: write` + `attestations: write`). |
+| **A16** — no Dependabot | ✅ Closed (`.github/dependabot.yml`, four ecosystems). |
+| **R2** — Authenticode credentials missing | ⛔ **Still open — only the owner can close this.** It requires obtaining a code-signing certificate (Azure Trusted Signing, a PFX, or a certificate-store thumbprint). `REQUIRE_CODE_SIGNING=1` already fails the build rather than shipping an unsigned installer. |
+| **R4** — release pipeline never executed in CI | ⛔ Still open until the first tagged release. |
+
+### 11.9 Residual risks carried forward
 
 | # | Risk | Status |
 |---|---|---|
-| R1 | Updater key rotation still pending | **Open** — must happen before the first public release |
-| R2 | Authenticode credentials not configured | **Open** — `REQUIRE_CODE_SIGNING=1` already fails the build without them |
-| R3 | Updater hosting URL is a placeholder | **Open** — `latest.json` must be served from a real host |
-| R4 | The release pipeline has never executed in CI | **Open** — now possible: dispatch `release.yml` on a throwaway tag to prove it |
-| — | FFmpeg is still downloaded without checksum verification (A12) | **Open** — deferred to a follow-up PR |
-| — | No build provenance attestation, no CI-generated `SHA256SUMS.txt` (A14, A15) | **Open** — deferred |
-| — | `release.yml` has no `concurrency` block (A9) | **Open** — deferred |
-| — | No `dependabot.yml` (A16) | **Open** — deferred |
+| — | FFmpeg is pinned to 9.0.2; a newer upstream release needs the URL + SHA-256 bumped | Open (Deliberate: a pinned dependency is the point) |
+| — | `cargo clippy` / `cargo fmt` are not gated (they fail on pre-existing code) | Open — needs a source-cleanup change |
+| — | `PR Title Lint` uses `pull_request_target`, so it only starts running once the workflow exists on `main` | Open by design — it must be added to the required checks *after* the first merge |
+| — | Branch protection had no required status checks and allowed force-pushes | Closed via the API (see §12) |
 
 ---
 
-**End of report.** Phases 1–4 are complete; the change set is on `chore/cicd-pipeline` awaiting
-the pull request. Phase 5 (GitHub Settings checklist) is §8 above.
+**End of report.** Phases 1–4 are complete; the change set is on `chore/cicd-pipeline` (PR #1).
+Phase 5 (GitHub Settings checklist) is §8; the applied settings are §12.
+
+## 12. Applied GitHub Settings
+
+| Setting | Value |
+|---|---|
+| Default branch | `main` |
+| Merge strategy | Squash (recommended; release-please is squash-friendly) |
+| Actions permissions | "Allow GitHub Actions to create and approve pull requests" |
+| Branch protection on `main` | PR required · approvals **0** (solo repo — the author cannot approve their own PR) · conversation resolution · linear history · **enforce admins** · **no force-pushes** · **no deletions** |
+| Required status checks | `Frontend (tsc, build, Playwright E2E)`, `Backend (Phase-1 E2E)`, `Tauri shell (cargo check + unit tests)`, and `Conventional Commit title` (added after the first merge, because `pull_request_target` only runs once the workflow exists on `main`) |
+| `production` environment | Required reviewer: `reedsha` · wait 0 · all branches · `can_admins_bypass: true` · secrets: `TAURI_SIGNING_PRIVATE_KEY` |
+| `staging` environment | No reviewer, no wait, all branches |
+| Tag ruleset | `v*` — creation restricted, repository admins bypass |
+
+> **Why approvals are 0:** GitHub does not count the author's own approval. With 1 required
+> approval and no other collaborators, the sole owner could open pull requests but never merge
+> them. Raise it to 1 once a second person has access.

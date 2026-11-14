@@ -12,6 +12,15 @@ httpx==0.28.1
 # Reads family/style names from .ttf/.otf for /fonts/import.
 fonttools==4.68.0
 
+# --- Test harness (backend/test_phase1_e2e.py) ------------------------------ #
+# The Phase-1 E2E suite compares rendered frames pixel by pixel, so it imports
+# Pillow and NumPy directly. NumPy is also pulled in transitively by
+# onnxruntime (via faster-whisper), but because it is imported directly it has
+# to be declared here - otherwise the suite fails with ModuleNotFoundError on
+# a clean CI runner.
+pillow==13.0.0
+numpy==2.5.3
+
 # --- Local AI (optional GPU acceleration) ---------------------------------- #
 # Optional: cloud-only setups can skip this. GPU transcription is optional -
 # the CPU fallback works out of the box; the app installs the CUDA runtime pack
