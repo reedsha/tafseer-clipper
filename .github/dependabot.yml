@@ -1,18 +1,26 @@
 # Keeps the third-party dependencies and GitHub Actions up to date.
 #
 # Each ecosystem gets its own schedule so a noisy Python bump never delays a
-# security-critical action bump.
+# security-critical action bump. Every commit is prefixed `ci` because the
+# workflows are only ever changed by this bot and Conventional Commit titles
+# are enforced by the PR Title Lint check.
 
 version: 2
 
 updates:
-  # GitHub Actions - pin the SHAs the workflows actually use.
+  # GitHub Actions - the workflows pin actions to commit SHAs, so every bump is
+  # a SHA rewrite that has to be reviewed together. Group them into one pull
+  # request instead of one per action, and poll more often than the code.
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
     commit-message:
       prefix: "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
 
   # Frontend - pnpm lockfile.
   - package-ecosystem: npm
@@ -37,3 +45,12 @@ updates:
       interval: weekly
     commit-message:
       prefix: "ci"
+    ignore:
+      # PyAV is deliberately pinned: faster-whisper 1.2.x calls
+      # av.open(..., metadata_errors="ignore"), which PyAV 17+ removed, so a
+      # major bump breaks transcription on the first real transcription. The
+      # rationale sits next to the pin in backend/requirements.txt - change it
+      # there, do not let a bot override it. Patch and minor updates stay
+      # enabled.
+      - dependency-name: "av"
+        update-types: ["version-update:semver-major"]

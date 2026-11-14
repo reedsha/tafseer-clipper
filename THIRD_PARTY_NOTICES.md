@@ -3,6 +3,10 @@
 Tafseer Clipper v0.1.0 bundles or depends on the following third-party software.
 This file is bundled with the installer (`resources/THIRD_PARTY_NOTICES.md`).
 
+Tafseer Clipper's own source code is licensed under the **MIT** license (see
+`LICENSE`). That license does not extend to the components below, each of which
+keeps its own terms.
+
 ## Bundled binaries
 
 ### FFmpeg (`ffmpeg.exe`, `ffprobe.exe`)
