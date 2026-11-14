@@ -53,7 +53,8 @@ does not cover the product/UI audit (`AUDIT_REPORT.md`) or the CI/CD architectur
 > issue: a real failure turns into a truncated run rather than a red-but-complete one.
 
 CI independently confirms 1–3 and 5 on runners (`Frontend`, `Tauri shell`, and `PR Title Lint`
-all green; `Backend` green *only* where the machine has no NVIDIA GPU — see §2.4).
+all green on every PR head that reached `main`; `Backend` green *only* where the machine has no
+NVIDIA GPU — see §2.4).
 
 ### 1.6 Finding: two of the 11 Rust tests are flaky — and it is recurring
 
@@ -80,11 +81,13 @@ Both tests stand up an in-process HTTP server on an OS-assigned port and both ca
 their own fixture. The identical commit went red, then green, so this is confirmed behaviour rather
 than a suspected one.
 
-**It is also loading-correlated, not random.** The four failures cluster at `19:58:4x` — the same
-minute Dependabot opened five pull requests and five CI runs went out together — plus `20:04` and
-`20:06`, again concurrent. The three runs that passed were the ones that ran essentially alone.
-Not proven as cause (separate machines), but the correlation explains the jump from a rare flake
-to something that fires most of the time.
+**No reliable trigger can be found, and my first hypothesis was wrong.** I suspected concurrency,
+because three flakes land in the same minute as a Dependabot five-PR burst. But **six other runs
+passed in that same 19:58:34–19:58:53 window** (`amannn/action-semantic-pull-request`,
+`upload-artifact`, `setup-node`, `sha2`, `attest-build-provenance`, `faster-whisper` — all green),
+while four failed beside them. Concurrency, runner load and branch content are therefore all
+**unsupported** explanations. What is established is narrower: two tests, four attempts, one
+re-run green on an identical commit — a genuinely timing-dependent race with no identified trigger.
 
 Consequences:
 
@@ -361,8 +364,8 @@ and the release-safety controls (environment gate, protected branch, immutable t
 
 Verified red or unverified: **GPU→CPU fallback (hard failure, 500, contract violation, invisible to
 CI)**, the backend suite that detects it, the signing chain's key identity, a release pipeline that
-has never executed, **all 61** packaged-gate items, and **a flaky required check** whose red-light
-can mean timing race rather than defect.
+has never executed, **all 61** packaged-gate items, and **two flaky required checks** (§1.6) whose
+red-light can mean timing race rather than defect.
 
 The two systems most shifted by this work — "is CI green?" and "is the matrix green?" — answer
 *"yes"* on a machine where the primary transcribe call returns HTTP 500 (§2.4), while the reverse
