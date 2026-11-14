@@ -15,9 +15,17 @@ does not cover the product/UI audit (`AUDIT_REPORT.md`) or the CI/CD architectur
 
 ## 0. Verdict
 
-> **Updated 2026-11-15 after remediation — see §9.** The product defect (BL-1), the aborting
-> harness (BL-2) and the flaky gate (BL-7) are **fixed and verified**. What remains is process:
-> signing credentials, a rebuilt artifact, the 61-item VM gate, and the dependency queue.
+> **Updated 2026-11-15 after remediation — see §9.**
+>
+> **Closed:** the product defect (BL-1), the aborting harness (BL-2), the flaky gate (BL-7), the
+> stale signing chain (BL-4) and the dependency queue (BL-6).
+>
+> **Open:** Authenticode credentials (BL-3 — deliberately blocks publishing), the 61-item clean-VM
+> gate (BL-5), and the frozen-payload smoke test, which cannot be run from an agent shell (§9.5).
+>
+> State of the five green gates: **G-A ✅ · G-B ✅ · G-C ✅ on native Python, packaged pending §9.5**
+> · G-D open · G-E ✅ internal-unsigned, signed variant needs BL-3.
+>
 > The table below is the **original** measurement and is kept as the record.
 
 **NOT RELEASE READY — 1 product defect, 1 unstable required gate, 0/61 of the packaged gate.**
@@ -423,8 +431,24 @@ Applied after the report, on explicit instruction. This section supersedes the c
 |---|---|
 | BL-3 Authenticode credential | Open — publishing stays blocked by design |
 | BL-4 artifacts signed with the pre-rotation key | **FIXED (Stream 4)** — see §9.4 |
-| BL-5 the 61-item clean-VM gate | Open — human walkthrough |
-| BL-6 Dependabot queue | Open — your review |
+| BL-5 the 61-item clean-VM gate | Open — human walkthrough (§9.5) |
+| BL-6 Dependabot queue | **CLOSED** — `#5`, `#8`, `#10`, `#14` merged; `#11` green but held by judgement; `#18` (release 0.1.1) awaiting your decision |
+
+### 9.6 Final verification on the merged `main` (564b60f)
+
+Re-run after every dependency PR landed, on the merged tree rather than a branch:
+
+| Check | Result |
+|---|---|
+| `backend/test_phase1_e2e.py` | **42/42**, exit 0 |
+| `cargo test --locked` (with `sha2` 0.11) | **11 passed** |
+| `pnpm build` (`tsc && vite build`) | built in 879 ms |
+| Local Python env | aligned to the merged `requirements.txt` (`numpy` 2.5.4, `pillow` 13.0.0, `av` 16.1.0) |
+
+Two dependency PRs deserve a note because they were previously *red for the flake*, not for their
+content: `#5` (numpy) and `#11` (TypeScript 7) both went green once their branches picked up the
+`acceleration.rs` fix — same tests, same runners, no other change. That is the clearest available
+proof that BL-7 was a test defect and not a product one.
 
 ### 9.4 Rebuilt artifacts (Stream 4, 2026-11-15)
 
