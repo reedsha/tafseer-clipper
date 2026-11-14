@@ -20,7 +20,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # gyan.dev "essentials" FFmpeg build (GPL, includes libx264 + ffprobe).
-  FFMPEG_URL: https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+  # Pinned to a specific version - never the moving "release" URL - and
+  # verified against gyan.dev's published SHA-256 before it is used.
+  FFMPEG_URL: https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.2-essentials_build.zip
+  FFMPEG_SHA256: 60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba
 
 jobs:
   frontend:
@@ -44,20 +47,12 @@ jobs:
         run: |
           pnpm exec tsc --noEmit
           pnpm build
-      - name: Cache FFmpeg
-        id: ffmpeg-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - name: Setup FFmpeg
+        id: ffmpeg
+        uses: ./.github/actions/setup-ffmpeg
         with:
-          path: C:\ffmpeg-ci
-          key: ffmpeg-essentials-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
-      - name: Install FFmpeg
-        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri $env:FFMPEG_URL -OutFile ffmpeg.zip -UseBasicParsing
-          Expand-Archive ffmpeg.zip -DestinationPath C:\ffmpeg-ci -Force
-          Get-ChildItem C:\ffmpeg-ci -Recurse -Filter ffmpeg.exe | Select-Object -First 1 -ExpandProperty DirectoryName |
-            Out-File -Encoding utf8 C:\ffmpeg-bin.txt
+          ffmpeg-url: ${{ env.FFMPEG_URL }}
+          ffmpeg-sha256: ${{ env.FFMPEG_SHA256 }}
       - name: Install backend deps for E2E (no faster-whisper needed)
         shell: pwsh
         run: |
@@ -68,15 +63,9 @@ jobs:
         shell: pwsh
         env:
           PYTHON_BIN: python
-          TAFSEER_FFMPEG: C:\ffmpeg-ci\ffmpeg\bin\ffmpeg.exe
-          TAFSEER_FFPROBE: C:\ffmpeg-ci\ffmpeg\bin\ffprobe.exe
-        run: |
-          if (-not (Test-Path $env:TAFSEER_FFMPEG)) {
-            $dir = Get-ChildItem C:\ffmpeg-ci -Recurse -Filter ffmpeg.exe | Select-Object -First 1 -ExpandProperty DirectoryName
-            "TAFSEER_FFMPEG=$dir\ffmpeg.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-            "TAFSEER_FFPROBE=$dir\ffprobe.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          }
-          pnpm exec playwright test
+          TAFSEER_FFMPEG: ${{ steps.ffmpeg.outputs.ffmpeg-dir }}\ffmpeg.exe
+          TAFSEER_FFPROBE: ${{ steps.ffmpeg.outputs.ffmpeg-dir }}\ffprobe.exe
+        run: pnpm exec playwright test
       - name: Upload Playwright report
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -95,26 +84,19 @@ jobs:
           python-version: "3.12"
       - name: Install backend deps
         run: python -m pip install --disable-pip-version-check -r backend/requirements.txt
-      - name: Cache FFmpeg
-        id: ffmpeg-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - name: Setup FFmpeg
+        id: ffmpeg
+        uses: ./.github/actions/setup-ffmpeg
         with:
-          path: C:\ffmpeg-ci
-          key: ffmpeg-essentials-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
-      - name: Install FFmpeg
-        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri $env:FFMPEG_URL -OutFile ffmpeg.zip -UseBasicParsing
-          Expand-Archive ffmpeg.zip -DestinationPath C:\ffmpeg-ci -Force
+          ffmpeg-url: ${{ env.FFMPEG_URL }}
+          ffmpeg-sha256: ${{ env.FFMPEG_SHA256 }}
       - name: Run Phase-1 E2E
         shell: pwsh
-        run: |
-          $dir = Get-ChildItem C:\ffmpeg-ci -Recurse -Filter ffmpeg.exe | Select-Object -First 1 -ExpandProperty DirectoryName
-          $env:TAFSEER_FFMPEG = "$dir\ffmpeg.exe"
-          $env:TAFSEER_FFPROBE = "$dir\ffprobe.exe"
-          $env:PYTHONIOENCODING = "utf-8"
-          python backend/test_phase1_e2e.py
+        env:
+          TAFSEER_FFMPEG: ${{ steps.ffmpeg.outputs.ffmpeg-dir }}\ffmpeg.exe
+          TAFSEER_FFPROBE: ${{ steps.ffmpeg.outputs.ffmpeg-dir }}\ffprobe.exe
+          PYTHONIOENCODING: "utf-8"
+        run: python backend/test_phase1_e2e.py
 
   tauri-check:
     name: Tauri shell (cargo check + unit tests)
@@ -139,22 +121,20 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build frontend dist
         run: pnpm build
-      - name: Cache FFmpeg
-        id: ffmpeg-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - name: Setup FFmpeg
+        id: ffmpeg
+        uses: ./.github/actions/setup-ffmpeg
         with:
-          path: C:\ffmpeg-ci
-          key: ffmpeg-essentials-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          ffmpeg-url: ${{ env.FFMPEG_URL }}
+          ffmpeg-sha256: ${{ env.FFMPEG_SHA256 }}
       - name: Stage external binaries (real FFmpeg, placeholder sidecar for check)
         shell: pwsh
+        env:
+          FFMPEG_DIR: ${{ steps.ffmpeg.outputs.ffmpeg-dir }}
         run: |
-          if (-not (Test-Path C:\ffmpeg-ci\ffmpeg\bin\ffmpeg.exe)) {
-            Invoke-WebRequest -Uri $env:FFMPEG_URL -OutFile ffmpeg.zip -UseBasicParsing
-            Expand-Archive ffmpeg.zip -DestinationPath C:\ffmpeg-ci -Force
-          }
           $triple = "x86_64-pc-windows-msvc"
-          Copy-Item C:\ffmpeg-ci\ffmpeg\bin\ffmpeg.exe "src-tauri\binaries\ffmpeg-$triple.exe" -Force
-          Copy-Item C:\ffmpeg-ci\ffmpeg\bin\ffprobe.exe "src-tauri\binaries\ffprobe-$triple.exe" -Force
+          Copy-Item "$env:FFMPEG_DIR\ffmpeg.exe" "src-tauri\binaries\ffmpeg-$triple.exe" -Force
+          Copy-Item "$env:FFMPEG_DIR\ffprobe.exe" "src-tauri\binaries\ffprobe-$triple.exe" -Force
           # tauri-build requires every externalBin to exist; the real backend.exe
           # is produced by the release workflow, cargo check only needs a file.
           Copy-Item C:\Windows\System32\where.exe "src-tauri\binaries\backend-$triple.exe" -Force

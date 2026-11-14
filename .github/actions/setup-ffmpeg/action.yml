@@ -1,0 +1,66 @@
+name: Setup FFmpeg
+description: >-
+  Download, checksum-verify and unpack the pinned FFmpeg build used by the
+  backend tests, the Playwright E2E suite and the release sidecar.
+
+inputs:
+  ffmpeg-url:
+    description: Pinned URL of the FFmpeg archive (a versioned build, never a moving "latest" URL).
+    required: true
+  ffmpeg-sha256:
+    description: Expected SHA-256 of the FFmpeg archive.
+    required: true
+  destination:
+    description: Directory the archive is expanded into.
+    required: false
+    default: C:\ffmpeg-ci
+
+outputs:
+  ffmpeg-dir:
+    description: Directory that contains ffmpeg.exe and ffprobe.exe.
+    value: ${{ steps.locate.outputs.dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Cache FFmpeg
+      id: ffmpeg-cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ inputs.destination }}
+        key: ffmpeg-${{ runner.os }}-${{ hashFiles('.github/actions/setup-ffmpeg/action.yml') }}
+
+    - name: Download and verify FFmpeg
+      if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+        Invoke-WebRequest -Uri "${{ inputs.ffmpeg-url }}" -OutFile $zip -UseBasicParsing
+
+        # The archive is embedded verbatim in the signed installer, so it is
+        # verified before it is ever executed. The SHA-256 is the one published
+        # by gyan.dev for this exact versioned build.
+        $expected = "${{ inputs.ffmpeg-sha256 }}".ToLowerInvariant().Trim()
+        $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+          throw "FFmpeg archive checksum mismatch.`n  expected: $expected`n  actual:   $actual"
+        }
+        Write-Host "FFmpeg archive SHA-256 verified: $actual"
+
+        Expand-Archive $zip -DestinationPath "${{ inputs.destination }}" -Force
+        Remove-Item $zip -Force
+
+    - name: Locate ffmpeg
+      id: locate
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $root = "${{ inputs.destination }}"
+        $ffmpeg = Get-ChildItem $root -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+        if (-not $ffmpeg) { throw "ffmpeg.exe not found under $root" }
+        $ffprobe = Get-ChildItem $root -Recurse -Filter ffprobe.exe | Select-Object -First 1
+        if (-not $ffprobe) { throw "ffprobe.exe not found under $root" }
+        "dir=$($ffmpeg.DirectoryName)" >> $env:GITHUB_OUTPUT
+        Write-Host "ffmpeg : $($ffmpeg.FullName)"
+        Write-Host "ffprobe: $($ffprobe.FullName)"
