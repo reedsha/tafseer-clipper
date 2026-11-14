@@ -713,6 +713,13 @@ mod tests {
                 while !stop_flag.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            // On Windows an accepted socket INHERITS the listener's
+                            // non-blocking mode (unlike Linux). Without this the
+                            // read/write below can return WouldBlock, the client
+                            // sees a truncated response and reqwest reports
+                            // "error sending request" - the intermittent CI
+                            // failure this test used to produce.
+                            let _ = stream.set_nonblocking(false);
                             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                             let mut buffer = [0u8; 4096];
                             let read = stream.read(&mut buffer).unwrap_or(0);
@@ -745,7 +752,12 @@ mod tests {
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(5));
                         }
-                        Err(_) => break,
+                        // A transient accept error (for example WSAECONNRESET on
+                        // Windows when a client connects and immediately closes)
+                        // must NOT terminate the server: breaking here killed the
+                        // listener for the rest of the test, so every later
+                        // request failed with "error sending request".
+                        Err(_) => std::thread::sleep(Duration::from_millis(5)),
                     }
                 }
             });

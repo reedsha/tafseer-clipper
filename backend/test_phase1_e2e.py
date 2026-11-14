@@ -81,6 +81,37 @@ def check(name: str, condition: bool, detail: str = "") -> bool:
     return bool(condition)
 
 
+def error_detail(response: "httpx.Response") -> str:
+    """Extract the ``detail`` field from an error response without ever raising.
+
+    The REST contract is ``{"detail": ...}`` JSON. A non-JSON body (for example a
+    bare ``500 text/plain`` from an unhandled exception) must be *reported* as a
+    failed check, not turn the whole suite into a traceback - otherwise one
+    contract violation hides the remaining checks.
+    """
+    try:
+        payload = response.json()
+    except Exception:
+        body = (response.text or "").strip().replace("\n", " ")
+        return f"<non-JSON {response.headers.get('content-type', '?')}> {body[:120]}"
+    if isinstance(payload, dict):
+        return str(payload.get("detail", ""))
+    return str(payload)[:120]
+
+
+def guarded(label: str, func, *args, **kwargs):
+    """Run one check group; a raised exception becomes a recorded FAIL.
+
+    Keeps the suite reporting every remaining check instead of aborting at the
+    first unexpected exception.
+    """
+    try:
+        return func(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - deliberate: report, never abort
+        check(f"{label}: completed without raising", False, f"{type(exc).__name__}: {exc}")
+        return None
+
+
 def info(message: str) -> None:
     print(f"[INFO] {message}", flush=True)
 
@@ -795,7 +826,7 @@ def run_http_checks(
         )
         detail = ""
         if no_whisper.status_code != 200:
-            detail = str(no_whisper.json().get("detail", ""))
+            detail = error_detail(no_whisper)
         check(
             "POST /extract-and-transcribe: clean 503 when faster-whisper is absent",
             no_whisper.status_code in (200, 503)
@@ -1068,10 +1099,17 @@ def main() -> int:
         os.environ["TAFSEER_PORT"] = str(port)
         with Sidecar(env, port) as sidecar:
             info(f"sidecar healthy on {sidecar.url}")
-            run_http_checks(
-                sidecar, source, thai_font, arabic_font, renders, control_dir
+            guarded(
+                "HTTP checks",
+                run_http_checks,
+                sidecar,
+                source,
+                thai_font,
+                arabic_font,
+                renders,
+                control_dir,
             )
-        run_unit_checks(source, fonts_dir)
+        guarded("Unit checks", run_unit_checks, source, fonts_dir)
     finally:
         mock_server.shutdown()
 
