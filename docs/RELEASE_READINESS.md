@@ -15,12 +15,14 @@ does not cover the product/UI audit (`AUDIT_REPORT.md`) or the CI/CD architectur
 
 ## 0. Verdict
 
-**NOT RELEASE READY — 1 product defect + 0/61 of the packaged gate executed.**
+**NOT RELEASE READY — 1 product defect, 1 unstable required gate, 0/61 of the packaged gate.**
+
+*(Pipeline and dependency counts below are as measured at commit `f20ce71f`; they move as PRs land.)*
 
 | Area | Status | Evidence |
 |---|---|---|
 | Compile / type gates | 🟢 GREEN | `tsc --noEmit` exit 0 · `vite build` exit 0 |
-| Rust unit tests | 🟢 GREEN | `cargo test --locked` **11 passed**, exit 0 |
+| Rust unit tests | 🟠 AMBER | 11 passed locally and on CI generally — **but 1 of the 11 is flaky on CI** (§1.6), so the required gate can red-line without any change |
 | Browser end-to-end | 🟢 GREEN | Playwright **6 passed** (18.0 s), exit 0 |
 | **Backend end-to-end** | 🔴 **RED** | 40-check suite aborts at check 27 → exit 1 |
 | **GPU→CPU fallback contract** | 🔴 **RED** | `/extract-and-transcribe` returns **HTTP 500 `text/plain`** instead of a JSON error, and does not fall back to CPU |
@@ -51,14 +53,48 @@ does not cover the product/UI audit (`AUDIT_REPORT.md`) or the CI/CD architectur
 > issue: a real failure turns into a truncated run rather than a red-but-complete one.
 
 CI independently confirms 1–3 and 5 on runners (`Frontend`, `Tauri shell`, and `PR Title Lint`
-all green; `Backend` green *only* where the machine has no NVIDIA GPU — see §2).
+all green; `Backend` green *only* where the machine has no NVIDIA GPU — see §2.4).
+
+### 1.6 Unexpected finding: one of the 11 Rust tests is flaky
+
+Observed while running the pipeline on **PR #15, a docs-only change** (no Rust file touched in that
+diff), so it is unrelated to what it was passed to validate:
+
+```
+running 11 tests
+…
+test acceleration::tests::corrupted_checksum_fails_and_cleans_up ... FAILED
+   src/acceleration.rs:990:9  panicked: unexpected error:
+   Could not reach the GPU acceleration manifest at http://127.0.0.1:53608/manifest.json:
+   error sending request for url (http://127.0.0.1:53608/manifest.json)
+  test result: FAILED. 10 passed; 1 failed (finished in 2.01s)
+```
+
+The test stands up an in-process HTTP server on an **ephemeral port** (53608 in this run) and the
+downloader cannot reach it. The same test passed on every earlier CI run and on every local run in
+this report's §1 — so the race is intermittent and machine/runner-dependent.
+
+Why it matters for release readiness rather than being cosmetic:
+
+- It is part of a **required** status check (`Tauri shell (cargo check + unit tests)`), so a race
+  in a test can **randomly block a merge** — the "is CI green?" signal is not trustworthy.
+- It is confined to the accelerator-pack downloader's verification path — the same code that
+  delivers the optional GPU pack. A test that can't reach its own fixture server hints the
+  retry/loopback handling (`http_is_only_allowed_for_loopback` passes) is tight but timing-sensitive.
+- It is **local-vs-CI asymmetric**: a developer running `pnpm test:rust` will not see it, so a red
+  gate on CI cannot be reproduced locally — the worst flavour of flake.
+
+CI explicitly has `cancel-in-progress: true` on `ci-…` groups, so a superseded run cancels its jobs;
+that is a separate, expected reason for a `pending`/`cancelled` state and is **not** counted as a
+flake here.
 
 ---
 
 ## 2. The blocker: GPU transcription does not fall back to CPU
 
-This is the **only defect found that affects the shipped product**, and it is not a test-harness
-problem. It is in the exact hardware configuration the product is built for.
+This is the only defect found here that affects the **shipped product at runtime** (every other
+finding concerns test infrastructure or release tooling), and it is in the exact hardware
+configuration the product is built for.
 
 ### 2.1 Observed behaviour (machine: NVIDIA RTX 3050 Laptop GPU, pack **not** installed)
 
@@ -90,13 +126,13 @@ json()       : JSONDecodeError: Expecting value: line 1 column 1 (char 0)
 |---|---|---|---|
 | **B1** | *"GPU support must always degrade to CPU transcription/encoding … the UI … the CPU fallback explicitly. Never gate the wizard on GPU availability."* | `AGENTS.md:71`; also `docs/RELEASING.md` §8 "CPU fallback is a hard requirement" | A missing cuBLAS DLL **aborts the request**. No CPU fallback occurs. |
 | **B2** | REST surface returns `{"detail": …}` JSON errors | `AGENTS.md:59–65`; `backend/main.py:796` installs `@app.exception_handler(transcriber.TranscriptionError)` | The exception is a raw `RuntimeError`, **not** a `TranscriptionError`, so it bypasses the handler → bare `500 text/plain`. Any renderer doing `response.json()` gets a parse error instead of a message. |
-| **B3** | `resolve_device("auto")`: *"picks CUDA only when the optional CUDA runtime is actually loadable, so a machine without the GPU acceleration pack never pays for a doomed CUDA load"* | `backend/services/transcriber.py:141` | Detective answered "ready" (`cuda_runtime: true`) while `cublas64_12.dll` was **absent**. `/health` itself reported `acceleration.pack_installed: false` **at the same time as** `cuda_runtime: true` and `transcription: "gpu"` — the two probes disagree inside one response. |
+| **B3** | `resolve_device("auto")`: *"picks CUDA only when the optional CUDA runtime is actually loadable, so a machine without the GPU acceleration pack never pays for a doomed CUDA load"* | `backend/services/transcriber.py:141` | The readiness probe (`accel.cuda_runtime_ready()`) answered **ready**, so device `cuda` was chosen, while `cublas64_12.dll` was **absent**. `/health` also reported `acceleration.pack_installed: false` **at the same time as** `cuda_runtime: true` and `transcription: "gpu"` — the two probes disagree inside one response. |
 
 ### 2.3 Where the gap is
 
 ```
 backend/services/transcriber.py
-  141  resolve_device() ................................ returned "cuda"   (detective said ready)
+  141  resolve_device() ................................ returned "cuda"   (probe said ready)
   402  _ensure_model()
   411  from faster_whisper import WhisperModel ......... OK
   423  WhisperModel(device="cuda") .................... SUCCEEDED
@@ -155,7 +191,7 @@ is a recommendation only:
 | Check | Result |
 |---|---|
 | `release/0.1.0/SHA256SUMS.txt` vs files | **3/3 MATCH** — installer, `backend.exe`, `accel-manifest.json` are byte-intact |
-| Structured key ID in `tauri.conf.json` | `DCC8B926EA9F6F2B` |
+| Key ID declared in `tauri.conf.json` | `DCC8B926EA9F6F2B` |
 | Keypair on disk (`.release-secrets/updater.key.pub`) | `DCC8B926EA9F6F2B` ✅ consistent with config |
 | What signed `release/0.1.0/latest.json` | the **pre-rotation** key `27B71DBE720BE1B7` — the only key that existed when those artifacts were built |
 
@@ -226,7 +262,7 @@ Two of the checklist's own sections — `1b. GPU acceleration pack (NVIDIA)` and
 | # | Blocker | Evidence | Owner |
 |---|---|---|---|
 | **BL-1** | GPU transcription 500s and never falls back to CPU (§2) | sidecar log + 500 probe on this machine | Application code — needs an explicitly instructed phase (`AGENTS.md:5`) |
-| **BL-2** | Backend E2E aborts at check 27 of 40 (§1.4) | exit 1; harness raises instead of recording FAIL | Same fix chain; arguably also a harness defect |
+| **BL-2** | Backend E2E aborts at check 27 of 40 (§1 table, row 4) | exit 1; harness raises instead of recording FAIL | Same root cause as BL-1; arguably also a harness defect |
 
 ### Process — blocks *publishing*, not development
 
@@ -236,21 +272,25 @@ Two of the checklist's own sections — `1b. GPU acceleration pack (NVIDIA)` and
 | **BL-4** | `release/0.1.0` signed with the pre-rotation key (§3) | Rebuild after BL-1 |
 | **BL-5** | 61/61 packaged-gate boxes unchecked (§5) | Needs a clean Windows 11 VM + desktop |
 | **BL-6** | 5 Dependabot PRs awaiting review (*hold `#11` TypeScript 7; the rest are safe to merge*) | Yours |
+| **BL-7** | One of the 11 required Rust tests is **unstable** (`corrupted_checksum_fails_and_cleans_up`) → a merge gate that randomly red-lines (§1.6) | Application/test code — needs an instructed phase |
 
 ---
 
 ## 7. Shortest path to release-ready
 
 1. **Fix BL-1/BL-2** (inference fallback + `TranscriptionError` + harness records FAIL instead of
-   raising). Then re-run §1.4 until **40/40**, and run it on a machine **with** an NVIDIA GPU —
-   CI alone can never prove this. Consider adding a GPU-labelled, self-hosted or manual trigger
-   for that one suite.
-2. **Rebuild** `release/0.1.0` so the signing chain points at `DCC8B926EA9F6F2B`; re-verify
+   raising). Then re-run §1 row 4 until **40/40**, and run it on a machine **with** an NVIDIA
+   GPU — CI alone can never prove this. Consider adding a GPU-labelled, self-hosted or manual
+   trigger for that one suite.
+2. **Stabilise the gate (BL-7)** — `acceleration::tests::corrupted_checksum_fails_and_cleans_up`
+   races its own fixture server. Until it stops, "CI red" is ambiguous: a merge block may mean a
+   real defect or a timing race. Reproduce on CI (re-run the job) before touching the downloader.
+3. **Rebuild** `release/0.1.0` so the signing chain points at `DCC8B926EA9F6F2B`; re-verify
    `SHA256SUMS.txt` afterwards (§3).
-3. **Run `docs/RELEASE_CHECKLIST.md` §0, §1, §1b, §7, §8** against the new build on a clean VM —
+4. **Run `docs/RELEASE_CHECKLIST.md` §0, §1, §1b, §7, §8** against the new build on a clean VM —
    those are exactly the sections §5 reports unverified, and §1b/§7 directly re-test BL-1/BL-4.
-4. **Decide on signing (BL-3).** Until then: no public release, local `-SkipSigning` builds only.
-5. **Review the Dependabot queue (BL-6)**; hold `#11`.
+5. **Decide on signing (BL-3).** Until then: no public release, local `-SkipSigning` builds only.
+6. **Review the Dependabot queue (BL-6)**; hold `#11`.
 
 **Do not tag or publish** until BL-1 is fixed and the §5 gate has been walked in real conditions —
 right now the app would ship with its headline GPU feature failing closed on the target hardware.
@@ -265,8 +305,10 @@ and the release-safety controls (environment gate, protected branch, immutable t
 
 Verified red or unverified: **GPU→CPU fallback (hard failure, 500, contract violation, invisible to
 CI)**, the backend suite that detects it, the signing chain's key identity, a release pipeline that
-has never executed, and **all 61** packaged-gate items.
+has never executed, **all 61** packaged-gate items, and **a flaky required check** whose red-light
+can mean timing race rather than defect.
 
 The two systems most shifted by this work — "is CI green?" and "is the matrix green?" — answer
-*"yes"* on a machine where the primary transcribe call returns HTTP 500. That is the report's
-central finding.
+*"yes"* on a machine where the primary transcribe call returns HTTP 500 (§2.4), while the reverse
+case produced a red gate through no code change at all (§1.6). Both directions of the release signal
+are currently untrustworthy. That is the report's central finding.
