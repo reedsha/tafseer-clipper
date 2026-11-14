@@ -22,13 +22,13 @@ does not cover the product/UI audit (`AUDIT_REPORT.md`) or the CI/CD architectur
 | Area | Status | Evidence |
 |---|---|---|
 | Compile / type gates | 🟢 GREEN | `tsc --noEmit` exit 0 · `vite build` exit 0 |
-| Rust unit tests | 🟠 AMBER | 11 passed locally and on CI generally — **but 1 of the 11 is flaky on CI** (§1.6), so the required gate can red-line without any change |
+| Rust unit tests | 🟠 AMBER | 11 passed locally — but **2 of the 11 are flaky on CI**, observed on 3 PRs across 4 runs (§1.6), so the required gate can red-line with no code change |
 | Browser end-to-end | 🟢 GREEN | Playwright **6 passed** (18.0 s), exit 0 |
 | **Backend end-to-end** | 🔴 **RED** | 40-check suite aborts at check 27 → exit 1 |
 | **GPU→CPU fallback contract** | 🔴 **RED** | `/extract-and-transcribe` returns **HTTP 500 `text/plain`** instead of a JSON error, and does not fall back to CPU |
 | HTTP error contract on that endpoint | 🔴 **RED** | 500 + `Internal Server Error`, not the documented 503/`{"detail":…}` |
-| CI pipeline | 🟢 GREEN | 19 runs, 10 green / 8 pre-fix, PR Title Lint 13/13; required checks passing |
-| Dependency management | 🟢 GREEN | Dependabot live on 4 ecosystems, 5 PRs open for review |
+| CI pipeline | 🟢 GREEN | required checks passing; of 8 failed runs only 4 were real defects, 3 were the §1.6 flake, and 1 a genuine `av` incompatibility (§4). PR Title Lint 15/15 |
+| Dependency management | 🟢 GREEN | Dependabot live on 4 ecosystems; its guard now avoids a break — `av 19` was auto-closed and its CI run reproduces the PyAV contract failure (§4) |
 | Supplier / supply chain | 🟢 GREEN | 24/24 actions SHA-pinned; FFmpeg pinned + SHA-256 verified |
 | Local artifact integrity | 🟢 GREEN | `release/0.1.0` **3/3 files match** `SHA256SUMS.txt` |
 | **Updater signing chain** | 🟠 **AMBER** | artifacts signed with the **pre-rotation** key; config now advertises a different one |
@@ -55,38 +55,48 @@ does not cover the product/UI audit (`AUDIT_REPORT.md`) or the CI/CD architectur
 CI independently confirms 1–3 and 5 on runners (`Frontend`, `Tauri shell`, and `PR Title Lint`
 all green; `Backend` green *only* where the machine has no NVIDIA GPU — see §2.4).
 
-### 1.6 Unexpected finding: one of the 11 Rust tests is flaky
+### 1.6 Finding: two of the 11 Rust tests are flaky — and it is recurring
 
-Observed while running the pipeline on **PR #15, a docs-only change** (no Rust file touched in that
-diff), so it is unrelated to what it was passed to validate:
+Not isolated. Observed **three times in four recent runs of the `Tauri shell` job**, on branches as
+unrelated as a docs change, a Python dependency bump and a TypeScript bump:
+
+| Run | Branch | Any Rust file touched? | Result | Panic location |
+|---|---|---|---|---|
+| PR #15 (first head) | `docs/release-readiness` | **no** | `10 passed, 1 failed` | `acceleration.rs:990` |
+| PR #11 | `dependabot/npm_and_yarn/typescript-7.0.2` | no | `9 passed, 2 failed` | `acceleration.rs:955` **and** `:990` |
+| PR #5 | `dependabot/pip/backend/numpy-2.5.4` | no | `10 passed, 1 failed` | `acceleration.rs:955` |
+| PR #15 **re-run, identical commit** | unchanged | no | **success** | — |
 
 ```
-running 11 tests
-…
-test acceleration::tests::corrupted_checksum_fails_and_cleans_up ... FAILED
-   src/acceleration.rs:990:9  panicked: unexpected error:
-   Could not reach the GPU acceleration manifest at http://127.0.0.1:53608/manifest.json:
-   error sending request for url (http://127.0.0.1:53608/manifest.json)
-  test result: FAILED. 10 passed; 1 failed (finished in 2.01s)
+thread 'acceleration::tests::corrupted_checksum_fails_and_cleans_up' panicked at src\acceleration.rs:990:9:
+unexpected error: Could not reach the GPU acceleration manifest at
+   http://127.0.0.1:50786/manifest.json: error sending request for url (…)
+
+thread 'acceleration::tests::downloads_pack_and_writes_marker' panicked at src\acceleration.rs:955:14:
+download pack: "Could not reach the GPU acceleration manifest at http://127.0.0.1:50787/manifest.json…"
 ```
 
-The test stands up an in-process HTTP server on an **ephemeral port** (53608 in this run) and the
-downloader cannot reach it. The same test passed on every earlier CI run and on every local run in
-this report's §1 — so the race is intermittent and machine/runner-dependent.
+Both tests stand up an in-process HTTP server on an OS-assigned port and both can lose the race to
+their own fixture. The identical commit went red, then green, so this is confirmed behaviour rather
+than a suspected one.
 
-Why it matters for release readiness rather than being cosmetic:
+**It is also loading-correlated, not random.** The four failures cluster at `19:58:4x` — the same
+minute Dependabot opened five pull requests and five CI runs went out together — plus `20:04` and
+`20:06`, again concurrent. The three runs that passed were the ones that ran essentially alone.
+Not proven as cause (separate machines), but the correlation explains the jump from a rare flake
+to something that fires most of the time.
 
-- It is part of a **required** status check (`Tauri shell (cargo check + unit tests)`), so a race
-  in a test can **randomly block a merge** — the "is CI green?" signal is not trustworthy.
-- It is confined to the accelerator-pack downloader's verification path — the same code that
-  delivers the optional GPU pack. A test that can't reach its own fixture server hints the
-  retry/loopback handling (`http_is_only_allowed_for_loopback` passes) is tight but timing-sensitive.
-- It is **local-vs-CI asymmetric**: a developer running `pnpm test:rust` will not see it, so a red
-  gate on CI cannot be reproduced locally — the worst flavour of flake.
+Consequences:
 
-CI explicitly has `cancel-in-progress: true` on `ci-…` groups, so a superseded run cancels its jobs;
-that is a separate, expected reason for a `pending`/`cancelled` state and is **not** counted as a
-flake here.
+- It is part of a **required** status check, so a timing race **randomly blocks a merge**, and the
+  badge cannot distinguish "flaky" from "real defect" — exactly what happened in §7 item 6 below.
+- Those same tests are the harness for the accelerator-pack downloader's verification path — the
+  code that delivers the optional GPU pack.
+- It is **local-and-CI asymmetric in two directions**: it fails on CI and passes locally, so a
+  developer running `pnpm test:rust` will never reproduce a red gate.
+
+CI `cancel-in-progress: true` on `ci-…` groups is a separate, expected cause of a
+`pending`/`cancelled` state; that is *not* counted as a flake here.
 
 ---
 
@@ -216,10 +226,35 @@ anything installed from it must be reinstalled.
 
 | Workflow | Runs | Green | Notes |
 |---|---|---|---|
-| `CI` | 19 | 10 pass / 8 fail / 1 pending | Every failure was a pre-existing defect now fixed, or the baseline push; every PR merged only after `mergeable_state: clean` |
-| `PR Title Lint` | 13 | **13/13** | Conventional Commit titles held across every PR, including Dependabot's |
+| `CI` | 21 (at time of writing) | 11 pass / 8 fail / 2 in-flight | Failures classified immediately below — only four were real defects, and only in this project's own history |
+| `PR Title Lint` | 15 | **15/15** | Conventional Commit titles held across every PR, including Dependabot's |
 | `Release Please` | 3 | **3/3** | Correctly produced **no tag** — `main` contains only `chore:` + `ci:` commits, so there is no release-worthy commit yet |
 | `Release` | **0** | — | Never executed. Gated on Authenticode by design |
+
+*Authoritative breakdown of the 8 failed `CI` runs* (each failure's job log classified):
+
+| Run | Branch | Cause |
+|---|---|---|
+| `9a3d0934` | `main` (baseline) | pre-existing: `Backend` + `Tauri shell` on the original files (Pillow absent, no launcher scripts) |
+| `98928341`, `5262fa10` | `chore/cicd-pipeline` (my pushes) | pre-fix: `Multiple versions of pnpm specified` |
+| `9cb2f8d6` | `chore/cicd-pipeline` (my push) | pre-fix: `CVT1100 duplicate resource` → `LNK1123` (§2 of `CICD_AUDIT.md`) |
+| `62b474d0` | `dependabot/pip/backend/numpy-2.5.4` | **§1.6 flake** (`downloads_pack_and_writes_marker`) |
+| `8ae9e34e` | `dependabot/npm_and_yarn/typescript-7.0.2` | **§1.6 flake** (`:955` + `:990`) — its actual compiler job passed |
+| `2617a86a` | `dependabot/github_actions/actions/checkout-7.0.1` | **§1.6 flake** — not an action problem |
+| `1f0394df` | `dependabot/pip/backend/av-19.0.2` | **genuine** — see below |
+
+Two of those are findings in their own right:
+
+1. **The `av` pin is empirically correct.** Dependabot's `PyAV 19.0.2` bump fails `Backend (Phase-1
+   E2E)` on CI with the *same* `json.decoder.JSONDecodeError: Expecting value: line 1 column 1`
+   this report's local failure shows (§1 row 4) — i.e. `/extract-and-transcribe` stops honouring the
+   503+JSON contract once PyAV drops `metadata_errors=`. This is exactly what
+   `backend/requirements.txt` warns about at the pin, so the warning is not theoretical. It backs
+   the `av` major-bump ignore added to `.github/dependabot.yml`, and Dependabot's `av` pull request
+   has since **auto-closed** — the guard worked.
+2. **Only some of the 8 were defects in the product.** Four were pre-fix defects in my own pushes;
+   three were the §1.6 flake; one was a genuine dependency incompatibility. Reporting "8 failures"
+   without that split would overstate how much was ever wrong with the app.
 
 **Branch protection** (verified on `main`): 4 required checks (`Frontend…`, `Backend…`,
 `Tauri shell…`, `Conventional Commit title`) · `strict` up-to-date · `enforce_admins`
@@ -271,8 +306,27 @@ Two of the checklist's own sections — `1b. GPU acceleration pack (NVIDIA)` and
 | **BL-3** | No Authenticode credential → `REQUIRE_CODE_SIGNING=1` fails every tag build. **You have stated you will not sign soon** — so the release path stays closed by design. Unsigned local builds remain available via `scripts/build-release.ps1 -SkipSigning`. | Yours |
 | **BL-4** | `release/0.1.0` signed with the pre-rotation key (§3) | Rebuild after BL-1 |
 | **BL-5** | 61/61 packaged-gate boxes unchecked (§5) | Needs a clean Windows 11 VM + desktop |
-| **BL-6** | 5 Dependabot PRs awaiting review (*hold `#11` TypeScript 7; the rest are safe to merge*) | Yours |
-| **BL-7** | One of the 11 required Rust tests is **unstable** (`corrupted_checksum_fails_and_cleans_up`) → a merge gate that randomly red-lines (§1.6) | Application/test code — needs an instructed phase |
+| **BL-6** | 5 Dependabot PRs awaiting review | **All 5 pass their own checks** — 2 show red only because of §1.6's flake | Yours |
+| **BL-7** | **Two** of the 11 required Rust tests are unstable (`acceleration.rs:955` and `:990`) → a merge gate that randomly red-lines; seen on 3 of 4 recent runs (§1.6) | Application/test code — needs an instructed phase |
+
+**Correction on the Dependabot queue.** Earlier in this work I recommended holding PR #11
+(`typescript` 6.0.3 → 7.0.2) on the grounds that a compiler major might break the build. **That
+premise did not survive measurement.** PR #11's `Tauri shell` failure is §1.6's flake — and the
+job that actually runs the compiler, `Frontend (tsc, build, Playwright E2E)`, reports **success**.
+TypeScript 7 compiles this codebase and builds cleanly on CI. The same applies to PR #5 (`numpy`),
+whose red is the flake as well: `Backend` and `Frontend` both pass.
+
+So for `#11` the call is genuinely yours, and mine flips to: **privacy of choice, not build risk** —
+I would still take a compiler major deliberately rather than as a side-effect of a bot run, but
+there is no measurement standing in the way of merging it.
+
+| PR | Own checks | Verdict |
+|---|---|---|
+| `#5` numpy 2.5.3→2.5.4 | `Frontend` ✅ `Backend` ✅ `Title` ✅ / `Tauri` ❌ flake | 🟢 merge |
+| `#8` sha2 0.10.9→0.11.1 | all ✅ | 🟢 merge |
+| `#10` faster-whisper floor ≥1.2.1 | all ✅ | 🟢 merge |
+| `#14` github-actions group ×8 | all ✅ | 🟢 merge |
+| `#11` typescript 6→7 | `Frontend` ✅ (the compiler job) / `Tauri` ❌ flake | 🟡 your call — safe, not urgent |
 
 ---
 
@@ -282,15 +336,17 @@ Two of the checklist's own sections — `1b. GPU acceleration pack (NVIDIA)` and
    raising). Then re-run §1 row 4 until **40/40**, and run it on a machine **with** an NVIDIA
    GPU — CI alone can never prove this. Consider adding a GPU-labelled, self-hosted or manual
    trigger for that one suite.
-2. **Stabilise the gate (BL-7)** — `acceleration::tests::corrupted_checksum_fails_and_cleans_up`
-   races its own fixture server. Until it stops, "CI red" is ambiguous: a merge block may mean a
-   real defect or a timing race. Reproduce on CI (re-run the job) before touching the downloader.
+2. **Stabilise the gate (BL-7)** — two tests (`acceleration.rs:955`, `:990`) race their own
+   fixture server. Already reproduced: the identical commit failed, then passed on re-run with no
+   diff, and it fired on 3 of the 4 recent runs when those runs overlapped (§1.6). Until it stops,
+   "CI red" is ambiguous — badge alone cannot say defect vs. timing race.
 3. **Rebuild** `release/0.1.0` so the signing chain points at `DCC8B926EA9F6F2B`; re-verify
    `SHA256SUMS.txt` afterwards (§3).
 4. **Run `docs/RELEASE_CHECKLIST.md` §0, §1, §1b, §7, §8** against the new build on a clean VM —
    those are exactly the sections §5 reports unverified, and §1b/§7 directly re-test BL-1/BL-4.
 5. **Decide on signing (BL-3).** Until then: no public release, local `-SkipSigning` builds only.
-6. **Review the Dependabot queue (BL-6)**; hold `#11`.
+6. **Review the Dependabot queue (BL-6)** — `#5`, `#8`, `#10`, `#14` are green on their own
+   merits and can go; `#11` (TS 7) builds cleanly, so it is a maturity call, not a risk.
 
 **Do not tag or publish** until BL-1 is fixed and the §5 gate has been walked in real conditions —
 right now the app would ship with its headline GPU feature failing closed on the target hardware.
