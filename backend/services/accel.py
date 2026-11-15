@@ -20,13 +20,11 @@ commands below.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -198,19 +196,22 @@ def nvidia_gpu_info() -> dict[str, Any] | None:
 # CUDA runtime probe (ctranslate2)
 # --------------------------------------------------------------------------- #
 def _probe_cuda_runtime() -> bool:
-    """True only when the CUDA runtime can actually be *loaded*, not merely compiled in.
+    """True only when the CUDA *compute* runtime can actually be loaded.
 
     ``ctranslate2.get_supported_compute_types("cuda")`` answers "was this build
-    compiled with CUDA support", which is true on any wheel with the CUDA backend
-    even when ``cublas64_12.dll`` is nowhere on the machine. Trusting it made
-    ``/health`` claim ``cuda_runtime: true`` next to ``pack_installed: false`` and
-    sent transcription down a doomed CUDA path that failed at the first
-    inference.
+    compiled with CUDA support". It is true on any wheel with the CUDA backend
+    even when ``cublas64_12.dll`` is nowhere on the machine, because it never
+    loads cuBLAS. Trusting it made ``/health`` claim ``cuda_runtime: true`` next
+    to ``pack_installed: false`` and sent transcription down a CUDA path that
+    died at the first ``encode()``.
 
-    The only honest probe is to load the runtime for real: construct a tiny
-    CTranslate2 model on the CUDA device. That dlopen()s cuBLAS/cuDNN, so a
-    missing acceleration pack fails here - cheaply, and before any user audio is
-    involved.
+    The compute libraries are therefore loaded for real. cuBLAS/cuDNN are what
+    CTranslate2 dlopen()s on first use, so a missing acceleration pack fails
+    here - cheaply, before any user audio is involved.
+
+    A deliberately *invalid* dummy model must not be used for this: CTranslate2
+    validates the model file before touching CUDA, so a fake model fails on
+    ``cpu`` as well and would report "no GPU" on machines that do have the pack.
     """
     activate_runtime_dirs()
     try:
@@ -218,54 +219,41 @@ def _probe_cuda_runtime() -> bool:
     except Exception:  # pragma: no cover - depends on the build
         return False
     try:
-        # Loading a real (if trivial) model is what forces the CUDA libraries to
-        # be resolved; a pure capability query does not.
-        ctranslate2.models.Whisper(
-            str(_probe_model_dir()),
-            device="cuda",
-            compute_type="int8",
-        )
+        if not ctranslate2.get_supported_compute_types("cuda"):
+            return False
     except Exception:
         return False
+    return _load_cuda_compute_libraries()
+
+
+def _load_cuda_compute_libraries() -> bool:
+    """Force-load the CUDA libraries CTranslate2 needs, or report "not ready"."""
+    if sys.platform != "win32":  # pragma: no cover - Windows-only app
+        # Elsewhere the compiled-in answer is as good as it gets from here.
+        return True
+
+    import ctypes
+
+    targets: list[str] = []
+    directory = config.accel_dir()
+    if directory is not None and directory.is_dir():
+        for stem in ("cublas64", "cudnn64"):
+            matches = sorted(directory.glob(f"{stem}*.dll"))
+            if matches:
+                targets.append(str(matches[0]))
+    if not targets:
+        # No pack installed: the libraries would have to come from a system-wide
+        # CUDA install, so ask the loader for them by name. A missing one raises
+        # OSError and the GPU path is reported unavailable.
+        targets = ["cublas64_12.dll", "cudnn64_9.dll"]
+
+    for target in targets:
+        try:
+            ctypes.WinDLL(target)
+        except OSError as exc:
+            logger.debug("CUDA compute library not loadable (%s): %s", target, exc)
+            return False
     return True
-
-
-def _probe_model_dir() -> Path:
-    """A minimal CTranslate2 Whisper model used only to force the CUDA load.
-
-    CTranslate2 validates the model directory, so the probe needs the same
-    files a real model has. They are written once, empty, into the probe cache
-    directory; nothing is ever transcribed with them.
-    """
-    target = Path(tempfile.gettempdir()) / "tafseer-cuda-probe" / "whisper"
-    if (target / "model.bin").exists():
-        return target
-    target.mkdir(parents=True, exist_ok=True)
-    (target / "model.bin").write_bytes(b"")
-    (target / "config.json").write_text(
-        json.dumps(
-            {
-                "model_type": "whisper",
-                "num_languages": 100,
-                "num_queued_blocks": 0,
-                "num_heads": 1,
-                "dim": 1,
-                "n_vocab": 1,
-                "n_audio_ctx": 1,
-                "n_audio_state": 1,
-                "n_audio_head": 1,
-                "n_audio_layer": 1,
-                "n_text_ctx": 1,
-                "n_text_state": 1,
-                "n_text_head": 1,
-                "n_text_layer": 1,
-                "n_mels": 80,
-                "vocab_size": 1,
-            }
-        ),
-        encoding="utf-8",
-    )
-    return target
 
 
 def cuda_runtime_ready() -> bool:

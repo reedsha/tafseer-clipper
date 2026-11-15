@@ -41,6 +41,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -54,7 +55,7 @@ BACKEND = Path(__file__).resolve().parent
 sys.path.insert(0, str(BACKEND))
 
 import config
-from services import analyzer, renderer, subtitle_gen, transcriber
+from services import accel, analyzer, renderer, subtitle_gen, transcriber
 
 ARTIFACTS = BACKEND / ".e2e"
 WINDIR = Path(os.environ.get("WINDIR", r"C:\Windows"))
@@ -507,6 +508,28 @@ def run_http_checks(
             and health["whisper"].get("compute_type") == "int8",
             f"model={health.get('whisper', {}).get('model')} "
             f"loaded={health.get('whisper', {}).get('loaded')}",
+        )
+        accel_report = health.get("acceleration") or {}
+        # The acceleration block must be self-consistent: "transcription: gpu"
+        # has to agree with both the runtime flag and the reason field. The
+        # original defect reported reason=null beside pack_installed=false while
+        # a CUDA load failed at first inference.
+        says_gpu = accel_report.get("transcription") == "gpu"
+        consistent = (
+            bool(accel_report)
+            and says_gpu == (
+                accel_report.get("cuda_runtime") is True
+                and accel_report.get("gpu_detected") is True
+            )
+            and says_gpu == (accel_report.get("reason") is None)
+        )
+        check(
+            "GET /health: acceleration block is self-consistent",
+            consistent,
+            f"transcription={accel_report.get('transcription')} "
+            f"cuda_runtime={accel_report.get('cuda_runtime')} "
+            f"gpu_detected={accel_report.get('gpu_detected')} "
+            f"reason={accel_report.get('reason')}",
         )
 
         # ---- 2. /fonts/import ---------------------------------------------- #
@@ -996,6 +1019,43 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         == "อัลลอฮฺ กับ เศาะฮาบะฮฺ",
         transcriber.apply_glossary("อัลเลาะห์ กับ ซอฮาบะห์", glossary),
     )
+    # ---- accel: the CUDA probe must be honest in BOTH directions ----------- #
+    # Too permissive = the original bug (claiming a CUDA runtime that is not
+    # loadable, then 500ing at the first inference). Too strict = the product's
+    # headline feature silently disabled for everyone who installed the pack.
+    # Both directions are pinned here.
+    probe_dir = Path(tempfile.mkdtemp(prefix="tafseer-probe-"))
+    previous_cuda_dir = os.environ.get("TAFSEER_CUDA_DIR")
+    try:
+        system32 = Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32" / "kernel32.dll"
+        if system32.is_file():
+            for name in ("cublas64_12.dll", "cudnn64_9.dll"):
+                shutil.copy2(system32, probe_dir / name)
+            os.environ["TAFSEER_CUDA_DIR"] = str(probe_dir)
+            accel.clear_cache()
+            with_pack = accel.acceleration_report()
+            check(
+                "accel: probe reports GPU when the compute libraries actually load",
+                with_pack["cuda_runtime"] is True
+                and with_pack["transcription"] == "gpu"
+                and with_pack["reason"] is None,
+                f"cuda_runtime={with_pack['cuda_runtime']} "
+                f"transcription={with_pack['transcription']} reason={with_pack['reason']}",
+            )
+        else:
+            check(
+                "accel: probe reports GPU when the compute libraries actually load",
+                False,
+                f"fixture missing: {system32}",
+            )
+    finally:
+        if previous_cuda_dir is None:
+            os.environ.pop("TAFSEER_CUDA_DIR", None)
+        else:
+            os.environ["TAFSEER_CUDA_DIR"] = previous_cuda_dir
+        accel.clear_cache()
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
     engine = transcriber.WhisperTranscriber(model_size="tiny", device="cpu")
     check(
         "transcriber: unload() on an unloaded model is a no-op",
