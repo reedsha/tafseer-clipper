@@ -166,7 +166,7 @@ All six endpoints live in `backend/main.py`; every model is a Pydantic v2
 
 ## Verification
 
-`backend/test_phase1_e2e.py` — 40/40 checks pass on this machine
+`backend/test_phase1_e2e.py` — **42/42** checks pass on this machine
 (Windows 11, FFmpeg 9.0.2 essentials, GTX with 4096 MB VRAM).
 
 ```powershell

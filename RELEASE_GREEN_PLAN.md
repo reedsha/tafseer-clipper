@@ -31,8 +31,8 @@ directions. Green is five separate states, and all of them must hold simultaneou
 | # | Green state | Exit criterion | Evidence to produce |
 |---|---|---|---|
 | **G-A** | **Trustworthy gates** | Every **required** check is deterministic — a re-run of an identical commit must never change its verdict | Re-run proof on a branch: same SHA, same result |
-| **G-B** | **Functional gates hold** | `pnpm lint`, `pnpm build`, `cargo test --locked`, **backend E2E 40/40**, Playwright `6/6` — all exit 0 in one run | §-referenced run log + matching CI run |
-| **G-C** | **Product contract holds on GPU hardware** | `/extract-and-transcribe` degrades to **CPU** and returns `503 {"detail":…}` JSON on an NVIDIA machine **without** the acceleration pack installed | Screenshot/log of the contract on your RTX 3050 & a `40/40` run there |
+| **G-B** | **Functional gates hold** | `pnpm lint`, `pnpm build`, `cargo test --locked`, **backend E2E: every check passes** (42 as of 2026-11-15), Playwright `6/6` — all exit 0 in one run | §-referenced run log + matching CI run |
+| **G-C** | **Product contract holds on GPU hardware** | `/extract-and-transcribe` degrades to **CPU** and returns `503 {"detail":…}` JSON on an NVIDIA machine **without** the acceleration pack installed | Screenshot/log of the contract on your RTX 3050 & a complete suite run there |
 | **G-D** | **Package acceptance holds** | `docs/RELEASE_CHECKLIST.md` = **61 checked / 0 unchecked**, signed off | Checkboxed checklist + sign-off line |
 | **G-E** | **A shippable artifact exists** | A rebuilt installer whose signing chain matches `tauri.conf.json`'s key `DCC8B926EA9F6F2B`, with `SHA256SUMS.txt` re-verified | New `release/<v>/` + checksum match (§3 of the readiness report style) |
 
@@ -87,8 +87,8 @@ Applies to **G-B (part)** and **G-C**. Refusal to proceed until instructed is de
 | **S-2.4** | Convert non-`ImportError` import failures of `faster_whisper` (e.g. `TypeError` from an incompatible `av`) into `TranscriptionError` | `transcriber.py:411` `except ImportError` | The `av 19` class of dependency drift degrades to a clean 503 instead of a 500 |
 | **S-2.5** | Regression coverage: one test that forces the CUDA failure at inference and asserts (a) CPU fallback, (b) JSON `{"detail":…}` shape | new test alongside `backend/test_phase1_e2e.py` | Coverage that CI (no GPU) *can* run |
 
-**Acceptance for G-B/G-C:** `py -3.12 backend/test_phase1_e2e.py` → **40/40** here, plus
-**40/40 on this laptop** before and after `Enable GPU acceleration`. CI alone cannot prove this —
+**Acceptance for G-B/G-C:** `py -3.12 backend/test_phase1_e2e.py` → **every check passes** here,
+plus a complete run **on this laptop** before and after `Enable GPU acceleration`. CI alone cannot prove this —
 it has no GPU (`docs/RELEASE_READINESS.md:2.4`).
 
 ### Stream 3 — Test/code hygiene (**needs your explicit instruction**)
@@ -174,8 +174,8 @@ so its own title must be a Conventional Commit (`docs:`/`ci:`/`fix:`/`test:`).
 | Gate | Command / evidence | Pass condition |
 |---|---|---|
 | **G-A** | Same SHA, two CI runs | identical verdicts |
-| **G-B** | `pnpm lint`; `pnpm build`; `cargo test --locked`; `py -3.12 backend/test_phase1_e2e.py`; `pnpm exec playwright test` | all exit 0; backend reports **40/40**, not a truncated 26 |
-| **G-C** | same backend suite **on this laptop, with no accel pack**; then **with** the pack installed | 40/40 both, with device reported correctly in `/health` |
+| **G-B** | `pnpm lint`; `pnpm build`; `cargo test --locked`; `py -3.12 backend/test_phase1_e2e.py`; `pnpm exec playwright test` | all exit 0; backend prints **every** check with no `FAIL` (42 as of 2026-11-15), not a truncated run |
+| **G-C** | same backend suite **on this laptop, with no accel pack**; then **with** the pack installed | every check passes both times, with the device reported correctly in `/health` |
 | **G-D** | `docs/RELEASE_CHECKLIST.md` walkthrough + `scripts/smoke-installer.ps1` | 61/61 checked, sign-off line filled |
 | **G-E** | `SHA256SUMS.txt` match + updater signature validity against `DCC8B926EA9F6F2B` | match; signature accepted; `latest.json` points at the rebuilt asset |
 
@@ -185,7 +185,7 @@ Stop and report, do **not** continue:
 
 1. Any required check fails for a reason **other than** the two known flake signatures
    (`acceleration.rs:955` / `:990`) after Stream 1 — a red gate at that point is a defect, not noise.
-2. `Backend` E2E drops below 40/40 after any change.
+2. `Backend` E2E reports **any** `FAIL`, or stops short of printing every check, after any change.
 3. A change to `transcriber.py`, `main.py`, `acceleration.rs` needs regressing GPU behaviour on
    this laptop — verify locally before pushing.
 4. Anything that would let `release.yml` publish an **unsigned** artifact — never acceptable.

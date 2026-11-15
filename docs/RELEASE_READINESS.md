@@ -359,7 +359,8 @@ there is no measurement standing in the way of merging it.
 ## 7. Shortest path to release-ready
 
 1. **Fix BL-1/BL-2** (inference fallback + `TranscriptionError` + harness records FAIL instead of
-   raising). Then re-run §1 row 4 until **40/40**, and run it on a machine **with** an NVIDIA
+   raising). Then re-run §1 row 4 until the suite reports every check (42 as of the §9 fix, was 40),
+   and run it on a machine **with** an NVIDIA
    GPU — CI alone can never prove this. Consider adding a GPU-labelled, self-hosted or manual
    trigger for that one suite.
 2. **Stabilise the gate (BL-7)** — two tests (`acceleration.rs:955`, `:990`) race their own
