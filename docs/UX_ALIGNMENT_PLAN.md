@@ -494,3 +494,27 @@ pnpm build
 - [ ] `pnpm lint && pnpm test && pnpm build` green on every PR.
 - [ ] `AGENTS.md` + master plan updated (PR-4) and mutually consistent; Current phase line fresh.
 - [ ] No version numbers edited by hand anywhere.
+
+---
+
+## 11. Execution status (2026-11-16)
+
+| Item | State | Evidence |
+|---|---|---|
+| PR-1 copy pass (`ux/pr-1-copy-pass`) | ✅ implemented | 15/15 Playwright, 49/49 backend |
+| PR-2 Automatic/Advanced (`ux/pr-2-automatic-mode`) | ✅ implemented | typecheck + 15/15 Playwright + build |
+| PR-3 errors & dead-ends (`ux/pr-3-errors`) | ✅ implemented | typecheck + 15/15 Playwright + build |
+| PR-4 AI presets + Ollama detect (`ux/pr-4-ai-presets`) | ✅ implemented | 49/49 backend (2 new checks), 15/15 Playwright, build |
+| PR-5 string extraction | ⏸ not started | gated on PR-1..4 merging (per §7) |
+
+**Notes for the next agent**
+
+- The Playwright suite runs via `corepack pnpm exec playwright test`; set
+  `PYTHONIOENCODING=utf-8` in a Windows shell, otherwise the backend E2E unit block aborts with a
+  `charmap` `UnicodeEncodeError` on non-Latin assertion messages (pre-existing, environmental).
+- `GET /health` now returns `providers.ollama` and `hardware.tier`; older sidecars omit them and
+  every consumer must tolerate the absence (types are optional).
+- The Ollama probe is cached for 30 s inside the sidecar; "Check again" in Settings refreshes
+  `/health`, which may not re-probe until the TTL expires.
+- Model *pull* (v2) remains out of scope: the install action copies `ollama pull <model>` and
+  links out, it never shell-executes anything.
