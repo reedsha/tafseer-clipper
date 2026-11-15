@@ -2,13 +2,117 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/tauri.svg" />
+    <link rel="icon" type="image/svg+xml" href="/brand-mark.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Tafseer Clipper — Bilingual Subtitle Studio</title>
+    <style>
+      /*
+       * Startup splash — pure HTML/CSS so the window is never blank while the
+       * bundle parses and the sidecar handshake settles. React fades this node
+       * out once boot completes (src/components/StartupGate.tsx).
+       *
+       * Studio palette (AGENTS.md §2), hardcoded because index.css is not yet
+       * loaded at this stage: charcoal ground, cream mark, no glow.
+       */
+      #splash {
+        position: fixed;
+        inset: 0;
+        z-index: 60;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 22px;
+        background: #0f1113;
+        color: #e7e9ea;
+        opacity: 1;
+        transition: opacity 320ms ease;
+      }
+      #splash.splash-out {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .splash-mark {
+        width: 84px;
+        height: 84px;
+        animation: splash-breathe 2.6s ease-in-out infinite;
+      }
+      .splash-wordmark {
+        margin-top: -8px;
+        font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+        font-size: 14px;
+        font-weight: 500;
+        letter-spacing: 0.14em;
+      }
+      .splash-subtitle {
+        margin-top: 5px;
+        font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+        font-size: 10px;
+        letter-spacing: 0.24em;
+        text-transform: uppercase;
+        color: #8e969c;
+      }
+      /* One hairline track with a quiet sweep — equipment LED, not a spinner. */
+      .splash-track {
+        position: relative;
+        width: 148px;
+        height: 2px;
+        border-radius: 9999px;
+        background: #262b2f;
+        overflow: hidden;
+      }
+      .splash-track::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 42%;
+        border-radius: 9999px;
+        background: #707a82;
+        animation: splash-sweep 1.5s ease-in-out infinite;
+      }
+      @keyframes splash-breathe {
+        0%,
+        100% {
+          opacity: 0.55;
+        }
+        50% {
+          opacity: 0.95;
+        }
+      }
+      @keyframes splash-sweep {
+        0% {
+          transform: translateX(-110%);
+        }
+        100% {
+          transform: translateX(340%);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .splash-mark,
+        .splash-track::before {
+          animation: none;
+        }
+        .splash-track::before {
+          transform: translateX(140%);
+        }
+      }
+    </style>
   </head>
 
   <body>
     <div id="root"></div>
+
+    <div id="splash" aria-hidden="true">
+      <img class="splash-mark" src="/brand-mark.svg" alt="" draggable="false" />
+      <div class="splash-wordmark">
+        Tafseer Clipper
+        <div class="splash-subtitle">Subtitle studio</div>
+      </div>
+      <div class="splash-track"></div>
+    </div>
+
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
