@@ -55,6 +55,7 @@ sys.path.insert(0, str(BACKEND))
 
 import config
 from services import analyzer, renderer, subtitle_gen, transcriber
+from services.cancel import JobCancelled, raise_if_cancelled
 
 ARTIFACTS = BACKEND / ".e2e"
 WINDIR = Path(os.environ.get("WINDIR", r"C:\Windows"))
@@ -1113,6 +1114,57 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
     check(
         "analyzer: prompt carries session guide + excluded ranges",
         "SESSION TOPIC GUIDE" in last_prompt and "2.0s .. 4.0s" in last_prompt,
+    )
+
+    # ---- cooperative cancellation (services/cancel.py) ---------------------- #
+    # The HTTP handlers set a shared `threading.Event` on client disconnect and
+    # the services raise JobCancelled at their natural boundaries.
+    none_event: threading.Event | None = None
+    raise_if_cancelled(none_event)  # must be a no-op
+    set_event = threading.Event()
+    set_event.set()
+    raised_cancel: Exception | None = None
+    try:
+        raise_if_cancelled(set_event)
+    except Exception as exc:  # noqa: BLE001 - asserting the type
+        raised_cancel = exc
+    check(
+        "cancel: raise_if_cancelled is a no-op when unset/None and raises when set",
+        isinstance(raised_cancel, JobCancelled)
+        and str(raised_cancel) == "The client disconnected; the job was cancelled.",
+        type(raised_cancel).__name__ if raised_cancel else "no exception",
+    )
+
+    # discover_clips must stop at the first window boundary once the cancel
+    # event is set — without issuing another provider call.
+    mock_calls_before = len(MockLLMHandler.calls)
+    cancel_before = threading.Event()
+    cancel_before.set()
+    raised_discover: Exception | None = None
+    try:
+        asyncio.run(
+            analyzer.discover_clips(
+                segments=[{"start": 0.0, "end": 10.0, "text": "เนื้อหาบทเรียนตัฟซีร"}],
+                duration=10.0,
+                base_prompt="",
+                session_guide="",
+                refinement_note="",
+                excluded_ranges=[],
+                provider=provider,
+                min_duration=3.0,
+                max_duration=90.0,
+                max_clips=4,
+                cancel_event=cancel_before,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - asserting the type
+        raised_discover = exc
+    check(
+        "analyzer: discover_clips aborts at a window boundary on cancel",
+        isinstance(raised_discover, JobCancelled)
+        and len(MockLLMHandler.calls) == mock_calls_before,
+        f"{type(raised_discover).__name__ if raised_discover else 'no exception'} "
+        f"calls={len(MockLLMHandler.calls) - mock_calls_before}",
     )
 
 

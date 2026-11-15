@@ -17,10 +17,40 @@ import { SIDECAR_URL } from "@/lib/api";
 import { describeAcceleration } from "@/lib/acceleration";
 import { STEP_LABELS, type WizardStep } from "@/lib/projectTypes";
 import { useProjectStore } from "@/store/projectStore";
+import { useRenderStore } from "@/store/renderStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
 
 const STEPS: WizardStep[] = [1, 2, 3, 4];
+
+/**
+ * A step is complete when its work exists, not merely because the wizard moved
+ * past it (a project with no transcript at Step 4 must not show ✓ on 1–3).
+ */
+function stepCompletion(
+  step: WizardStep,
+  project: ReturnType<typeof useProjectStore.getState>["project"],
+  renderDoneForProject: boolean,
+): boolean {
+  if (!project) return false;
+  switch (step) {
+    case 1:
+      return Boolean(project.transcriptId && project.transcript);
+    case 2:
+      return project.clips.some((clip) => clip.approved);
+    case 3: {
+      const approved = project.clips.filter((clip) => clip.approved);
+      return (
+        approved.length > 0 &&
+        approved.every((clip) =>
+          (project.subtitles[clip.id] ?? []).some((cue) => cue.arabic || cue.thai),
+        )
+      );
+    }
+    case 4:
+      return renderDoneForProject;
+  }
+}
 
 export function StepperHeader() {
   const project = useProjectStore((state) => state.project);
@@ -36,6 +66,11 @@ export function StepperHeader() {
   const status = sidecar.status;
   /** Vendor-neutral acceleration state for the status tooltip. */
   const acceleration = describeAcceleration(sidecar.health);
+  const renderJob = useRenderStore((state) => state.job);
+  const renderDoneForProject =
+    renderJob.projectId !== null &&
+    renderJob.projectId === project?.id &&
+    renderJob.status === "done";
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card/30 px-4">
@@ -56,7 +91,7 @@ export function StepperHeader() {
       <nav aria-label="Wizard steps" className="flex items-center gap-0.5">
         {STEPS.map((step) => {
           const active = currentStep === step;
-          const done = project !== null && step < currentStep;
+          const done = stepCompletion(step, project, renderDoneForProject);
           const disabled = project === null && step !== 1;
           return (
             <Button
@@ -67,6 +102,7 @@ export function StepperHeader() {
               onClick={() => setStep(step)}
               disabled={disabled}
               aria-current={active ? "step" : undefined}
+              aria-label={`${step}. ${STEP_LABELS[step]}${done ? ", complete" : ""}`}
               className={cn(
                 "h-auto gap-2 px-2.5 py-1.5 text-xs font-normal",
                 active

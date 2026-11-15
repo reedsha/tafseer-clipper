@@ -38,43 +38,11 @@ import {
 } from "@/lib/subtitleStyles";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore } from "@/store/settingsStore";
+import { wrapSubtitleText } from "@/lib/subtitleWrap";
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
-
-/**
- * `Intl.Segmenter` is not in the ES2020 lib typings this project compiles
- * against, so it is reached through a narrow local cast instead of widening
- * `tsconfig` (WebView2/Chromium ships it since v87).
- */
-interface WordSegmenter {
-  segment(input: string): Iterable<{ segment: string; index: number }>;
-}
-
-type WordSegmenterCtor = new (
-  locales?: string,
-  options?: { granularity: "word" | "grapheme" | "sentence" },
-) => WordSegmenter;
-
-const WordSegmenterClass = (Intl as unknown as { Segmenter?: WordSegmenterCtor }).Segmenter;
-
-let thaiSegmenter: WordSegmenter | null | undefined;
-
-/** Dictionary-backed Thai word segmenter, or `null` when unsupported. */
-function getThaiSegmenter(): WordSegmenter | null {
-  if (thaiSegmenter !== undefined) return thaiSegmenter;
-  if (!WordSegmenterClass) {
-    thaiSegmenter = null;
-    return thaiSegmenter;
-  }
-  try {
-    thaiSegmenter = new WordSegmenterClass("th", { granularity: "word" });
-  } catch {
-    thaiSegmenter = null;
-  }
-  return thaiSegmenter;
-}
 
 /** Split a transcript segment into its Arabic and Thai halves. */
 export function splitBilingual(text: string): { arabic: string; thai: string } {
@@ -85,53 +53,6 @@ export function splitBilingual(text: string): { arabic: string; thai: string } {
   const arabic = arabicRuns.join(" ").trim();
   const thai = clean.replace(/[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]+/g, " ").replace(/\s+/g, " ").trim();
   return { arabic, thai };
-}
-
-/**
- * Wrap one physical line at `maxChars`, breaking only between word chunks.
- * `Intl.Segmenter` returns the whitespace chunks too, so joining them back
- * verbatim preserves the original spacing (and never inserts spaces between
- * Thai words). The space-split fallback joins with a single space.
- */
-function wrapLine(line: string, maxChars: number): string {
-  if (line.length <= maxChars) return line;
-  const segmenter = getThaiSegmenter();
-  const chunks = segmenter
-    ? [...segmenter.segment(line)].map((part) => part.segment)
-    : line.split(" ");
-  const glue = segmenter ? "" : " ";
-  const out: string[] = [];
-  let current = "";
-  for (const chunk of chunks) {
-    if (!current) {
-      current = chunk;
-      continue;
-    }
-    if (current.length + glue.length + chunk.length <= maxChars) {
-      current += `${glue}${chunk}`;
-    } else {
-      out.push(current.trim());
-      current = chunk;
-    }
-  }
-  if (current.trim()) out.push(current.trim());
-  return out.join("\n");
-}
-
-/**
- * Wrap Thai text at `maxChars` per line using a hard break, which the `.ass`
- * generator turns into `\N` — exactly how the burned-in subtitle wraps.
- *
- * Thai has no inter-word spaces, so wrapping is driven by `Intl.Segmenter`
- * (`granularity: "word"`, dictionary-based in Chromium). Re-wrapping an
- * already-wrapped value is idempotent: existing breaks are handled per line.
- */
-export function wrapSubtitleText(text: string, maxChars: number): string {
-  if (maxChars <= 0 || !text.trim()) return text;
-  return text
-    .split("\n")
-    .map((line) => wrapLine(line, maxChars))
-    .join("\n");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -412,10 +333,13 @@ export function Step3Subtitles() {
 
     const seeded: SubtitleCue[] = segments.map((segment) => {
       const { arabic, thai } = splitBilingual(segment.text);
+      const clipDuration = selectedClip.end - selectedClip.start;
       return {
         id: crypto.randomUUID(),
         start: Math.max(0, segment.start - selectedClip.start),
-        end: Math.max(0, segment.end - selectedClip.start),
+        // Clamp into the clip window: a segment straddling the cut must not
+        // seed a cue that runs past the clip's end.
+        end: Math.min(Math.max(0, segment.end - selectedClip.start), clipDuration),
         arabic,
         thai: wrapSubtitleText(thai, maxCharsPerLine),
       };
@@ -429,15 +353,25 @@ export function Step3Subtitles() {
   const handleCueChange = useCallback(
     (cueId: string, field: "arabic" | "thai", value: string) => {
       if (!selectedClipId) return;
+      // Store the raw value; Thai wraps on commit (blur/split), not on every
+      // keystroke, so typing past the wrap width never jumps the caret.
       const next = cues.map((cue) =>
-        cue.id === cueId
-          ? {
-              ...cue,
-              [field]:
-                field === "thai" ? wrapSubtitleText(value, maxCharsPerLine) : value,
-            }
-          : cue,
+        cue.id === cueId ? { ...cue, [field]: value } : cue,
       );
+      setSubtitles(selectedClipId, next);
+    },
+    [cues, selectedClipId, setSubtitles],
+  );
+
+  const handleCueBlur = useCallback(
+    (cueId: string, field: "arabic" | "thai") => {
+      if (!selectedClipId) return;
+      const next = cues.map((cue) => {
+        if (cue.id !== cueId) return cue;
+        const wrapped =
+          field === "thai" ? wrapSubtitleText(cue.thai, maxCharsPerLine) : cue.thai;
+        return wrapped === cue.thai ? cue : { ...cue, thai: wrapped };
+      });
       setSubtitles(selectedClipId, next);
     },
     [cues, maxCharsPerLine, selectedClipId, setSubtitles],
@@ -689,25 +623,24 @@ export function Step3Subtitles() {
                 return (
                   <div
                     key={cue.id}
-                    role="button"
-                    tabIndex={0}
-                    aria-pressed={active}
+                    data-active={active ? "true" : undefined}
                     onClick={() => setActiveCueId(cue.id)}
-                    onKeyDown={(event) => {
-                      if (event.target !== event.currentTarget) return;
-                      if (event.key !== "Enter" && event.key !== " ") return;
-                      event.preventDefault();
-                      setActiveCueId(cue.id);
-                    }}
+                    onFocus={() => setActiveCueId(cue.id)}
                     className={cn(
-                      "rounded-lg border px-3 py-2.5 transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
+                      "rounded-lg border px-3 py-2.5 transition-colors",
                       active
                         ? "border-ring/50 bg-accent/20"
                         : "border-border bg-card/40 hover:bg-accent/10",
                     )}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="flex items-baseline gap-1 font-mono text-[11px] tabular-nums text-muted-foreground">
+                      <span
+                        aria-label={`${formatClock(cue.start, true)} to ${formatClock(
+                          cue.end,
+                          true,
+                        )}`}
+                        className="flex items-baseline gap-1 font-mono text-[11px] tabular-nums text-muted-foreground"
+                      >
                         <TimeFlow value={cue.start} hundredths />
                         <span aria-hidden>→</span>
                         <TimeFlow value={cue.end} hundredths />
@@ -758,6 +691,7 @@ export function Step3Subtitles() {
                       <Textarea
                         value={cue.thai}
                         onChange={(event) => handleCueChange(cue.id, "thai", event.target.value)}
+                        onBlur={() => handleCueBlur(cue.id, "thai")}
                         onKeyDown={(event) => {
                           if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
                             event.preventDefault();

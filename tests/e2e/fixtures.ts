@@ -148,18 +148,23 @@ const OUTPUT_MP4 = `${OUTPUT_DIR}/Tafseer-Lecture-01_Clip01_The patience of Ayyu
 const OUTPUT_SRT = `${OUTPUT_DIR}/Tafseer-Lecture-01_Clip01_The patience of Ayyub.srt`;
 
 /**
- * A complete happy-path stream: `start` (with the resolved clip plan),
- * `progress`, `clip_done` and the terminal `done`. The renderer must reach the
- * "done" state from this alone — no sidecar FFmpeg runs in the test.
+ * A complete happy-path stream mirroring `backend/main.py:_stream_batch`
+ * frame-for-frame (`start` → `progress` → `clip_done` → terminal `done`).
+ * The renderer must reach the "done" state from this alone — no sidecar
+ * FFmpeg runs in the test.
  */
 export const SSE_RENDER_BODY =
   [
     sseFrame("start", {
       job_id: "e2e-job",
-      status: "running",
+      status: "processing",
       progress: 0,
       clip_count: 1,
-      output_dir: OUTPUT_DIR,
+      resolution: "1080x1920",
+      framing: "blur-fill",
+      source_path: "C:/Lectures/Tafseer-Lecture-01.mp4",
+      // Real `start` frames carry NO `output_dir`; the client falls back to
+      // its own default and updates when SSE `done` announces the truth.
       clips: [
         {
           index: 0,
@@ -174,35 +179,71 @@ export const SSE_RENDER_BODY =
     }),
     sseFrame("progress", {
       job_id: "e2e-job",
-      status: "rendering",
+      status: "processing",
       progress: 0.5,
       clip_index: 0,
       clip_count: 1,
       clip_progress: 0.5,
       encoder: "h264_nvenc",
+      failed_encoder: null,
+      reason: null,
+      stage: "encoding",
+      output_path: OUTPUT_MP4,
       elapsed: 0.5,
     }),
     sseFrame("clip_done", {
       job_id: "e2e-job",
-      status: "rendering",
+      status: "processing",
       progress: 0.8,
       clip_index: 0,
       clip_count: 1,
-      clip_progress: 1,
+      encoder: "h264_nvenc",
       output_path: OUTPUT_MP4,
       srt_path: OUTPUT_SRT,
+      duration: 30,
       elapsed: 0.8,
     }),
     sseFrame("done", {
       job_id: "e2e-job",
       status: "completed",
       progress: 1,
-      rendered_clips: 1,
+      clip_count: 1,
       failed_clips: 0,
+      rendered_clips: 1,
       elapsed: 1.2,
       output_dir: OUTPUT_DIR,
     }),
   ].join("\n\n") + "\n\n";
+
+/**
+ * A fallback frame (GPU → CPU) exactly as the sidecar emits before retrying a
+ * clip with `libx264`. The renderer must dedupe the repeated warning toast.
+ */
+export const SSE_RENDER_FALLBACK_FRAME = sseFrame("fallback", {
+  job_id: "e2e-job",
+  status: "processing",
+  progress: 0.1,
+  clip_index: 0,
+  clip_count: 1,
+  clip_progress: 0,
+  encoder: "libx264",
+  failed_encoder: "h264_nvenc",
+  reason: "NVENC is not available on this machine (GPU/driver probe failed); using libx264.",
+  stage: "fallback",
+  output_path: OUTPUT_MP4,
+  elapsed: 0.3,
+});
+
+/** A clip error frame as the sidecar emits on an FFmpeg failure. */
+export const SSE_RENDER_CLIP_ERROR_FRAME = sseFrame("clip_error", {
+  job_id: "e2e-job",
+  status: "error",
+  progress: 0.4,
+  clip_index: 0,
+  clip_count: 1,
+  detail: "h264_nvenc failed (exit 1): /dev/null",
+  output_path: OUTPUT_MP4,
+});
 
 /** Expected queue file name (default template, source stem + clip title). */
 export const EXPECTED_FILE_NAME =

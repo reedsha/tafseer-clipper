@@ -18,13 +18,13 @@ import {
   type WizardStep,
 } from "./projectTypes";
 import { sanitizeWindowsFileName } from "./filenameTemplate";
+import { MIN_RENDERABLE_CLIP_SECONDS } from "./clipMath";
+
+export { MIN_RENDERABLE_CLIP_SECONDS };
 
 export const PROJECT_FORMAT = "tafseer-project";
 export const PROJECT_SCHEMA_VERSION = 1;
 export const PROJECT_EXTENSION = ".tafseer";
-
-/** The sidecar's `RenderClip` validator rejects clips shorter than this. */
-const MIN_RENDERABLE_CLIP_SECONDS = 0.5;
 
 interface TafseerFile {
   format: typeof PROJECT_FORMAT;

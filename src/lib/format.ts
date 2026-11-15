@@ -43,3 +43,15 @@ export function relativeTime(timestamp: number): string {
   if (hours < 24) return `${hours} h ago`;
   return `${Math.floor(hours / 24)} d ago`;
 }
+
+/**
+ * Lecture duration for the Recent Lectures surfaces, switching to minutes at
+ * the hour boundary so a 45 s lecture never reads as "1 min". The caller
+ * renders the parts with NumberFlow.
+ */
+export function formatLectureDuration(seconds: number): { value: number; suffix: string } {
+  if (seconds >= 60) {
+    return { value: Math.round(seconds / 60), suffix: " min" };
+  }
+  return { value: Math.max(0, Math.round(seconds)), suffix: " s" };
+}

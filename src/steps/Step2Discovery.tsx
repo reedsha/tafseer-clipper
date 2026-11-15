@@ -18,6 +18,7 @@ import {
   ChevronRight,
   Clock3,
   FileAudio,
+  FileVideo2,
   FolderSearch,
   Languages,
   ListVideo,
@@ -43,11 +44,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { discoverClips, type ClipProposal, type ProviderOverride } from "@/lib/api";
 import {
   applyCutBuffer,
+  MIN_RENDERABLE_CLIP_SECONDS,
   normalizeSpeechRange,
   rangesOverlap,
   speechFromCut,
 } from "@/lib/clipMath";
 import { toMediaSrc } from "@/lib/media";
+import { formatClock } from "@/lib/format";
 import type { ProjectClip } from "@/lib/projectTypes";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore, type SettingsState } from "@/store/settingsStore";
@@ -132,6 +135,9 @@ function ClipCard({
         variant="ghost"
         onClick={onSelect}
         aria-current={selected ? "true" : undefined}
+        aria-label={`${clip.title}, ${formatClock(clip.start)} to ${formatClock(clip.end)}, ${
+          clip.approved ? "approved" : "not approved"
+        }`}
         className="flex-col items-stretch h-auto w-full justify-start gap-0 whitespace-normal rounded-none px-3 pb-1.5 pt-2.5 text-left font-normal hover:bg-transparent focus-visible:ring-[3px] focus-visible:ring-ring/40"
       >
         <div className="flex w-full items-start gap-2">
@@ -463,7 +469,11 @@ export function Step2Discovery() {
 
       toast.success(mode === "reroll" ? "Re-roll complete" : "Clip proposals ready", {
         description: `${proposals.length} new clip${proposals.length === 1 ? "" : "s"}${
-          approved.length > 0 ? ` · ${approved.length} approved locked` : ""
+          result.excluded_ranges_applied > 0
+            ? ` · ${result.excluded_ranges_applied} approved interval${
+                result.excluded_ranges_applied === 1 ? "" : "s"
+              } locked`
+            : ""
         } · ${result.model}`,
       });
       if (proposals.length === 0) {
@@ -475,7 +485,10 @@ export function Step2Discovery() {
     } catch (caught) {
       if (!mountedRef.current || requestRef.current !== controller) return;
       if (controller.signal.aborted) {
+        // The editor aborted the request (Cancel button / new run); the old
+        // silent return left no trace that the run had stopped.
         setStatus("idle");
+        toast("Discovery cancelled");
         return;
       }
       const message = caught instanceof Error ? caught.message : String(caught);
@@ -502,17 +515,22 @@ export function Step2Discovery() {
       current.clips.find((item) => item.id === current.selectedClipId) ?? current.clips[0];
     if (!clip) return;
     const settings = useSettingsStore.getState();
-    const normalized = normalizeSpeechRange(
-      edge === "start" ? clip.speechStart + delta : clip.speechStart,
-      edge === "end" ? clip.speechEnd + delta : clip.speechEnd,
-      current.duration,
-    );
-    if (!normalized) return;
-    const cut = applyCutBuffer(normalized.start, normalized.end, {
+    const nextSpeechStart = edge === "start" ? clip.speechStart + delta : clip.speechStart;
+    const nextSpeechEnd = edge === "end" ? clip.speechEnd + delta : clip.speechEnd;
+    const cut = applyCutBuffer(nextSpeechStart, nextSpeechEnd, {
       duration: current.duration,
       buffer: settings.editor.cutBufferSeconds,
       autoPad: settings.editor.autoPad,
     });
+    // The render floor applies to the final cut, not the speech bounds: with
+    // auto-pad on, a valid 0.5 s cut can have degenerate speech bounds.
+    if (cut.end - cut.start < MIN_RENDERABLE_CLIP_SECONDS) {
+      toast.error("Clip is too short to render — minimum 0.5 s.");
+      return;
+    }
+    // User-driven nudges keep the drag exact: no 1 s AI-proposal minimum.
+    const normalized = normalizeSpeechRange(nextSpeechStart, nextSpeechEnd, current.duration, 0);
+    if (!normalized) return;
     useProjectStore.getState().updateClip(clip.id, {
       speechStart: normalized.start,
       speechEnd: normalized.end,
@@ -533,8 +551,16 @@ export function Step2Discovery() {
       buffer: settings.editor.cutBufferSeconds,
       autoPad: settings.editor.autoPad,
     };
+    // The render floor applies to the dragged cut; rejecting silently was the
+    // old bug (drag below 1 s + 2×buffer did nothing with zero feedback).
+    if (range.end - range.start < MIN_RENDERABLE_CLIP_SECONDS) {
+      toast.error("Clip is too short to render — minimum 0.5 s.");
+      return;
+    }
     const speech = speechFromCut(range.start, range.end, context);
-    const normalized = normalizeSpeechRange(speech.start, speech.end, current.duration);
+    // User-driven trims keep the drag exact: no 1 s AI-proposal minimum (with
+    // auto-pad on, a 0.5 s cut has ~0 s of speech inside it).
+    const normalized = normalizeSpeechRange(speech.start, speech.end, current.duration, 0);
     if (!normalized) return;
     const cut = applyCutBuffer(normalized.start, normalized.end, context);
     useProjectStore.getState().updateClip(clip.id, {
@@ -917,15 +943,25 @@ export function Step2Discovery() {
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto p-3">
-            <div className="aspect-video w-full overflow-hidden rounded-lg border border-border bg-black">
-              <VideoPlayer
-                ref={videoRef}
-                src={videoSrc}
-                clipStart={selected?.start ?? 0}
-                clipEnd={selected?.end ?? 0}
-                onTimeUpdate={setPlayhead}
-              />
-            </div>
+            {/* Collapse the player to a compact placeholder when there is no
+                video (NG source path), so the waveform + trim controls sit
+                above the fold on shorter windows. No visual flourish. */}
+            {videoSrc ? (
+              <div className="aspect-video w-full overflow-hidden rounded-lg border border-border bg-black">
+                <VideoPlayer
+                  ref={videoRef}
+                  src={videoSrc}
+                  clipStart={selected?.start ?? 0}
+                  clipEnd={selected?.end ?? 0}
+                  onTimeUpdate={setPlayhead}
+                />
+              </div>
+            ) : (
+              <div className="flex h-24 w-full items-center justify-center gap-2 rounded-lg border border-border bg-card/30">
+                <FileVideo2 className="size-4 text-muted-foreground" />
+                <span className="text-[11px] text-muted-foreground">No video preview available</span>
+              </div>
+            )}
 
             <div className="mt-3 rounded-lg border border-border bg-card/30 p-3">
               <WaveformBar

@@ -32,6 +32,7 @@ import httpx
 
 import config
 from services import accel
+from services.cancel import raise_if_cancelled
 
 logger = logging.getLogger("tafseer.transcriber")
 
@@ -505,6 +506,7 @@ class WhisperTranscriber:
         vad_filter: bool = True,
         glossary: dict[str, str] | None = None,
         auto_unload: bool = True,
+        cancel_event: threading.Event | None = None,
     ) -> TranscriptionResult:
         model = self._ensure_model()
 
@@ -562,6 +564,10 @@ class WhisperTranscriber:
 
             raw: list[Segment] = []
             for index, item in enumerate(segments_iter):
+                # Natural cancellation boundary: faster-whisper yields segments
+                # progressively, so a disconnected client stops the work here
+                # instead of burning CPU/GPU to the end of the lecture.
+                raise_if_cancelled(cancel_event)
                 text = (item.text or "").strip()
                 if not text:
                     continue
@@ -634,8 +640,10 @@ async def transcribe_cloud(
     prompt: str | None = None,
     glossary: dict[str, str] | None = None,
     timeout: float = 300.0,
+    cancel_event: threading.Event | None = None,
 ) -> TranscriptionResult:
     """Transcribe through an OpenAI-compatible ``/audio/transcriptions`` API."""
+    raise_if_cancelled(cancel_event)
     endpoint = base_url.rstrip("/") + "/audio/transcriptions"
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     data = {"model": model, "response_format": "verbose_json"}
