@@ -65,7 +65,7 @@ export const IDLE_RENDER_JOB: RenderJobState = {
  * unknown, so the UI must leave the "running" state instead of hanging.
  */
 const STREAM_INTERRUPTED_MESSAGE =
-  "The render stream closed before the sidecar reported completion. Check that backend.exe is still running, then render the batch again.";
+  "The render stopped before it finished. Render the batch again; if it keeps happening, copy diagnostics from Settings → Storage.";
 const STREAM_INTERRUPTED_CLIP_DETAIL =
   "The render stream closed before this clip reported completion.";
 
@@ -127,7 +127,7 @@ export const useRenderStore = create<RenderState>()((set) => ({
 
     if (!current.sourcePath && !current.transcriptId) {
       toast.error("Lecture path missing", {
-        description: "The sidecar needs the source video or a stored transcript.",
+        description: "The source video or a stored transcript is needed. Re-add the lecture on Step 1.",
       });
       return;
     }
@@ -237,7 +237,7 @@ export const useRenderStore = create<RenderState>()((set) => ({
             ...state.job,
             encoder: event.encoder ?? state.job.encoder,
             message:
-              event.reason ?? "GPU encoding failed — the sidecar fell back to CPU encoding.",
+              event.reason ?? "GPU rendering failed — switching to CPU rendering.",
           },
         }));
         // One toast per distinct fallback cause per batch: on a CPU-only
@@ -245,10 +245,8 @@ export const useRenderStore = create<RenderState>()((set) => ({
         const toastKey = `${event.failedEncoder ?? "hardware encoder"}:${event.reason ?? ""}`;
         if (fallbackToastKeyRef !== toastKey) {
           fallbackToastKeyRef = toastKey;
-          toast.warning("GPU encoder unavailable", {
-            description: `${event.failedEncoder ?? "hardware encoder"} failed, retrying with ${
-              event.encoder ?? "libx264"
-            }.`,
+          toast.warning("GPU rendering unavailable", {
+            description: "Switching to CPU rendering for this batch.",
           });
         }
         return;
@@ -314,7 +312,7 @@ export const useRenderStore = create<RenderState>()((set) => ({
         set((state) => {
           const clips = state.job.clips.map((clip): ClipJob =>
             clip.index === index
-              ? { ...clip, status: "error", detail: event.detail ?? "Unknown FFmpeg error" }
+              ? { ...clip, status: "error", detail: event.detail ?? "Unknown rendering error" }
               : clip,
           );
           return {
@@ -326,7 +324,7 @@ export const useRenderStore = create<RenderState>()((set) => ({
           };
         });
         toast.error("Clip failed to render", {
-          description: event.detail ?? "Unknown FFmpeg error",
+          description: event.detail ?? "Unknown rendering error",
         });
         return;
       }

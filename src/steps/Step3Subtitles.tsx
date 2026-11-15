@@ -38,6 +38,7 @@ import {
 } from "@/lib/subtitleStyles";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore } from "@/store/settingsStore";
+import { useUiStore } from "@/store/uiStore";
 import { wrapSubtitleText } from "@/lib/subtitleWrap";
 
 /* -------------------------------------------------------------------------- */
@@ -242,8 +243,8 @@ function SubtitlePreview({
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-center">
           <ScanText className="size-4 text-muted-foreground/60" />
           <p className="max-w-[80%] text-[10px] leading-relaxed text-muted-foreground/60">
-            The subtitle overlay is positioned exactly as the burned-in `.ass` will be.
-            The video frame appears here in the desktop shell.
+            The subtitles are placed exactly as they'll appear in the exported video. The video
+            frame appears here in the desktop app.
           </p>
         </div>
       )}
@@ -392,8 +393,8 @@ export function Step3Subtitles() {
       const edited = cue[field];
       const offset = Math.min(Math.max(cursor, 0), edited.length);
       if (offset <= 0 || offset >= edited.length) {
-        toast.error("Place the cursor where the block should split", {
-          description: "Click inside the line first, then press Ctrl + Enter.",
+        toast.error("Click inside the line where you want to split it", {
+          description: "Then press Ctrl + Enter.",
         });
         return;
       }
@@ -415,8 +416,8 @@ export function Step3Subtitles() {
 
       const duration = cue.end - cue.start;
       if (duration < 0.2) {
-        toast.error("Cue is too short to split", {
-          description: "Shorten the surrounding blocks instead.",
+        toast.error("This line is too short to split", {
+          description: "Make the surrounding lines longer first.",
         });
         return;
       }
@@ -451,8 +452,8 @@ export function Step3Subtitles() {
       next.splice(index, 1, first, second);
       setSubtitles(selectedClipId, next);
       setActiveCueId(second.id);
-      toast.success("Block split", {
-        description: `Split at ${formatClock(boundary - cue.start, true)} into the cue · ${editedFirst.length} / ${editedSecond.length} characters.`,
+      toast.success("Line split", {
+        description: `Split at ${formatClock(boundary - cue.start, true)} into the line · ${editedFirst.length} / ${editedSecond.length} characters.`,
       });
     },
     [cues, maxCharsPerLine, selectedClipId, setSubtitles],
@@ -469,8 +470,12 @@ export function Step3Subtitles() {
       }
       const settings = useSettingsStore.getState();
       if (settings.analysisMode === "cloud" && !settings.cloud.fastTextModel) {
-        toast.error("Fast text model missing", {
-          description: "Set the Step 3 verification model in Settings → AI Providers.",
+        toast.error("The Arabic checker isn't connected yet", {
+          description: "Choose a model in Settings → AI.",
+          action: {
+            label: "Set up",
+            onClick: () => useUiStore.getState().openSettings("providers"),
+          },
         });
         return;
       }
@@ -571,7 +576,7 @@ export function Step3Subtitles() {
         <div className="mt-0.5 flex flex-wrap items-center justify-between gap-2">
           <h1 className="text-base font-medium text-foreground">Subtitles</h1>
           <Badge variant="outline" className="text-[10px]">
-            {cues.length} cue{cues.length === 1 ? "" : "s"} · {language.toUpperCase()}
+            {cues.length} line{cues.length === 1 ? "" : "s"} · {language.toUpperCase()}
           </Badge>
         </div>
 
@@ -596,12 +601,12 @@ export function Step3Subtitles() {
         <section className="flex min-h-0 flex-col border-r border-border">
           <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-2.5">
             <div className="flex items-center gap-2">
-              <h2 className="text-[13px] font-medium text-foreground">Transcript cues</h2>
+              <h2 className="text-[13px] font-medium text-foreground">Subtitle lines</h2>
               <span className="text-[11px] text-muted-foreground">
                 Thai + Arabic, {maxCharsPerLine} chars per line
               </span>
             </div>
-            <span className="text-[10px] text-muted-foreground">Ctrl + Enter splits a block</span>
+            <span className="text-[10px] text-muted-foreground">Ctrl + Enter splits a line at the cursor</span>
           </div>
 
           <ScrollArea className="min-h-0 flex-1">
@@ -609,9 +614,9 @@ export function Step3Subtitles() {
               {cues.length === 0 ? (
                 <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center">
                   <ScanText className="size-5 text-muted-foreground" />
-                  <p className="text-xs font-medium text-foreground">No cues for this clip</p>
+                  <p className="text-xs font-medium text-foreground">No subtitle lines for this clip</p>
                   <p className="max-w-sm text-[11px] leading-relaxed text-muted-foreground">
-                    The transcript has no segments inside this clip. Widen the cut in Step 2 so the
+                    The transcript has no speech inside this clip. Widen the cut in Step 2 so the
                     speech is covered.
                   </p>
                 </div>
@@ -744,7 +749,7 @@ export function Step3Subtitles() {
                 />
                 <p className="text-[10px] leading-relaxed text-muted-foreground">
                   Blur fill pads the 9:16 frame with a blurred copy; center crop cuts to the
-                  middle. The sidecar burns the same framing.
+                  middle. The exported video uses this framing.
                 </p>
               </div>
             ) : (
@@ -788,11 +793,12 @@ export function Step3Subtitles() {
               <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] tabular-nums text-muted-foreground">
                 <dt>Arabic</dt>
                 <dd className="truncate text-foreground/80">
-                  {styles.arabic.font} · {styles.arabic.size}px · margin V {styles.arabic.marginV}
+                  {styles.arabic.font} · {styles.arabic.size}px · bottom margin{" "}
+                  {styles.arabic.marginV}
                 </dd>
                 <dt>Thai</dt>
                 <dd className="truncate text-foreground/80">
-                  {styles.thai.font} · {styles.thai.size}px · margin V {styles.thai.marginV}
+                  {styles.thai.font} · {styles.thai.size}px · bottom margin {styles.thai.marginV}
                 </dd>
               </dl>
               {overlap.overlaps ? (
@@ -810,8 +816,7 @@ export function Step3Subtitles() {
             </div>
 
             <p className="text-[10px] leading-relaxed text-muted-foreground">
-              Preview cues are relative to the clip start. The export step sends them to the sidecar
-              with <span className="font-mono">subtitle_timebase: clip</span>.
+              Times are shown relative to the start of the clip.
             </p>
           </div>
         </section>

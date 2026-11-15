@@ -28,7 +28,7 @@ import {
 import { cn } from "cn";
 
 import { GpuAccelerationPanel, GpuStatusLine } from "@/components/GpuAcceleration";
-import { SidecarStatusDot } from "@/components/SidecarStatusDot";
+import { SidecarStatusDot, SIDECAR_STATUS_LABEL } from "@/components/SidecarStatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -54,7 +54,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { importFonts, SIDECAR_URL, verifyArabic } from "@/lib/api";
+import { importFonts, verifyArabic } from "@/lib/api";
 import { describeAcceleration, isGpuEncodingAvailable } from "@/lib/acceleration";
 import { buildDiagnostics, copyText } from "@/lib/diagnostics";
 import {
@@ -410,9 +410,9 @@ function UsageBadge({ active }: { active: boolean }) {
 /* -------------------------------------------------------------------------- */
 
 const TABS: { value: SettingsTab; label: string; icon: LucideIcon }[] = [
-  { value: "providers", label: "AI Providers", icon: Bot },
+  { value: "providers", label: "AI", icon: Bot },
   { value: "fonts", label: "Fonts & Style", icon: Type },
-  { value: "glossary", label: "Glossary & Whisper", icon: Languages },
+  { value: "glossary", label: "Glossary & transcription", icon: Languages },
   { value: "editor", label: "Editor & Export", icon: SlidersHorizontal },
   { value: "storage", label: "Storage & Backup", icon: HardDrive },
 ];
@@ -753,16 +753,16 @@ export function SettingsDrawer() {
       await refreshHealth();
       const current = useSettingsStore.getState();
       if (current.sidecar.status !== "online" || !current.sidecar.health) {
-        toast.error("Sidecar unreachable", {
-          description: current.sidecar.error ?? `Start backend.exe on ${SIDECAR_URL}.`,
+        toast.error("The processing engine isn't responding", {
+          description: current.sidecar.error ?? "Click Retry, or restart the app.",
         });
         return;
       }
 
       const gap = describeProviderGap(current, "fast");
       if (gap) {
-        toast.error("Provider is not configured", {
-          description: `Add ${gap} below, then test again.`,
+        toast.error("The AI connection isn't set up yet", {
+          description: `Add ${gap} below, then check again.`,
         });
         return;
       }
@@ -776,13 +776,13 @@ export function SettingsDrawer() {
         { timeoutMs: 20_000 },
       );
 
-      toast.success("Provider reachable", {
+      toast.success("Connected", {
         description: `${result.model || "The model"} answered · ${
           result.correction_applied ? "correction applied" : "text unchanged"
         }`,
       });
     } catch (error) {
-      toast.error("Provider check failed", {
+      toast.error("Connection check failed", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -919,7 +919,7 @@ export function SettingsDrawer() {
       const copied = await copyText(bundle);
       if (copied) {
         toast.success("Diagnostics copied", {
-          description: "Paste the JSON into the support report. No API keys are included.",
+          description: "Paste it into your support request. No API keys are included.",
         });
       } else {
         toast.error("Could not copy diagnostics", {
@@ -982,10 +982,7 @@ export function SettingsDrawer() {
             {/* ------------------------------ Providers ------------------------------ */}
             <TabsContent value="providers" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
               <div className="space-y-5">
-                <Section
-                  title="Engine routing"
-                  description="All provider calls run inside the FastAPI sidecar. The frontend only sends configuration."
-                >
+                <Section title="Engine routing">
                   <Field label="Transcription engine">
                     <Select
                       value={transcriptionMode}
@@ -995,8 +992,8 @@ export function SettingsDrawer() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="local">Local Faster-Whisper (on this machine)</SelectItem>
-                        <SelectItem value="cloud">Cloud STT API</SelectItem>
+                        <SelectItem value="local">This computer (offline)</SelectItem>
+                        <SelectItem value="cloud">Cloud speech-to-text</SelectItem>
                       </SelectContent>
                     </Select>
                   </Field>
@@ -1009,8 +1006,8 @@ export function SettingsDrawer() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="cloud">Unified cloud API</SelectItem>
-                        <SelectItem value="local">Local Ollama</SelectItem>
+                        <SelectItem value="cloud">Your AI account</SelectItem>
+                        <SelectItem value="local">This computer (Ollama)</SelectItem>
                       </SelectContent>
                     </Select>
                   </Field>
@@ -1019,8 +1016,8 @@ export function SettingsDrawer() {
                 <Separator />
 
                 <Section
-                  title="Unified cloud API"
-                  description="OpenAI-compatible endpoint used for Step 2 clip reasoning and Step 3 Arabic verification."
+                  title="Your AI account"
+                  description="Used for finding clips and checking the Arabic."
                   badge={<UsageBadge active={analysisMode === "cloud"} />}
                 >
                   <Field label="Base URL">
@@ -1070,7 +1067,7 @@ export function SettingsDrawer() {
                   </div>
                   {analysisMode === "cloud" && providerGap ? (
                     <p className="text-[11px] leading-relaxed text-status-warning">
-                      Step 3 cannot run yet: add {providerGap}.
+                      The Arabic checker isn't set up yet: add {providerGap}.
                     </p>
                   ) : null}
                   <div className="flex flex-wrap items-center gap-2">
@@ -1089,10 +1086,10 @@ export function SettingsDrawer() {
                       Test connection
                     </Button>
                     <span className="text-[11px] text-muted-foreground">
-                      Pings the sidecar, then asks{" "}
+                      Checks the connection, then asks{" "}
                       {analysisMode === "local"
                         ? "your Ollama model"
-                        : "the unified cloud API"}{" "}
+                        : "your AI account"}{" "}
                       to verify one Arabic verse.
                     </span>
                   </div>
@@ -1101,8 +1098,8 @@ export function SettingsDrawer() {
                 <Separator />
 
                 <Section
-                  title="Local Ollama"
-                  description="OpenAI-compatible local runtime for offline clip discovery."
+                  title="This computer (Ollama)"
+                  description="Runs clip finding on this computer, offline."
                   badge={<UsageBadge active={analysisMode === "local"} />}
                 >
                   <Field label="Ollama URL">
@@ -1125,13 +1122,13 @@ export function SettingsDrawer() {
                   </Field>
                   {analysisMode === "local" && ollamaIncomplete ? (
                     <p className="text-[11px] leading-relaxed text-status-warning">
-                      Clip discovery will fail until you enter a model id.
+                      Clip finding won't work until you enter a model name.
                     </p>
                   ) : null}
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-[11px] leading-relaxed text-muted-foreground">
-                      Model detection is not part of the six-endpoint sidecar contract — enter the
-                      model id exactly as Ollama reports it (<span className="font-mono">ollama list</span>).
+                      Enter the model name exactly as Ollama lists it (
+                      <span className="font-mono">ollama list</span>).
                     </span>
                   </div>
                 </Section>
@@ -1139,8 +1136,8 @@ export function SettingsDrawer() {
                 <Separator />
 
                 <Section
-                  title="Cloud STT API"
-                  description="Optional external speech-to-text endpoint used when the transcription engine is set to Cloud."
+                  title="Cloud speech-to-text"
+                  description="Used for transcription when you choose cloud speech-to-text."
                   badge={<UsageBadge active={transcriptionMode === "cloud"} />}
                 >
                   <Field label="Base URL">
@@ -1187,7 +1184,7 @@ export function SettingsDrawer() {
               <div className="space-y-5">
                 <Section
                   title="Custom font importer"
-                  description="Fonts are copied into the sidecar's fonts/ directory so FFmpeg .ass burn-in resolves Thai and Uthmani Arabic reliably."
+                  description="Fonts are added to the app so exported subtitles always render Thai and Uthmani Arabic correctly."
                 >
                   <div className="flex flex-wrap items-center gap-2">
                     <input
@@ -1429,7 +1426,7 @@ export function SettingsDrawer() {
 
                 <Section
                   title="Saved style presets"
-                  description="One-click visual themes applied to the dual-line preview and the FFmpeg .ass burn-in."
+                  description="One-click visual themes applied to the dual-line preview and the exported subtitles."
                 >
                   <div className="space-y-1.5">
                     {presets.map((preset) => {
@@ -1658,7 +1655,7 @@ export function SettingsDrawer() {
                     </Field>
                   </div>
                   {showCustomWhisperModel ? (
-                    <Field label="Custom model id" hint="Anything faster-whisper can load">
+                    <Field label="Custom model name" hint="Any Whisper model name">
                       <Input
                         value={whisper.model}
                         onChange={(event) => updateWhisper({ model: event.target.value })}
@@ -1965,27 +1962,22 @@ export function SettingsDrawer() {
                 <Separator />
 
                 <Section
-                  title="Sidecar & hardware"
-                  description="Read-only snapshot from GET /health."
+                  title="Engine & hardware"
+                  description="Read-only snapshot of the running engine."
                 >
                   <div className="rounded-md border border-border bg-card/40">
                     <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
                       <div className="flex items-center gap-2">
                         <SidecarStatusDot status={sidecar.status} />
                         <span className="text-xs text-foreground/90">
-                          {sidecar.status === "online"
-                            ? `Online${health ? ` · v${health.version}` : ""}`
-                            : sidecar.status === "checking"
-                              ? "Checking…"
-                              : sidecar.status === "offline"
-                                ? "Offline"
-                                : "Not checked"}
+                          {SIDECAR_STATUS_LABEL[sidecar.status]}
+                          {sidecar.status === "online" && health ? ` · v${health.version}` : ""}
                         </span>
                       </div>
                       <Button
                         variant="ghost"
                         size="icon-xs"
-                        aria-label="Refresh sidecar health"
+                        aria-label="Refresh engine status"
                         onClick={() => void refreshHealth()}
                       >
                         <RefreshCw
@@ -1998,7 +1990,7 @@ export function SettingsDrawer() {
                     </div>
                     <dl className="divide-y divide-border text-[11px]">
                       <HealthRow
-                        label="Sidecar version"
+                        label="Engine version"
                         value={health ? `v${health.version}` : "—"}
                       />
                       <HealthRow
@@ -2058,7 +2050,7 @@ export function SettingsDrawer() {
 
                 <Section
                   title="Disk cache"
-                  description="Temporary WAV extracts and preview files created by the sidecar."
+                  description="Temporary audio extracts and preview files created by the app."
                 >
                   <div className="space-y-1.5 rounded-md border border-border bg-card/40 px-3 py-2">
                     <div className="flex items-baseline justify-between gap-3">
@@ -2088,10 +2080,9 @@ export function SettingsDrawer() {
                     </p>
                   </div>
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    The sidecar prunes its own scratch space on startup: generated job folders
-                    older than 24 h and extracted WAVs older than 7 days are deleted, while saved
-                    transcripts are kept. There is no manual clear button in the six-endpoint
-                    contract.
+                    Temporary files are cleaned up automatically on startup: job folders older
+                    than 24 hours and extracted audio older than 7 days are deleted, while saved
+                    transcripts are kept.
                   </p>
                 </Section>
 
@@ -2218,7 +2209,7 @@ export function SettingsDrawer() {
 
                 <Section
                   title="Diagnostics"
-                  description="Copy a support bundle with versions, paths and the last sidecar health snapshot."
+                  description="Copy a support bundle with versions, paths and the last engine health snapshot."
                 >
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
@@ -2236,7 +2227,7 @@ export function SettingsDrawer() {
                       Copy diagnostics
                     </Button>
                     <span className="text-[11px] text-muted-foreground">
-                      JSON to the clipboard · API keys excluded
+                      Diagnostics to the clipboard · API keys excluded
                     </span>
                   </div>
                 </Section>

@@ -14,7 +14,6 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { SIDECAR_URL } from "@/lib/api";
 import { describeAcceleration } from "@/lib/acceleration";
 import { STEP_LABELS, type WizardStep } from "@/lib/projectTypes";
 import { useProjectStore } from "@/store/projectStore";
@@ -149,7 +148,7 @@ export function StepperHeader() {
           <TooltipContent side="bottom" className="max-w-64 text-xs">
             {status === "online" && sidecar.health ? (
               <span className="flex flex-col gap-0.5">
-                <span>Sidecar v{sidecar.health.version}</span>
+                <span>Engine v{sidecar.health.version}</span>
                 <span>{acceleration.label}</span>
                 {acceleration.gpuName ? (
                   <span className="text-muted-foreground">Detected: {acceleration.gpuName}</span>
@@ -166,7 +165,7 @@ export function StepperHeader() {
                 ) : null}
               </span>
             ) : (
-              (sidecar.error ?? `Click to ping the FastAPI sidecar on ${SIDECAR_URL}.`)
+              (sidecar.error ?? "Click to check the processing engine again.")
             )}
           </TooltipContent>
         </Tooltip>

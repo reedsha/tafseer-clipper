@@ -76,7 +76,7 @@ test.describe("project flow", () => {
     await expect(queueRow.getByText(EXPECTED_FILE_NAME)).toBeVisible();
     await expect(queueRow.getByText("9:16 Vertical")).toBeVisible();
     await expect(queueRow.getByText("Blur fill")).toBeVisible();
-    await expect(queueRow.getByText("2 cues")).toBeVisible();
+    await expect(queueRow.getByText("2 lines")).toBeVisible();
     await expect(queueRow.getByText("Queued", { exact: true })).toBeVisible();
 
     /* -------------------- mocked /render-batch SSE ----------------------- */

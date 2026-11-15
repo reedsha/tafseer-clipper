@@ -15,10 +15,10 @@ const STATUS_DOT: Record<SidecarState["status"], string> = {
 };
 
 export const SIDECAR_STATUS_LABEL: Record<SidecarState["status"], string> = {
-  online: "Sidecar online",
-  checking: "Checking sidecar",
-  offline: "Sidecar offline",
-  unknown: "Sidecar not checked",
+  online: "Engine ready",
+  checking: "Checking…",
+  offline: "Engine not responding",
+  unknown: "Not checked yet",
 };
 
 export function SidecarStatusDot({

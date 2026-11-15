@@ -26,7 +26,7 @@ import { PromptDrawer } from "@/components/PromptDrawer";
 import { GpuInlineHint } from "@/components/GpuAcceleration";
 import { RecentProjectsBar } from "@/components/RecentProjectsBar";
 import { SegmentedToggle } from "@/components/SegmentedToggle";
-import { SidecarStatusDot } from "@/components/SidecarStatusDot";
+import { SidecarStatusDot, SIDECAR_STATUS_LABEL } from "@/components/SidecarStatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -47,9 +47,11 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
-import { extractAndTranscribe, SIDECAR_URL } from "@/lib/api";
+import { extractAndTranscribe } from "@/lib/api";
 import { describeAcceleration } from "@/lib/acceleration";
+import { buildDiagnostics, copyText } from "@/lib/diagnostics";
 import { formatBytes, formatClock, stripExtension } from "@/lib/format";
+import { relaunchApp } from "@/lib/updater";
 import {
   LECTURE_EXTENSIONS,
   fileFromDrop,
@@ -75,7 +77,7 @@ import { useUiStore } from "@/store/uiStore";
  * transcription).
  */
 function analysisGapMessage(gap: string): string {
-  return `Topic analysis (Step 2) needs ${gap}. Transcribing now would produce a transcript Step 2 can't search, so it's blocked until this is set.`;
+  return `Clip finding needs an AI connection first (${gap}). Set it up and transcription starts right away.`;
 }
 
 export function Step1Ingest() {
@@ -90,7 +92,6 @@ export function Step1Ingest() {
   const cloud = useSettingsStore((state) => state.cloud);
   const cloudStt = useSettingsStore((state) => state.cloudStt);
   const ollama = useSettingsStore((state) => state.ollama);
-  const whisper = useSettingsStore((state) => state.whisper);
   const promptPresets = useSettingsStore((state) => state.promptPresets);
   const sidecar = useSettingsStore((state) => state.sidecar);
   const setTranscriptionMode = useSettingsStore((state) => state.setTranscriptionMode);
@@ -163,26 +164,28 @@ export function Step1Ingest() {
   const promptPreview =
     project?.basePrompt.trim() ||
     activePreset?.prompt ||
-    "The sidecar's built-in editorial policy will be used.";
+    "The built-in defaults will be used.";
 
   /** Vendor-neutral acceleration state derived from GET /health. */
   const acceleration = describeAcceleration(sidecar.health);
 
   const transcriptionDetail =
     transcriptionMode === "local"
-      ? `faster-whisper ${whisper.model} · ${whisper.computeType}${
+      ? `On this computer${
           sidecar.health ? (acceleration.transcription === "gpu" ? " · GPU" : " · CPU") : ""
         }`
-      : `Cloud STT · ${cloudStt.model || "model not set"}${
-          cloudStt.baseUrl ? "" : " · endpoint missing"
-        }`;
+      : cloudStt.baseUrl
+        ? `Your AI account · ${cloudStt.model || "model not set"}`
+        : "Your AI account — not set up";
 
   const analysisDetail =
     analysisMode === "cloud"
-      ? `${cloud.reasoningModel || "reasoning model not set"} · ${
-          cloud.apiKey ? "key saved" : "no API key"
-        }`
-      : `Ollama · ${ollama.model || "model not set"}`;
+      ? cloud.reasoningModel && cloud.apiKey
+        ? `Your AI account · ${cloud.reasoningModel}`
+        : "Your AI account — not set up"
+      : ollama.model
+        ? `This computer · ${ollama.model}`
+        : "This computer — no model chosen";
 
   /** Missing provider field that would block Step 2 discovery, if any. */
   const analysisGap =
@@ -380,8 +383,7 @@ export function Step1Ingest() {
     const resumed = await resumeRecent(projectId);
     if (!resumed) {
       toast.error("Auto-save not found", {
-        description:
-          "No .tafseer snapshot was found for this lecture on disk or in local storage.",
+        description: "No saved copy of this lecture was found on disk or in local storage.",
       });
       return;
     }
@@ -439,8 +441,8 @@ export function Step1Ingest() {
 
     const settings = useSettingsStore.getState();
     if (settings.transcriptionMode === "cloud" && !settings.cloudStt.baseUrl.trim()) {
-      toast.error("Cloud STT is not configured", {
-        description: "Set the endpoint, model and API key in Settings → AI Providers.",
+      toast.error("Cloud transcription isn't set up", {
+        description: "Set the service, model and API key in Settings → AI.",
       });
       useUiStore.getState().openSettings("providers");
       return;
@@ -451,7 +453,7 @@ export function Step1Ingest() {
     // transcribed, so catch it before Whisper starts.
     const analysisGap = describeProviderGap(settings, "reasoning");
     if (settings.analysisMode === "cloud" && analysisGap) {
-      toast.error("Topic analysis is not configured", {
+      toast.error("Clip finding isn't set up yet", {
         description: analysisGapMessage(analysisGap),
       });
       useUiStore.getState().openSettings("providers");
@@ -516,11 +518,8 @@ export function Step1Ingest() {
       store.setStep(2);
 
       toast.success("Transcript ready", {
-        description: `${result.segments.length} segments · ${result.model} · ${result.device}`,
+        description: `${formatClock(result.duration)} of speech transcribed`,
       });
-      if (result.vram_unloaded) {
-        toast.success("Whisper unloaded from GPU memory");
-      }
     } catch (caught) {
       if (!mountedRef.current || abortRef.current !== controller) return;
       if (controller.signal.aborted) {
@@ -533,6 +532,43 @@ export function Step1Ingest() {
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       if (mountedRef.current) setBusy(false);
+    }
+  }
+
+  async function handleRestartApp() {
+    try {
+      await relaunchApp();
+    } catch (caught) {
+      toast.error("Could not restart", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
+    }
+  }
+
+  async function handleCopyDiagnostics() {
+    try {
+      const state = useSettingsStore.getState();
+      const bundle = await buildDiagnostics({
+        health: state.sidecar.health,
+        sidecarStatus: state.sidecar.status,
+        sidecarError: state.sidecar.error,
+        projectFolder: state.storage.projectFolder,
+        lastAutosaveError: useProjectStore.getState().lastAutosaveError,
+      });
+      const copied = await copyText(bundle);
+      if (copied) {
+        toast.success("Diagnostics copied", {
+          description: "Paste it into your support request. No API keys are included.",
+        });
+      } else {
+        toast.error("Could not copy diagnostics", {
+          description: "The clipboard is unavailable in this window.",
+        });
+      }
+    } catch (caught) {
+      toast.error("Could not build diagnostics", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
     }
   }
 
@@ -564,10 +600,10 @@ export function Step1Ingest() {
               <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
                 Step 1 of 4
               </p>
-              <h1 className="text-lg font-medium text-foreground">Ingest a lecture</h1>
+              <h1 className="text-lg font-medium text-foreground">Add your lecture</h1>
               <p className="max-w-prose text-sm leading-relaxed text-muted-foreground">
-                Drop a long-form Tafseer lecture, pick an editorial preset, then let the sidecar
-                extract and transcribe the Thai–Arabic audio.
+                Drop a long-form Tafseer lecture. We'll transcribe the Thai–Arabic audio and find
+                clip-worthy moments for you.
               </p>
             </div>
             {project ? (
@@ -721,8 +757,8 @@ export function Step1Ingest() {
                     </p>
                   </div>
                   <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                    Whisper runs inside the sidecar. Long lectures can take a few minutes; the
-                    editor stays responsive.
+                    Transcription runs in the background. Long lectures can take a few minutes —
+                    the app stays responsive.
                   </p>
                   <div className="mt-3 flex items-center justify-between gap-3">
                     <span className="text-xs tabular-nums text-muted-foreground">
@@ -749,9 +785,8 @@ export function Step1Ingest() {
                         Transcribe the lecture
                       </h2>
                       <p className="text-[11px] leading-relaxed text-muted-foreground">
-                        FFmpeg extracts a 16 kHz WAV, then Whisper or your Cloud STT endpoint
-                        transcribes the Thai–Arabic audio. The Thai–Arabic glossary is applied
-                        after transcription.
+                        We pull out the audio and transcribe the Thai–Arabic speech. Your glossary
+                        is applied to the transcript afterwards.
                       </p>
                     </div>
                     <Badge variant="outline" className="shrink-0">
@@ -761,33 +796,43 @@ export function Step1Ingest() {
 
                   <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
                     <SidecarStatusDot status={sidecar.status} />
-                    <span>
-                      {sidecar.status === "online"
-                        ? "Sidecar online"
-                        : sidecar.status === "checking"
-                          ? "Checking sidecar"
-                          : sidecar.status === "offline"
-                            ? "Sidecar offline"
-                            : "Sidecar not checked"}
-                    </span>
+                    <span>{SIDECAR_STATUS_LABEL[sidecar.status]}</span>
                     <span className="text-muted-foreground/50">·</span>
                     <span className="truncate">{transcriptionDetail}</span>
                   </div>
 
                   {sidecar.status === "offline" ? (
-                    <div className="mt-2 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] leading-relaxed text-destructive">
-                      <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                      <span className="flex-1">
-                        {sidecar.error ?? `Start backend.exe on ${SIDECAR_URL}.`}
-                      </span>
-                      <Button
-                        variant="ghost"
-                        size="xs"
-                        className="h-5 text-destructive"
-                        onClick={() => void refreshHealth()}
-                      >
-                        Retry
-                      </Button>
+                    <div className="mt-2 space-y-1.5 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] leading-relaxed text-destructive">
+                      <p className="flex items-start gap-2">
+                        <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                        <span className="flex-1">The processing engine didn't start.</span>
+                      </p>
+                      <div className="flex flex-wrap gap-1.5 pl-5">
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          className="h-5 text-destructive"
+                          onClick={() => void refreshHealth()}
+                        >
+                          Retry
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          className="h-5 text-destructive"
+                          onClick={() => void handleRestartApp()}
+                        >
+                          Restart the app
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          className="h-5 text-destructive"
+                          onClick={() => void handleCopyDiagnostics()}
+                        >
+                          Copy diagnostics
+                        </Button>
+                      </div>
                     </div>
                   ) : null}
 
@@ -820,9 +865,9 @@ export function Step1Ingest() {
               <section className="rounded-lg border border-border bg-card/40 p-4">
                 <div className="flex items-start justify-between gap-2">
                   <div className="space-y-0.5">
-                    <h2 className="text-[13px] font-medium text-foreground">Prompt preset</h2>
+                    <h2 className="text-[13px] font-medium text-foreground">Clip brief</h2>
                     <p className="text-[11px] leading-relaxed text-muted-foreground">
-                      Editorial policy for the clip discovery model.
+                      Tell the AI what kind of moments to look for.
                     </p>
                   </div>
                   <Badge variant="outline" className="shrink-0 text-[10px]">
@@ -835,14 +880,14 @@ export function Step1Ingest() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="default">Editorial default (sidecar)</SelectItem>
+                    <SelectItem value="default">Built-in default</SelectItem>
                     {promptPresets.map((preset) => (
                       <SelectItem key={preset.id} value={preset.id}>
                         {preset.name}
                       </SelectItem>
                     ))}
                     {presetValue === "custom" ? (
-                      <SelectItem value="custom">Custom prompt (edit…)</SelectItem>
+                      <SelectItem value="custom">Edit clip brief…</SelectItem>
                     ) : null}
                   </SelectContent>
                 </Select>
@@ -862,7 +907,7 @@ export function Step1Ingest() {
                     className="gap-1 text-muted-foreground"
                     onClick={handleOpenPrompt}
                   >
-                    Edit base prompt
+                    Edit clip brief
                   </Button>
                 </div>
               </section>
@@ -888,9 +933,6 @@ export function Step1Ingest() {
                 <div className="flex items-start justify-between gap-2">
                   <div className="space-y-0.5">
                     <h2 className="text-[13px] font-medium text-foreground">Engines</h2>
-                    <p className="text-[11px] leading-relaxed text-muted-foreground">
-                      Routing only; all inference runs in the sidecar.
-                    </p>
                   </div>
                   <Button
                     variant="ghost"
@@ -914,8 +956,8 @@ export function Step1Ingest() {
                       label="Transcription engine"
                       value={transcriptionMode}
                       options={[
-                        { value: "local", label: "Local Whisper" },
-                        { value: "cloud", label: "Cloud API" },
+                        { value: "local", label: "This computer" },
+                        { value: "cloud", label: "Your AI account" },
                       ]}
                       onChange={setTranscriptionMode}
                       disabled={busy}
@@ -923,7 +965,8 @@ export function Step1Ingest() {
                     {transcriptionMode === "local" ? (
                       <div className="space-y-1.5">
                         <p className="text-[10px] leading-relaxed text-muted-foreground/80">
-                          First local run downloads the faster-whisper model (~1.5 GB).
+                          The first transcription on this computer downloads about 1.5 GB of AI
+                          files.
                         </p>
                         <GpuInlineHint summary={acceleration} />
                       </div>
@@ -941,8 +984,8 @@ export function Step1Ingest() {
                       label="Topic analysis engine"
                       value={analysisMode}
                       options={[
-                        { value: "local", label: "Local Ollama" },
-                        { value: "cloud", label: "Cloud API" },
+                        { value: "local", label: "This computer" },
+                        { value: "cloud", label: "Your AI account" },
                       ]}
                       onChange={setAnalysisMode}
                       disabled={busy}
@@ -966,7 +1009,7 @@ export function Step1Ingest() {
                 ) : null}
 
                 <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground/80">
-                  API keys, models and the Whisper prompt live in Settings → AI Providers.
+                  Connections, models and the transcription prompt live in Settings → AI.
                 </p>
               </section>
             </aside>

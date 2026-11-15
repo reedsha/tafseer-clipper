@@ -59,7 +59,7 @@ function statusVariant(status: ClipStatus): "secondary" | "outline" | "default" 
 function statusLabel(status: ClipStatus): string {
   if (status === "done") return "Rendered";
   if (status === "error") return "Failed";
-  if (status === "rendering") return "Encoding";
+  if (status === "rendering") return "Rendering";
   if (status === "cancelled") return "Cancelled";
   return "Queued";
 }
@@ -355,7 +355,7 @@ export function Step4Export() {
                           </span>
                           <span className="flex items-center gap-1">
                             <Type className="size-3" />
-                            {cues} cue{cues === 1 ? "" : "s"}
+                            {cues} line{cues === 1 ? "" : "s"}
                           </span>
                           <span className="flex items-center gap-1">
                             <MonitorPlay className="size-3" />
@@ -462,7 +462,7 @@ export function Step4Export() {
                 <div className="space-y-0.5">
                   <p className="text-xs font-medium text-foreground">Also export .SRT</p>
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    Writes a subtitle sidecar next to every MP4.
+                    Also saves a separate .SRT file next to each video.
                   </p>
                 </div>
                 <Checkbox
@@ -481,8 +481,8 @@ export function Step4Export() {
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
                     {encodingAvailabilityText(acceleration)}
                     {encodingAvailable
-                      ? " — falls back to CPU encoding automatically if the driver refuses."
-                      : " — encoding runs on the CPU. Enable GPU acceleration in Settings."}
+                      ? " — if it isn't available, we render on the CPU instead."
+                      : " — rendering runs on the CPU. Turn on GPU acceleration in Settings."}
                   </p>
                 </div>
                 <Switch
@@ -506,7 +506,7 @@ export function Step4Export() {
                     <span className="text-[10px] text-muted-foreground">Windows-safe</span>
                   </TooltipTrigger>
                   <TooltipContent side="left" className="max-w-56 text-xs">
-                    Invalid characters are replaced with underscores, exactly like the sidecar does.
+                    Invalid characters are replaced with underscores automatically.
                   </TooltipContent>
                 </Tooltip>
               </div>
@@ -586,11 +586,12 @@ export function Step4Export() {
               <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] tabular-nums text-muted-foreground">
                 <dt>Arabic</dt>
                 <dd className="truncate text-foreground/80">
-                  {styles.arabic.font} · {styles.arabic.size}px · margin V {styles.arabic.marginV}
+                  {styles.arabic.font} · {styles.arabic.size}px · bottom margin{" "}
+                  {styles.arabic.marginV}
                 </dd>
                 <dt>Thai</dt>
                 <dd className="truncate text-foreground/80">
-                  {styles.thai.font} · {styles.thai.size}px · margin V {styles.thai.marginV}
+                  {styles.thai.font} · {styles.thai.size}px · bottom margin {styles.thai.marginV}
                 </dd>
               </dl>
               {overlap.overlaps ? (
@@ -617,7 +618,7 @@ export function Step4Export() {
               <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] leading-relaxed text-destructive">
                 <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                 <div className="flex-1 space-y-1">
-                  <p>{sidecar.error ?? "The sidecar is offline."}</p>
+                  <p>{sidecar.error ?? "The processing engine isn't responding."}</p>
                   <Button
                     variant="ghost"
                     size="xs"
@@ -645,9 +646,9 @@ export function Step4Export() {
             )}
             <p className="text-center text-[10px] text-muted-foreground">
               {running
-                ? "Encoding with FFmpeg inside the sidecar…"
-                : `Burned-in subtitles, ${exportSrt ? ".SRT sidecar, " : ""}${
-                    useNvenc && encodingAvailable ? "GPU encoding" : "CPU encoding"
+                ? "Rendering your clips…"
+                : `Burned-in subtitles, ${exportSrt ? ".SRT file, " : ""}${
+                    useNvenc && encodingAvailable ? "GPU rendering" : "CPU rendering"
                   }.`}
             </p>
           </div>
@@ -672,13 +673,13 @@ export function Step4Export() {
             <>
               <FolderOpen className="size-3.5 shrink-0" />
               {/* The sidecar's `output_dir` (SSE `start`/`done`) is the truth;
-                  the local default is labelled as a fallback. */}
+                  the local default is only a preview. */}
               <span className="min-w-0 flex-1 truncate">
                 {sidecarOutputDir
-                  ? `${sidecarOutputDir} (from the sidecar)`
+                  ? `Saving to: ${sidecarOutputDir}`
                   : resolvedOutputDir
-                    ? `${resolvedOutputDir} (defaults to)`
-                    : "Output folder decided by the sidecar at render time"}
+                    ? `Saving to: ${resolvedOutputDir}`
+                    : "The output folder is chosen when rendering starts."}
               </span>
               <Button
                 variant="ghost"
