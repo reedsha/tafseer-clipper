@@ -435,13 +435,13 @@ Applied after the report, on explicit instruction. This section supersedes the c
 | BL-5 the 61-item clean-VM gate | Open — human walkthrough (§9.5) |
 | BL-6 Dependabot queue | **CLOSED** — `#5`, `#8`, `#10`, `#14` merged; `#11` green but held by judgement; `#18` (release 0.1.1) awaiting your decision |
 
-### 9.6 Final verification on the merged `main` (564b60f)
+### 9.6 Final verification on the merged `main`
 
 Re-run after every dependency PR landed, on the merged tree rather than a branch:
 
 | Check | Result |
 |---|---|
-| `backend/test_phase1_e2e.py` | **42/42**, exit 0 |
+| `backend/test_phase1_e2e.py` | **44/44**, exit 0 (42 before the probe regressions were added in §9.7) |
 | `cargo test --locked` (with `sha2` 0.11) | **11 passed** |
 | `pnpm build` (`tsc && vite build`) | built in 879 ms |
 | Local Python env | aligned to the merged `requirements.txt` (`numpy` 2.5.4, `pillow` 13.0.0, `av` 16.1.0) |
@@ -489,9 +489,9 @@ The previous contents were signed by the pre-rotation key and are now **obsolete
 
 | Check | Result |
 |---|---|
-| Installer | `Tafseer Clipper_0.1.0_x64-setup.exe` — 170,841,743 B (162.9 MiB), **unsigned** (Authenticode still absent, by design) |
+| Installer | `Tafseer Clipper_0.1.0_x64-setup.exe` — 170,832,363 B (162.9 MiB), **unsigned** (Authenticode still absent, by design) |
 | Updater signature | `.sig` names `file:Tafseer Clipper_0.1.0_x64-setup.exe` + `version:0.1.0`, produced by the `DCC8B926EA9F6F2B` key generation ✅ |
-| `SHA256SUMS.txt` | **3/3 match** — installer `DBED6DE7…`, `backend.exe` `4040F448…`, `accel/accel-manifest.json` `216D6492…` |
+| `SHA256SUMS.txt` | **3/3 match** — installer `619DF059…`, `backend.exe` `972D98EF…`, `accel/accel-manifest.json` `216D6492…` |
 | `latest.json` | carries the same signature as the `.sig`; URL points at the `v0.1.0` release asset |
 | GPU pack manifest | carried forward from the previous build — the pack is **versioned independently** of the app (`cuda12.9.79-cudnn9.28.1.4`, 18 files, 2.1 GB) per `docs/GPU_PACK.md:161` |
 
@@ -506,34 +506,30 @@ The checksums above reflect the corrected set.
 
 **The frozen payload does work — but not from a OneDrive path.** My first run of it failed and I
 attributed that to a restriction in the agent shell. That was wrong. The only variable is the
-directory: executing the same file from `C:\t\` succeeds, while executing it from inside
+directory: executing the same file from `C:\t2\` succeeds, while executing it from inside
 `C:\Users\muham\OneDrive\Documents\...` aborts with `[PYI-…:ERROR] Could not create temporary
 directory!`. The mechanism was not investigated further; the empirical rule is what matters.
 
-That also produced the **A/B proof that the fix is in the shipped sidecar**, which no source-level
-test could give. Same machine, same missing acceleration pack, both frozen builds, both run from
-`C:\t`:
+**Three-case verification of the packaged sidecar** (the artifact from §9.4, run from `C:\t2`, this
+machine, no real acceleration pack):
 
-| Frozen build | `/health.acceleration` |
-|---|---|
-| `backend-x86_64-pc-windows-msvc.exe` (2026-11-14, pre-fix) | `transcription=gpu  cuda_runtime=True  pack_installed=False  reason=null` ← the contradiction, in the packaged binary |
-| `backend-x86_64-pc-windows-gnu.exe` (2026-11-15, post-fix) | `transcription=cpu  cuda_runtime=False  pack_installed=False  reason=cuda-runtime-missing` ← correct |
+| Case | `/health.acceleration` | Outcome |
+|---|---|---|
+| **A** — no pack | `transcription=cpu  cuda_runtime=false  pack_installed=false  reason=cuda-runtime-missing` | correct, and matches `pack_installed` |
+| **B** — simulated pack (loadable `cublas64_12.dll` + `cudnn64_9.dll` in `TAFSEER_CUDA_DIR`) | `transcription=gpu  cuda_runtime=true  reason=null` | correct — **and the case my first probe attempt would have failed**, since it built an invalid model and would have answered `false` here |
+| **C** — simulated pack, then a real `POST /extract-and-transcribe` | **`200`, `application/json`, `device=cpu`** | the probe said GPU, CUDA inference failed, and the fallback retried on CPU — inside the packaged binary |
+
+Case B is the discriminator that matters: a probe which only ever answers "no GPU" passes case A and
+looks fine, while silently demoting every user who installed the pack. Case C is the original defect
+end-to-end: the request that used to produce `500 text/plain` now yields a normal JSON transcription
+on the CPU.
 
 **Consequence for the dev environment:** run packaged binaries from a non-synced path (or from the
 installed location under `%LOCALAPPDATA%`, which is where real users run them). A frozen sidecar
 launched out of the OneDrive checkout can fail to start for reasons unrelated to the app.
 
-**The transcribe contract also holds in the frozen build.** Running the packaged sidecar from `C:\t`
-with no acceleration pack:
-
-```
-frozen /health.acceleration : transcription=cpu  cuda_runtime=false  pack_installed=false  reason=cuda-runtime-missing
-POST /extract-and-transcribe: 200  application/json  device=cpu  duration=10.0s  (1.4 s)
-```
-
-So the fix is present in the artifact that ships — not only in the source tree. What remains
-unverified is the **installer** path (silent install → installed sidecar → uninstall) and the GUI
-walkthrough, both of which need a normal terminal (§9.5).
+What remains unverified is the **installer** path (silent install → installed sidecar → uninstall)
+and the GUI walkthrough, both of which need a normal terminal (§9.5).
 
 **What this does and does not mean.** The signing *chain* is now internally consistent: a build
 produced today verifies against the key `tauri.conf.json` advertises. It is still an **unsigned

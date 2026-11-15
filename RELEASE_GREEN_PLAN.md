@@ -221,7 +221,7 @@ an explicit instruction.
 | 4 | S-4.2 signed release | Optional | — | you |
 | 5 | S-5 Dependabot merge batch | **DONE** — `#14`, `#5`, `#10`, `#8` merged (each re-verified green after the strict up-to-date update). `#11` (TS 7) green but **held by judgement**; `#18` (release 0.1.1) left for you. | — | — |
 | 6 | S-6.1 artifacts check | **DONE** — signing chain + 3/3 checksums verified on the rebuilt set | — | — |
-| 6 | S-6.2 partial install smoke | **PARTLY DONE** — the frozen sidecar was executed and both the `/health` contract and `POST /extract-and-transcribe` return `200 JSON, device=cpu` (A/B against the pre-fix build proves the fix ships). The **installer** smoke (`smoke-installer.ps1`) still needs a normal terminal: its sandbox lives inside the OneDrive checkout, where the PyInstaller bootloader cannot extract. | — | you |
+| 6 | S-6.2 partial install smoke | **PARTLY DONE** — the **packaged** sidecar was verified in three cases from a non-OneDrive path: no pack → `cpu/false/cuda-runtime-missing`; simulated pack → `gpu/true`; simulated pack + real transcribe → **`200 JSON, device=cpu`** (the probe said GPU, CUDA failed, the fallback recovered). The artifact set was rebuilt so it contains the corrected probe. The **installer** smoke (`smoke-installer.ps1`) still needs a normal terminal: its sandbox lives inside the OneDrive checkout, where the PyInstaller bootloader cannot extract. | — | you |
 | 6 | S-6.3 61-item VM walkthrough | TODO | after S-6.2 | you |
 | 6 | S-6.4 sign-off | TODO | last | you |
 
