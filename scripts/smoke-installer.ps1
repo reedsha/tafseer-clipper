@@ -31,7 +31,12 @@
 param(
     [string]$Installer = "",
     [switch]$TryGui,
-    [switch]$KeepInstalled
+    [switch]$KeepInstalled,
+    # Where the throwaway install lives. Defaults to <repo>/.smoke. Set it outside
+    # any cloud-synced folder: the installed backend.exe is a PyInstaller onefile
+    # and this script redirects its %TEMP% into the sandbox, where extraction fails
+    # inside OneDrive with "Could not create temporary directory".
+    [string]$Sandbox = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,7 +60,12 @@ if (-not $Installer -or -not (Test-Path -LiteralPath $Installer)) { Fail "Instal
 $Installer = (Resolve-Path $Installer).Path
 Write-Host "Installer: $Installer ($([math]::Round((Get-Item $Installer).Length / 1MB, 1)) MiB)"
 
-$sandboxRoot = Join-Path $root ".smoke"
+if ($Sandbox) {
+    $sandboxRoot = [System.IO.Path]::GetFullPath($Sandbox)
+}
+else {
+    $sandboxRoot = Join-Path $root ".smoke"
+}
 $installDir = Join-Path $sandboxRoot "install"
 $localAppData = Join-Path $sandboxRoot "localappdata"
 Remove-Item -Recurse -Force $sandboxRoot -ErrorAction SilentlyContinue

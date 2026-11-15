@@ -136,7 +136,7 @@ Applies to **G-D**. Runs only after **Stream 2** produces a build whose GPU path
 |---|---|---|---|
 | S-6.1 | `RELEASE_CHECKLIST.md` §0 Artifacts | ✅ mine | Already one-shot checkable via the `SHA256SUMS.txt` verifier; redo against the new build |
 | S-6.2 | §8 Uninstall/reinstall, §9 Diagnostics | ⚠️ partial | `scripts/smoke-installer.ps1` covers silent install + diagnostics; `-TryGui` is skipped headlessly |
-| S-6.3 | §1 launch, §1b GPU pack, §2–§5 wizard, §6 persistence, §7 updater | ❌ human | Needs a clean Windows 11 VM, desktop session, real GPU |
+| S-6.3 | §1 launch, §1b GPU pack, §2–§5 wizard, §6 persistence, §7 updater | ❌ human | Needs a clean **Windows 10 (21H2+) VM and** a clean **Windows 11 VM**, desktop session, real GPU — the product targets both (`master_plan.md:5,14`) |
 | S-6.4 | Sign-off line | ❌ human | Records `G-D` |
 
 **Ordering matters:** stream S-6.3 re-tests BL-1 (§1b) and BL-4 (§7), so run it *after* Stream 2 and
@@ -222,7 +222,7 @@ an explicit instruction.
 | 5 | S-5 Dependabot merge batch | **DONE** — `#14`, `#5`, `#10`, `#8` merged (each re-verified green after the strict up-to-date update). `#11` (TS 7) green but **held by judgement**; `#18` (release 0.1.1) left for you. | — | — |
 | 6 | S-6.1 artifacts check | **DONE** — signing chain + 3/3 checksums verified on the rebuilt set | — | — |
 | 6 | S-6.2 partial install smoke | **PARTLY DONE** — the **packaged** sidecar was verified in three cases from a non-OneDrive path: no pack → `cpu/false/cuda-runtime-missing`; simulated pack → `gpu/true`; simulated pack + real transcribe → **`200 JSON, device=cpu`** (the probe said GPU, CUDA failed, the fallback recovered). The artifact set was rebuilt so it contains the corrected probe. The **installer** smoke (`smoke-installer.ps1`) still needs a normal terminal: its sandbox lives inside the OneDrive checkout, where the PyInstaller bootloader cannot extract. | — | you |
-| 6 | S-6.3 61-item VM walkthrough | TODO | after S-6.2 | you |
+| 6 | S-6.3 61-item VM walkthrough | TODO — **two runs: Windows 10 21H2+ and Windows 11** | after S-6.2 | you |
 | 6 | S-6.4 sign-off | TODO | last | you |
 
 ### Also completed in this pass
@@ -230,12 +230,22 @@ an explicit instruction.
 - **MIT license** (`LICENSE`), with the bundled-FFmpeg GPL v3 caveat stated in `README.md` and
   `THIRD_PARTY_NOTICES.md` so the MIT grant is not mistaken for covering the FFmpeg binaries.
 
-## Open decisions (need you)
+## Decisions (resolved)
 
-1. ~~Authorize Stream 2~~ — **authorized and done** (see §9 of the readiness report).
-2. **G-E-internal or G-E-signed** — today, or when a credential exists?
-3. **S-3.1** — enable clippy/fmt gates (source cleanup commit) or leave advisory?
-4. **S-5 PR #11 (TS 7)** — merge, hold, or accept later once included in a real feature release?
+1. ~~Authorize Stream 2~~ — **done** (see §9 of the readiness report).
+2. ~~G-E-internal or G-E-signed~~ — **G-E-internal.** Signing is out of scope: no
+   Authenticode credential, no public release planned (BL-3 closed as accepted).
+   Consequence: the tag path stays shut (`release.yml` fails closed), and installers
+   come only from `scripts/build-release.ps1 -SkipSigning`. SmartScreen will warn on
+   any machine that did not build it.
+3. **S-3.1 still open** — enable `cargo clippy -D warnings` + `cargo fmt --check`, or
+   leave them advisory? Both currently fail on pre-existing code, so enabling them
+   needs a formatting/lint cleanup commit first.
+4. ~~PR #11 (TypeScript 7)~~ — **held, and automated away.** It type-checks cleanly
+   (`Frontend` job passed), so this is a deliberate hold rather than a risk finding:
+   a compiler swap belongs beside a feature release. A `typescript`
+   `version-update:semver-major` ignore now stops Dependabot re-proposing it; close
+   #11 and delete that ignore entry when you choose to adopt TS 7.
 
-With Streams 1 and 2 landed, **G-A / G-B / G-C are achieved and verified**. **G-D** and **G-E**
-remain — they need a rebuilt artifact and a human walkthrough, not more code.
+With Streams 1, 2, 4 and 5 landed, **G-A / G-B / G-C are verified, and G-E is met in its
+internal-unsigned form**. Only **G-D** remains — the two clean-VM walkthroughs.

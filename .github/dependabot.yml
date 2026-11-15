@@ -29,6 +29,15 @@ updates:
       interval: weekly
     commit-message:
       prefix: "ci"
+    ignore:
+      # TypeScript 7 is the native (Go) compiler rewrite, not a point release.
+      # It does type-check this repo cleanly (verified on PR #11: the
+      # `Frontend (tsc, build, Playwright E2E)` job passed), so this is not a
+      # correctness hold - it is a deliberate one. Swapping the compiler should
+      # happen alongside a feature release, when there is time to watch editor
+      # tooling and @types behaviour. Delete this entry to adopt it.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   # Tauri shell - Cargo.lock.
   - package-ecosystem: cargo
