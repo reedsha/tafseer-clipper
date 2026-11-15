@@ -47,6 +47,15 @@ Toolchain versions are pinned: Node 22 (`.nvmrc`), pnpm 11 (`packageManager`
 in `package.json`), Python 3.12 (`.python-version`) and Rust stable
 (`src-tauri/rust-toolchain.toml`).
 
+> **Do not develop from a cloud-synced folder** (OneDrive, Dropbox, Google Drive…).
+> From such a path, two separate subsystems fail on this machine: the PyInstaller
+> sidecar cannot create its extraction directory, and **WebView2 cannot create the
+> app window** — `pnpm tauri dev` then exits **101** with
+> `failed to create webview: WebView2 error: WindowsError { code: HRESULT(0x8000FFFF) }`.
+> The identical binaries work from a normal path (verified). Clone to something like
+> `C:\dev\tafseer-clipper`; the installed app under `%LOCALAPPDATA%` is unaffected.
+> If a window fails to open, run `scripts/diagnose-webview.ps1`.
+
 ## Release
 
 Versions are **not** edited by hand. Merge a Conventional Commit into `main`
