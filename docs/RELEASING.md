@@ -248,8 +248,9 @@ in [`GPU_PACK.md`](GPU_PACK.md). Release-relevant points:
 | Installer | `Tafseer Clipper_0.1.0_x64-setup.exe` 162.9 MiB (NSIS, per-user) + `.sig` updater artifact |
 | Signing hook | unsigned local build warns and succeeds; `REQUIRE_CODE_SIGNING=1` fails without credentials (verified both) |
 | Frontend | `tsc --noEmit` 0, `vite build` 0, Playwright E2E 6/6 (real sidecar, mocked LLM/render) |
-| Backend E2E | `backend/test_phase1_e2e.py` 40/40 |
+| Backend E2E | `backend/test_phase1_e2e.py` **42/42** (re-verified 2026-11-15; the suite gained two GPU-fallback regressions) |
 | GPU path (real hardware) | Laptop NVIDIA GPU (4 GB): pack installed → `/health.acceleration.transcription=gpu`; source and frozen sidecars both loaded faster-whisper on `device=cuda`/`int8` and unloaded GPU memory |
+| GPU fallback (no pack) | Same laptop, pack absent: `/health` reports `transcription=cpu`, `cuda_runtime=false`, `reason=cuda-runtime-missing`, and `/extract-and-transcribe` returns **200 JSON on `device=cpu`** (previously `500 text/plain` — see `docs/RELEASE_READINESS.md` §2/§9) |
 | GPU pack | `scripts/build-accel-pack.ps1` → manifest + 18 DLLs / 2.0 GB (CUDA 12.9 + cuDNN 9.28); Rust downloader/verifier 11/11 unit tests |
 | Packaged payload | `powershell -ExecutionPolicy Bypass -File scripts/smoke-installer.ps1` — silent install, installed `backend.exe` serves `/health` with the **bundled** ffmpeg, clean sidecar shutdown, silent uninstall |
 
