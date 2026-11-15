@@ -277,6 +277,25 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-installer.ps1 -Sandbox C:
 The script must also be run from an **interactive session**: a silent `/S`
 install can stall on a prompt that a non-interactive agent session cannot answer.
 
+### Troubleshooting: the window never appears
+
+`pnpm tauri dev` exiting **101** is a Rust panic, not a compile error. If the
+panic reads `failed to create webview: WebView2 error: WindowsError { code:
+HRESULT(0x8000FFFF) }`, the shell started and WebView2 refused to create its
+window. Run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/diagnose-webview.ps1
+```
+
+The check that matters most on this project is the **checkout location**: from a
+OneDrive-synced folder WebView2 fails with exactly that HRESULT, while the same
+binary works from a normal path (verified by running the debug build from
+`C:\` and watching the window open and the sidecar spawn). Other candidates the
+script reports: elevation (WebView2 fails in an elevated process), a missing or
+damaged WebView2 Runtime, and a corrupt user-data folder — pass `-ResetProfile`
+to clear the last one.
+
 Remaining before a *public* release: a real updater hosting URL, and the two
 clean-VM checklist runs on GPU hardware with real lecture material. Authenticode
 signing is **deliberately out of scope** (`docs/RELEASE_READINESS.md` BL-3), so
