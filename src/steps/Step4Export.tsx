@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   Cpu,
   Crop,
   FileVideo2,
@@ -25,6 +26,11 @@ import { TimeFlow } from "@/components/TimeFlow";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
@@ -308,7 +314,7 @@ export function Step4Export() {
               aria-label="Batch render progress"
             />
             {job.message ? (
-              <p className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-relaxed text-status-warning">
+              <p className="mt-1.5 flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
                 <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                 {job.message}
               </p>
@@ -461,7 +467,7 @@ export function Step4Export() {
               <div className="flex items-start justify-between gap-3 rounded-md border border-border bg-card/40 px-3 py-2.5">
                 <div className="space-y-0.5">
                   <p className="text-xs font-medium text-foreground">Also export .SRT</p>
-                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  <p className="text-xs leading-relaxed text-muted-foreground">
                     Also saves a separate .SRT file next to each video.
                   </p>
                 </div>
@@ -478,7 +484,7 @@ export function Step4Export() {
                     <Cpu className="size-3.5" />
                     Hardware encoding (GPU)
                   </p>
-                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  <p className="text-xs leading-relaxed text-muted-foreground">
                     {encodingAvailabilityText(acceleration)}
                     {encodingAvailable
                       ? " — if it isn't available, we render on the CPU instead."
@@ -578,33 +584,38 @@ export function Step4Export() {
 
             <Separator />
 
-            <div className="space-y-2 rounded-md border border-border bg-card/40 px-3 py-2.5">
-              <p className="flex items-center gap-1.5 text-xs font-medium text-foreground">
-                <Type className="size-3.5" />
-                Burned-in subtitle styles
-              </p>
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] tabular-nums text-muted-foreground">
-                <dt>Arabic</dt>
-                <dd className="truncate text-foreground/80">
-                  {styles.arabic.font} · {styles.arabic.size}px · bottom margin{" "}
-                  {styles.arabic.marginV}
-                </dd>
-                <dt>Thai</dt>
-                <dd className="truncate text-foreground/80">
-                  {styles.thai.font} · {styles.thai.size}px · bottom margin {styles.thai.marginV}
-                </dd>
-              </dl>
-              {overlap.overlaps ? (
-                <p className="flex items-start gap-1.5 text-[10px] leading-relaxed text-status-warning">
-                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                  The two lines overlap by {Math.abs(Math.round(overlap.gap))} px at this font size.
-                  Reduce the font size or the Harakat padding in Settings → Fonts.
-                </p>
-              ) : null}
-            </div>
+            <Collapsible className="rounded-md border border-border bg-card/40">
+              <CollapsibleTrigger className="group flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left">
+                <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+                  <Type className="size-3.5" />
+                  Burned-in subtitle styles
+                </span>
+                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+              </CollapsibleTrigger>
+              <CollapsibleContent className="space-y-1.5 px-3 pb-2.5">
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] tabular-nums text-muted-foreground">
+                  <dt>Arabic</dt>
+                  <dd className="truncate text-foreground/80">
+                    {styles.arabic.font} · {styles.arabic.size}px · bottom margin{" "}
+                    {styles.arabic.marginV}
+                  </dd>
+                  <dt>Thai</dt>
+                  <dd className="truncate text-foreground/80">
+                    {styles.thai.font} · {styles.thai.size}px · bottom margin {styles.thai.marginV}
+                  </dd>
+                </dl>
+                {overlap.overlaps ? (
+                  <p className="flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
+                    <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                    The two lines overlap by {Math.abs(Math.round(overlap.gap))} px at this font
+                    size. Reduce the font size or the Harakat padding in Settings → Fonts.
+                  </p>
+                ) : null}
+              </CollapsibleContent>
+            </Collapsible>
 
             {clipsWithoutSubtitles > 0 ? (
-              <div className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-2.5 py-2 text-[11px] leading-relaxed text-status-warning">
+              <div className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-2.5 py-2 text-xs leading-relaxed text-status-warning">
                 <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                 <span>
                   {clipsWithoutSubtitles} approved clip
@@ -615,7 +626,7 @@ export function Step4Export() {
             ) : null}
 
             {sidecar.status === "offline" ? (
-              <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] leading-relaxed text-destructive">
+              <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-xs leading-relaxed text-destructive">
                 <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                 <div className="flex-1 space-y-1">
                   <p>{sidecar.error ?? "The processing engine isn't responding."}</p>

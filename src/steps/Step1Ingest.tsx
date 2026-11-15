@@ -63,7 +63,7 @@ import { DEFAULT_DISCOVERY_SETTINGS, type ProjectData, type TranscriptData } fro
 import { openProjectFile } from "@/lib/projectFile";
 import { describeProviderGap } from "@/lib/providers";
 import { useProjectStore } from "@/store/projectStore";
-import { useSettingsStore, type EngineMode } from "@/store/settingsStore";
+import { useSettingsStore, type EngineMode, type EngineUiMode } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
 
 /* -------------------------------------------------------------------------- */
@@ -89,6 +89,8 @@ export function Step1Ingest() {
 
   const transcriptionMode = useSettingsStore((state) => state.transcriptionMode);
   const analysisMode = useSettingsStore((state) => state.analysisMode);
+  const engineUiMode = useSettingsStore((state) => state.engineUiMode);
+  const setEngineUiMode = useSettingsStore((state) => state.setEngineUiMode);
   const cloud = useSettingsStore((state) => state.cloud);
   const cloudStt = useSettingsStore((state) => state.cloudStt);
   const ollama = useSettingsStore((state) => state.ollama);
@@ -192,6 +194,23 @@ export function Step1Ingest() {
     analysisMode === "cloud"
       ? describeProviderGap({ analysisMode, ollama, cloud }, "reasoning")
       : null;
+
+  /** One-line, vendor-neutral description for Automatic mode. */
+  const transcriptionSummary =
+    transcriptionMode === "local"
+      ? `Transcribing on this computer${
+          sidecar.health ? ` (${acceleration.transcription === "gpu" ? "GPU" : "CPU"})` : ""
+        }`
+      : "Transcribing with your AI account";
+  const analysisSummary =
+    analysisMode === "local"
+      ? ollama.model
+        ? "clip finding on this computer"
+        : "clip finding on this computer — no model chosen"
+      : cloud.reasoningModel && cloud.apiKey
+        ? "clip finding with your AI account"
+        : "clip finding needs an AI connection";
+  const automaticSummary = `${transcriptionSummary} · ${analysisSummary}`;
 
   const ensureProject = useCallback((): ProjectData => {
     const current = useProjectStore.getState().project;
@@ -711,7 +730,7 @@ export function Step1Ingest() {
                 ) : null}
 
                 {browserFile ? (
-                  <p className="mt-3 flex max-w-md items-start gap-1.5 text-left text-[11px] leading-relaxed text-status-warning">
+                  <p className="mt-3 flex max-w-md items-start gap-1.5 text-left text-xs leading-relaxed text-status-warning">
                     <Info className="mt-0.5 size-3.5 shrink-0" />
                     This browser preview cannot expose the file's absolute path. Launch the desktop
                     shell and drop the same file from Explorer to transcribe it.
@@ -727,7 +746,7 @@ export function Step1Ingest() {
                         <CheckCircle2 className="size-3.5 text-muted-foreground" />
                         <h2 className="text-[13px] font-medium text-foreground">Transcript ready</h2>
                       </div>
-                      <p className="text-[11px] leading-relaxed text-muted-foreground">
+                      <p className="text-xs leading-relaxed text-muted-foreground">
                         {project.transcript.segments.length} segments ·{" "}
                         {formatClock(project.duration ?? 0)} ·{" "}
                         {project.transcript.language?.toUpperCase() ?? "AUTO"}
@@ -756,7 +775,7 @@ export function Step1Ingest() {
                       Extracting audio and transcribing…
                     </p>
                   </div>
-                  <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                     Transcription runs in the background. Long lectures can take a few minutes —
                     the app stays responsive.
                   </p>
@@ -784,7 +803,7 @@ export function Step1Ingest() {
                       <h2 className="text-[13px] font-medium text-foreground">
                         Transcribe the lecture
                       </h2>
-                      <p className="text-[11px] leading-relaxed text-muted-foreground">
+                      <p className="text-xs leading-relaxed text-muted-foreground">
                         We pull out the audio and transcribe the Thai–Arabic speech. Your glossary
                         is applied to the transcript afterwards.
                       </p>
@@ -802,7 +821,7 @@ export function Step1Ingest() {
                   </div>
 
                   {sidecar.status === "offline" ? (
-                    <div className="mt-2 space-y-1.5 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] leading-relaxed text-destructive">
+                    <div className="mt-2 space-y-1.5 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-xs leading-relaxed text-destructive">
                       <p className="flex items-start gap-2">
                         <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                         <span className="flex-1">The processing engine didn't start.</span>
@@ -854,7 +873,7 @@ export function Step1Ingest() {
               )}
 
               {error ? (
-                <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[11px] leading-relaxed text-destructive">
+                <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs leading-relaxed text-destructive">
                   <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                   <span>{error}</span>
                 </div>
@@ -862,153 +881,214 @@ export function Step1Ingest() {
             </div>
 
             <aside className="space-y-4">
+              {hasSource ? (
+                <>
+                  <section className="rounded-lg border border-border bg-card/40 p-4">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="space-y-0.5">
+                        <h2 className="text-[13px] font-medium text-foreground">Clip brief</h2>
+                        <p className="text-xs leading-relaxed text-muted-foreground">
+                          Tell the AI what kind of moments to look for.
+                        </p>
+                      </div>
+                      <Badge variant="outline" className="shrink-0 text-[10px]">
+                        {promptBadge}
+                      </Badge>
+                    </div>
+
+                    <Select value={presetValue} onValueChange={handlePresetChange}>
+                      <SelectTrigger className="mt-3 w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">Built-in default</SelectItem>
+                        {promptPresets.map((preset) => (
+                          <SelectItem key={preset.id} value={preset.id}>
+                            {preset.name}
+                          </SelectItem>
+                        ))}
+                        {presetValue === "custom" ? (
+                          <SelectItem value="custom">Edit clip brief…</SelectItem>
+                        ) : null}
+                      </SelectContent>
+                    </Select>
+
+                    <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-muted-foreground">
+                      {promptPreview}
+                    </p>
+
+                    <div className="mt-3 flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-muted-foreground">
+                        {discovery.minDuration}–{discovery.maxDuration} s · up to{" "}
+                        {discovery.maxClips} clips
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        className="gap-1 text-muted-foreground"
+                        onClick={handleOpenPrompt}
+                      >
+                        Edit clip brief
+                      </Button>
+                    </div>
+                  </section>
+
+                  <section className="rounded-lg border border-border bg-card/40 p-4">
+                    <Label
+                      htmlFor="session-guide"
+                      className="text-[13px] font-medium text-foreground"
+                    >
+                      Session topic guide
+                    </Label>
+                    <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                      Optional notes for this lecture only.
+                    </p>
+                    <Textarea
+                      id="session-guide"
+                      value={project?.sessionGuide ?? ""}
+                      onChange={(event) => handleGuideChange(event.target.value)}
+                      rows={4}
+                      placeholder="Focus on stories of the Prophets and practical rulings; ignore the first 10 minutes of audio checks."
+                      className="mt-2 resize-y text-xs leading-relaxed"
+                    />
+                  </section>
+                </>
+              ) : null}
+
               <section className="rounded-lg border border-border bg-card/40 p-4">
-                <div className="flex items-start justify-between gap-2">
+                <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="space-y-0.5">
-                    <h2 className="text-[13px] font-medium text-foreground">Clip brief</h2>
-                    <p className="text-[11px] leading-relaxed text-muted-foreground">
-                      Tell the AI what kind of moments to look for.
+                    <h2 className="text-[13px] font-medium text-foreground">AI setup</h2>
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      {engineUiMode === "automatic"
+                        ? "We pick the best available option for you."
+                        : "Choose where each step runs."}
                     </p>
                   </div>
-                  <Badge variant="outline" className="shrink-0 text-[10px]">
-                    {promptBadge}
-                  </Badge>
-                </div>
-
-                <Select value={presetValue} onValueChange={handlePresetChange}>
-                  <SelectTrigger className="mt-3 w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="default">Built-in default</SelectItem>
-                    {promptPresets.map((preset) => (
-                      <SelectItem key={preset.id} value={preset.id}>
-                        {preset.name}
-                      </SelectItem>
-                    ))}
-                    {presetValue === "custom" ? (
-                      <SelectItem value="custom">Edit clip brief…</SelectItem>
-                    ) : null}
-                  </SelectContent>
-                </Select>
-
-                <p className="mt-2 line-clamp-3 text-[11px] leading-relaxed text-muted-foreground">
-                  {promptPreview}
-                </p>
-
-                <div className="mt-3 flex items-center justify-between gap-2">
-                  <span className="text-[10px] text-muted-foreground">
-                    {discovery.minDuration}–{discovery.maxDuration} s · up to {discovery.maxClips}{" "}
-                    clips
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    className="gap-1 text-muted-foreground"
-                    onClick={handleOpenPrompt}
-                  >
-                    Edit clip brief
-                  </Button>
-                </div>
-              </section>
-
-              <section className="rounded-lg border border-border bg-card/40 p-4">
-                <Label htmlFor="session-guide" className="text-[13px] font-medium text-foreground">
-                  Session topic guide
-                </Label>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                  Optional notes for this lecture only.
-                </p>
-                <Textarea
-                  id="session-guide"
-                  value={project?.sessionGuide ?? ""}
-                  onChange={(event) => handleGuideChange(event.target.value)}
-                  rows={4}
-                  placeholder="Focus on stories of the Prophets and practical rulings; ignore the first 10 minutes of audio checks."
-                  className="mt-2 resize-y text-xs leading-relaxed"
-                />
-              </section>
-
-              <section className="rounded-lg border border-border bg-card/40 p-4">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="space-y-0.5">
-                    <h2 className="text-[13px] font-medium text-foreground">Engines</h2>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label="Open AI provider settings"
-                    onClick={() => openSettings("providers")}
-                  >
-                    <Settings2 className="size-3.5" />
-                  </Button>
-                </div>
-
-                <div className="mt-3 space-y-3">
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <Label className="text-[11px] text-muted-foreground">Transcription</Label>
-                      <span className="min-w-0 truncate text-[10px] text-muted-foreground/80">
-                        {transcriptionDetail}
-                      </span>
-                    </div>
-                    <SegmentedToggle<EngineMode>
-                      label="Transcription engine"
-                      value={transcriptionMode}
+                  <div className="flex items-center gap-1.5">
+                    <SegmentedToggle<EngineUiMode>
+                      label="AI setup mode"
+                      value={engineUiMode}
                       options={[
-                        { value: "local", label: "This computer" },
-                        { value: "cloud", label: "Your AI account" },
+                        { value: "automatic", label: "Automatic" },
+                        { value: "advanced", label: "Advanced" },
                       ]}
-                      onChange={setTranscriptionMode}
+                      onChange={setEngineUiMode}
                       disabled={busy}
                     />
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label="Open AI settings"
+                      onClick={() => openSettings("providers")}
+                    >
+                      <Settings2 className="size-3.5" />
+                    </Button>
+                  </div>
+                </div>
+
+                {engineUiMode === "automatic" ? (
+                  <div className="mt-3 space-y-2">
+                    <p className="flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
+                      <SidecarStatusDot status={sidecar.status} className="mt-1.5" />
+                      <span className="flex-1">{automaticSummary}</span>
+                    </p>
+
                     {transcriptionMode === "local" ? (
                       <div className="space-y-1.5">
-                        <p className="text-[10px] leading-relaxed text-muted-foreground/80">
+                        <p className="text-xs leading-relaxed text-muted-foreground/80">
                           The first transcription on this computer downloads about 1.5 GB of AI
                           files.
                         </p>
                         <GpuInlineHint summary={acceleration} />
                       </div>
                     ) : null}
-                  </div>
 
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <Label className="text-[11px] text-muted-foreground">Topic analysis</Label>
-                      <span className="min-w-0 truncate text-[10px] text-muted-foreground/80">
-                        {analysisDetail}
-                      </span>
-                    </div>
-                    <SegmentedToggle<EngineMode>
-                      label="Topic analysis engine"
-                      value={analysisMode}
-                      options={[
-                        { value: "local", label: "This computer" },
-                        { value: "cloud", label: "Your AI account" },
-                      ]}
-                      onChange={setAnalysisMode}
-                      disabled={busy}
-                    />
-                  </div>
-                </div>
+                    {analysisMode === "cloud" && analysisGap ? (
+                      <p className="flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
+                        <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+                        <span className="flex-1">{analysisGapMessage(analysisGap)}</span>
+                      </p>
+                    ) : null}
 
-                {analysisMode === "cloud" && analysisGap ? (
-                  <p className="mt-3 flex items-start gap-1.5 text-[10px] leading-relaxed text-status-warning">
-                    <AlertTriangle className="mt-0.5 size-3 shrink-0" />
-                    <span className="flex-1">{analysisGapMessage(analysisGap)}</span>
                     <Button
                       variant="ghost"
                       size="xs"
-                      className="h-5 shrink-0 text-status-warning"
+                      className="gap-1 text-muted-foreground"
                       onClick={() => openSettings("providers")}
                     >
-                      Fix
+                      Change AI settings
                     </Button>
-                  </p>
-                ) : null}
+                  </div>
+                ) : (
+                  <>
+                    <div className="mt-3 space-y-3">
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <Label className="text-[11px] text-muted-foreground">Transcription</Label>
+                          <span className="min-w-0 truncate text-[11px] text-muted-foreground/80">
+                            {transcriptionDetail}
+                          </span>
+                        </div>
+                        <SegmentedToggle<EngineMode>
+                          label="Transcription engine"
+                          value={transcriptionMode}
+                          options={[
+                            { value: "local", label: "This computer" },
+                            { value: "cloud", label: "Your AI account" },
+                          ]}
+                          onChange={setTranscriptionMode}
+                          disabled={busy}
+                        />
+                        {transcriptionMode === "local" ? (
+                          <div className="space-y-1.5">
+                            <p className="text-xs leading-relaxed text-muted-foreground/80">
+                              The first transcription on this computer downloads about 1.5 GB of AI
+                              files.
+                            </p>
+                            <GpuInlineHint summary={acceleration} />
+                          </div>
+                        ) : null}
+                      </div>
 
-                <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground/80">
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <Label className="text-[11px] text-muted-foreground">Topic analysis</Label>
+                          <span className="min-w-0 truncate text-[11px] text-muted-foreground/80">
+                            {analysisDetail}
+                          </span>
+                        </div>
+                        <SegmentedToggle<EngineMode>
+                          label="Topic analysis engine"
+                          value={analysisMode}
+                          options={[
+                            { value: "local", label: "This computer" },
+                            { value: "cloud", label: "Your AI account" },
+                          ]}
+                          onChange={setAnalysisMode}
+                          disabled={busy}
+                        />
+                      </div>
+                    </div>
+
+                    {analysisMode === "cloud" && analysisGap ? (
+                      <p className="mt-3 flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
+                        <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+                        <span className="flex-1">{analysisGapMessage(analysisGap)}</span>
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          className="h-5 shrink-0 text-status-warning"
+                          onClick={() => openSettings("providers")}
+                        >
+                          Fix
+                        </Button>
+                      </p>
+                    ) : null}
+                  </>
+                )}
+
+                <p className="mt-3 text-xs leading-relaxed text-muted-foreground/80">
                   Connections, models and the transcription prompt live in Settings → AI.
                 </p>
               </section>

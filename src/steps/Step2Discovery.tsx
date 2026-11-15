@@ -163,7 +163,7 @@ function ClipCard({
           {clip.approved ? <Check className="mt-0.5 size-4 shrink-0 text-foreground/80" /> : null}
         </div>
         {clip.rationale ? (
-          <p className="mt-1.5 line-clamp-2 pl-7 text-[11px] leading-relaxed text-muted-foreground">
+          <p className="mt-1.5 line-clamp-2 pl-7 text-xs leading-relaxed text-muted-foreground">
             {clip.rationale}
           </p>
         ) : null}
@@ -757,7 +757,7 @@ export function Step2Discovery() {
 
           <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
             {error ? (
-              <div className="mb-2 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] leading-relaxed text-destructive">
+              <div className="mb-2 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-xs leading-relaxed text-destructive">
                 <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                 <div className="min-w-0 flex-1 space-y-1">
                   <p className="font-medium">Discovery failed</p>
@@ -802,7 +802,7 @@ export function Step2Discovery() {
               <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
                 <ListVideo className="size-5 text-muted-foreground" />
                 <p className="text-xs font-medium text-foreground">No clips proposed yet</p>
-                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                <p className="text-xs leading-relaxed text-muted-foreground">
                   Let the AI search the transcript for moments — or add a note about what to look
                   for and try again.
                 </p>

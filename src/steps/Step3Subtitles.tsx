@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   Heart,
   Languages,
   Loader2,
@@ -20,6 +21,11 @@ import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { TimeFlow } from "@/components/TimeFlow";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
@@ -615,7 +621,7 @@ export function Step3Subtitles() {
                 <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center">
                   <ScanText className="size-5 text-muted-foreground" />
                   <p className="text-xs font-medium text-foreground">No subtitle lines for this clip</p>
-                  <p className="max-w-sm text-[11px] leading-relaxed text-muted-foreground">
+                  <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
                     The transcript has no speech inside this clip. Widen the cut in Step 2 so the
                     speech is covered.
                   </p>
@@ -772,7 +778,7 @@ export function Step3Subtitles() {
             <div className="flex items-start justify-between gap-3 rounded-md border border-border bg-card/40 px-3 py-2.5">
               <div className="space-y-0.5">
                 <p className="text-xs font-medium text-foreground">Platform safe-zone overlay</p>
-                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                <p className="text-xs leading-relaxed text-muted-foreground">
                   Shows the TikTok / Reels / Shorts action rail and caption block. Hidden in 16:9,
                   where no platform UI overlays the frame.
                 </p>
@@ -785,37 +791,42 @@ export function Step3Subtitles() {
               />
             </div>
 
-            <div className="space-y-1.5 rounded-md border border-border bg-card/40 px-3 py-2.5">
-              <p className="flex items-center gap-1.5 text-xs font-medium text-foreground">
-                <SplitSquareHorizontal className="size-3.5" />
-                Burned-in styles
-              </p>
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] tabular-nums text-muted-foreground">
-                <dt>Arabic</dt>
-                <dd className="truncate text-foreground/80">
-                  {styles.arabic.font} · {styles.arabic.size}px · bottom margin{" "}
-                  {styles.arabic.marginV}
-                </dd>
-                <dt>Thai</dt>
-                <dd className="truncate text-foreground/80">
-                  {styles.thai.font} · {styles.thai.size}px · bottom margin {styles.thai.marginV}
-                </dd>
-              </dl>
-              {overlap.overlaps ? (
-                <p className="flex items-start gap-1.5 text-[10px] leading-relaxed text-status-warning">
-                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                  The Arabic and Thai lines overlap by {Math.abs(Math.round(overlap.gap))} px.
-                  Adjust the sizes in Settings → Fonts.
-                </p>
-              ) : (
-                <p className="flex items-center gap-1.5 text-[10px] text-muted-foreground/80">
-                  <CheckCircle2 className="size-3" />
-                  Lines are {Math.round(overlap.gap)} px apart in the burned-in file.
-                </p>
-              )}
-            </div>
+            <Collapsible className="rounded-md border border-border bg-card/40">
+              <CollapsibleTrigger className="group flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left">
+                <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+                  <SplitSquareHorizontal className="size-3.5" />
+                  Burned-in styles
+                </span>
+                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+              </CollapsibleTrigger>
+              <CollapsibleContent className="space-y-1.5 px-3 pb-2.5">
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] tabular-nums text-muted-foreground">
+                  <dt>Arabic</dt>
+                  <dd className="truncate text-foreground/80">
+                    {styles.arabic.font} · {styles.arabic.size}px · bottom margin{" "}
+                    {styles.arabic.marginV}
+                  </dd>
+                  <dt>Thai</dt>
+                  <dd className="truncate text-foreground/80">
+                    {styles.thai.font} · {styles.thai.size}px · bottom margin {styles.thai.marginV}
+                  </dd>
+                </dl>
+                {overlap.overlaps ? (
+                  <p className="flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
+                    <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                    The Arabic and Thai lines overlap by {Math.abs(Math.round(overlap.gap))} px.
+                    Adjust the sizes in Settings → Fonts.
+                  </p>
+                ) : (
+                  <p className="flex items-center gap-1.5 text-xs text-muted-foreground/80">
+                    <CheckCircle2 className="size-3" />
+                    Lines are {Math.round(overlap.gap)} px apart in the burned-in file.
+                  </p>
+                )}
+              </CollapsibleContent>
+            </Collapsible>
 
-            <p className="text-[10px] leading-relaxed text-muted-foreground">
+            <p className="text-xs leading-relaxed text-muted-foreground">
               Times are shown relative to the start of the clip.
             </p>
           </div>
