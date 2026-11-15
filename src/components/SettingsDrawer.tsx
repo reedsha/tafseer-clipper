@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Drawer } from "vaul";
 import NumberFlow from "@number-flow/react";
 import { toast } from "sonner";
@@ -41,6 +41,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -64,8 +65,10 @@ import {
 import { formatBytes } from "@/lib/format";
 import { loadImportedFonts } from "@/lib/fonts";
 import { isTauriRuntime, openDirectory } from "@/lib/media";
+import type { Resolution } from "@/lib/projectTypes";
 import { buildProviderFor, describeProviderGap } from "@/lib/providers";
-import { NUMERIC_LIMITS } from "@/lib/settingsLimits";
+import { coerceToRange, NUMERIC_LIMITS } from "@/lib/settingsLimits";
+import { estimateThaiLineFit } from "@/lib/subtitleWidth";
 import {
   checkForUpdates,
   downloadAndInstall,
@@ -208,6 +211,11 @@ function SecretInput({
   );
 }
 
+/**
+ * Slider plus an exact-value read-out. The read-out stays a NumberFlow (the
+ * contract's animated-number primitive) and doubles as a trigger: clicking it
+ * opens a shadcn Popover so a precise value can be typed instead of nudged.
+ */
 function NumberField({
   value,
   onChange,
@@ -225,6 +233,25 @@ function NumberField({
   step?: number;
   ariaLabel: string;
 }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const inputId = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const unit = suffix.trim();
+  const rangeText =
+    unit === "%" ? `${min}–${max}%` : unit ? `${min}–${max} ${unit}` : `${min}–${max}`;
+
+  // Typed values go through the same coerce/snap path as an imported snapshot,
+  // so a typed 500 lands on the slider's maximum instead of a dead control.
+  function commit() {
+    const parsed = Number(draft.replace(",", "."));
+    if (Number.isFinite(parsed)) {
+      onChange(coerceToRange(parsed, value, { min, max, step }));
+    }
+    setOpen(false);
+  }
+
   return (
     <div className="flex items-center gap-3" data-vaul-no-drag>
       <Slider
@@ -235,13 +262,132 @@ function NumberField({
         onValueChange={([next]) => onChange(next)}
         aria-label={ariaLabel}
       />
-      <span className="w-14 shrink-0 text-right text-xs tabular-nums text-foreground/90">
-        <NumberFlow
-          value={value}
-          suffix={suffix}
-          format={{ maximumFractionDigits: step < 1 ? 2 : 0 }}
-        />
-      </span>
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          if (next) setDraft(String(value));
+        }}
+      >
+        <PopoverTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="h-6 w-16 shrink-0 justify-end px-1.5 text-xs font-normal tabular-nums text-foreground/90"
+            aria-label={`Type an exact value for ${ariaLabel}`}
+            title="Type an exact value"
+          >
+            <NumberFlow
+              value={value}
+              suffix={suffix}
+              format={{ maximumFractionDigits: step < 1 ? 2 : 0 }}
+            />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent
+          align="end"
+          sideOffset={6}
+          className="w-56 space-y-2 p-3"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            inputRef.current?.focus();
+            inputRef.current?.select();
+          }}
+        >
+          <form
+            className="space-y-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              commit();
+            }}
+          >
+            <Label htmlFor={inputId} className="text-[11px] font-medium text-foreground">
+              {ariaLabel}
+            </Label>
+            <Input
+              id={inputId}
+              ref={inputRef}
+              value={draft}
+              inputMode={step < 1 ? "decimal" : "numeric"}
+              autoComplete="off"
+              spellCheck={false}
+              aria-label={ariaLabel}
+              onChange={(event) => setDraft(event.target.value)}
+              onFocus={(event) => event.currentTarget.select()}
+              className="h-8 text-xs"
+            />
+            <p className="text-[10px] leading-relaxed text-muted-foreground">
+              {rangeText} · snaps to {step}
+            </p>
+            <Button type="submit" size="sm" className="w-full">
+              Set
+            </Button>
+          </form>
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
+
+/**
+ * Width sanity check for the pair that decides how wide a Thai line renders:
+ * `maxCharsPerLine` x the Thai font size. The `.ass` column is the frame
+ * minus its side margins, so a line past it reaches the frame edge.
+ */
+function LineWidthHint({
+  fontFamily,
+  fontSize,
+  maxChars,
+  bold,
+  resolution,
+  onUseSuggestion,
+}: {
+  fontFamily: string;
+  fontSize: number;
+  maxChars: number;
+  bold: boolean;
+  resolution: Resolution;
+  onUseSuggestion: (chars: number) => void;
+}) {
+  const fit = estimateThaiLineFit({
+    fontFamily,
+    fontSize,
+    maxChars,
+    resolution,
+    bold,
+  });
+  const percent = Math.round(fit.fill * 100);
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-baseline justify-between gap-3 text-[11px]">
+        <span className="text-muted-foreground">Widest line at this size</span>
+        <span
+          className={cn(
+            "tabular-nums",
+            fit.fits ? "text-foreground/80" : "text-status-warning",
+          )}
+        >
+          <NumberFlow value={percent} suffix="%" /> of the column
+        </span>
+      </div>
+      {fit.fits ? null : (
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="min-w-0 flex-1 text-[11px] leading-relaxed text-status-warning">
+            A full line runs past the subtitle column, so subtitle text can reach
+            the frame edge. Shorten the line or reduce the font size.
+          </p>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            onClick={() => onUseSuggestion(fit.suggestedMaxChars)}
+          >
+            Use {fit.suggestedMaxChars} chars
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -888,12 +1034,17 @@ export function SettingsDrawer() {
                     />
                   </Field>
                   <Field label="API key">
-                    <SecretInput
-                      label="Cloud API key"
-                      value={cloud.apiKey}
-                      onChange={(value) => updateCloud({ apiKey: value })}
-                      placeholder="sk-…"
-                    />
+                    {/* Chromium logs a password-manager warning for a
+                        `type="password"` field outside a form; this one is
+                        inert (implicit submits are cancelled). */}
+                    <form onSubmit={(event) => event.preventDefault()}>
+                      <SecretInput
+                        label="Cloud API key"
+                        value={cloud.apiKey}
+                        onChange={(value) => updateCloud({ apiKey: value })}
+                        placeholder="sk-…"
+                      />
+                    </form>
                   </Field>
                   <div className="grid gap-3 sm:grid-cols-2">
                     <Field label="Reasoning model (Step 2)">
@@ -1003,12 +1154,14 @@ export function SettingsDrawer() {
                   </Field>
                   <div className="grid gap-3 sm:grid-cols-2">
                     <Field label="API key">
-                      <SecretInput
-                        label="Cloud STT API key"
-                        value={cloudStt.apiKey}
-                        onChange={(value) => updateCloudStt({ apiKey: value })}
-                        placeholder="sk-…"
-                      />
+                      <form onSubmit={(event) => event.preventDefault()}>
+                        <SecretInput
+                          label="Cloud STT API key"
+                          value={cloudStt.apiKey}
+                          onChange={(value) => updateCloudStt({ apiKey: value })}
+                          placeholder="sk-…"
+                        />
+                      </form>
                     </Field>
                     <Field label="Model">
                       <Input
@@ -1219,6 +1372,30 @@ export function SettingsDrawer() {
                       step={NUMERIC_LIMITS.thaiFontSize.step}
                     />
                   </Field>
+                  <Field label="Max characters per line">
+                    <NumberField
+                      ariaLabel="Max characters per line"
+                      value={editor.maxCharsPerLine}
+                      onChange={(value) => updateEditor({ maxCharsPerLine: Math.round(value) })}
+                      suffix=" chars"
+                      min={NUMERIC_LIMITS.maxCharsPerLine.min}
+                      max={NUMERIC_LIMITS.maxCharsPerLine.max}
+                      step={NUMERIC_LIMITS.maxCharsPerLine.step}
+                    />
+                  </Field>
+                  <LineWidthHint
+                    fontFamily={thai.fontFamily}
+                    fontSize={thai.fontSize}
+                    maxChars={editor.maxCharsPerLine}
+                    bold={thai.bold}
+                    resolution={editor.resolution}
+                    onUseSuggestion={(chars) => updateEditor({ maxCharsPerLine: chars })}
+                  />
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    Thai has no inter-word spaces, so cues are broken with dictionary-aware word
+                    segmentation before the .ass is written. Applies to the Thai line in every cue;
+                    Arabic is never character-wrapped.
+                  </p>
                   <Field label="Outline width">
                     <NumberField
                       ariaLabel="Thai outline width"
@@ -1526,28 +1703,6 @@ export function SettingsDrawer() {
                     max={NUMERIC_LIMITS.cutBufferSeconds.max}
                     step={NUMERIC_LIMITS.cutBufferSeconds.step}
                   />
-                </Section>
-
-                <Separator />
-
-                <Section
-                  title="Subtitle line wrapping"
-                  description="Thai has no inter-word spaces, so cues are broken with dictionary-aware word segmentation before the .ass is written (WrapStyle 2 honours only explicit breaks)."
-                >
-                  <Field label="Max characters per line">
-                    <NumberField
-                      ariaLabel="Max characters per line"
-                      value={editor.maxCharsPerLine}
-                      onChange={(value) => updateEditor({ maxCharsPerLine: Math.round(value) })}
-                      suffix=" chars"
-                      min={NUMERIC_LIMITS.maxCharsPerLine.min}
-                      max={NUMERIC_LIMITS.maxCharsPerLine.max}
-                      step={NUMERIC_LIMITS.maxCharsPerLine.step}
-                    />
-                  </Field>
-                  <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    Applies to the Thai line in every cue; Arabic is never character-wrapped.
-                  </p>
                 </Section>
 
                 <Separator />

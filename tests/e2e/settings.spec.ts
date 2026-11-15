@@ -3,8 +3,8 @@
  *
  * Covers the persistence edges the drawer can hit without any provider calls
  * (out-of-range imports, half-typed glossary pairs, preset-name guards), the
- * affordances added for routing/template drift, and the pointer gestures that
- * must not drag the Vaul sheet.
+ * affordances added for routing/template drift, the exact-value popover and the
+ * Thai line-width hint, and the pointer gestures that must not drag the sheet.
  */
 
 import { expect, test } from "@playwright/test";
@@ -157,6 +157,73 @@ test.describe("settings affordances", () => {
       (item: { id: string }) => item.id === "studio-default",
     );
     expect(studio.arabic.fontSize).toBe(persisted.state.arabic.fontSize);
+  });
+
+  test("a slider read-out accepts an exact typed value and snaps it into range", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Open settings" }).click();
+    await page.getByRole("tab", { name: "Fonts & Style" }).click();
+
+    const trigger = page.getByRole("button", {
+      name: "Type an exact value for Arabic font size",
+    });
+    const input = page.getByRole("textbox", { name: "Arabic font size" });
+    const slider = page.getByRole("slider", { name: "Arabic font size" });
+
+    // A value between two slider positions is reachable by typing it.
+    await trigger.click();
+    await input.fill("73");
+    await input.press("Enter");
+    await expect(slider).toHaveAttribute("aria-valuenow", "73");
+
+    // Typed values go through the same bounds as an imported snapshot.
+    await trigger.click();
+    await input.fill("500");
+    await input.press("Enter");
+    await expect(slider).toHaveAttribute("aria-valuenow", "120");
+
+    // Fractional steps snap to the grid the slider can show.
+    await page.getByRole("tab", { name: "Editor & Export" }).click();
+    await page.getByRole("button", { name: "Type an exact value for Cut buffer padding" }).click();
+    await page.getByRole("textbox", { name: "Cut buffer padding" }).fill("0.42");
+    await page.getByRole("textbox", { name: "Cut buffer padding" }).press("Enter");
+    await expect(page.getByRole("slider", { name: "Cut buffer padding" })).toHaveAttribute(
+      "aria-valuenow",
+      "0.4",
+    );
+  });
+
+  test("Thai line wrapping sits with the Thai style and flags an overflowing pair", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Open settings" }).click();
+    await page.getByRole("tab", { name: "Fonts & Style" }).click();
+
+    // Master plan §5.2: max chars per line belongs to the Thai defaults, next to
+    // the font size it multiplies into a rendered line width.
+    const maxChars = page.getByRole("slider", { name: "Max characters per line" });
+    await expect(maxChars).toBeVisible();
+
+    // The largest Thai size at 40 chars overruns the .ass text column.
+    await page.getByRole("button", { name: "Type an exact value for Thai font size" }).click();
+    await page.getByRole("textbox", { name: "Thai font size" }).fill("96");
+    await page.getByRole("textbox", { name: "Thai font size" }).press("Enter");
+
+    const warning = page.getByText(/runs past the subtitle column/);
+    await expect(warning).toBeVisible();
+
+    // One click applies the measured suggestion and clears the warning.
+    await page.getByRole("button", { name: /^Use \d+ chars$/ }).click();
+    await expect(warning).toHaveCount(0);
+    const shortened = Number(await maxChars.getAttribute("aria-valuenow"));
+    expect(shortened).toBeLessThan(40);
+
+    // The control no longer lives in the editor tab.
+    await page.getByRole("tab", { name: "Editor & Export" }).click();
+    await expect(page.getByRole("slider", { name: "Max characters per line" })).toHaveCount(0);
   });
 
   test("horizontal drags inside the drawer never slide the panel", async ({ page }) => {
