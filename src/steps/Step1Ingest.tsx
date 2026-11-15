@@ -52,6 +52,7 @@ import { extractAndTranscribe } from "@/lib/api";
 import { describeAcceleration } from "@/lib/acceleration";
 import { buildDiagnostics, copyText } from "@/lib/diagnostics";
 import { formatBytes, formatClock, stripExtension } from "@/lib/format";
+import { useI18n } from "@/lib/i18n";
 import { relaunchApp } from "@/lib/updater";
 import {
   LECTURE_EXTENSIONS,
@@ -106,6 +107,7 @@ export function Step1Ingest() {
   const setRecentOpen = useUiStore((state) => state.setRecentOpen);
 
   const [dragging, setDragging] = useState(false);
+  const { t } = useI18n();
   const [browserFile, setBrowserFile] = useState<{ name: string; size: number } | null>(null);
   const [promptOpen, setPromptOpen] = useState(false);
   const [pendingReplace, setPendingReplace] = useState<{ path: string; name: string } | null>(null);
@@ -595,19 +597,19 @@ export function Step1Ingest() {
   );
   const displayName = browserFile?.name ?? project?.sourceFileName ?? null;
   const dropTitle = dragging
-    ? "Release to load the lecture"
+    ? t("step1.drop.dragging")
     : hasSource
       ? project?.transcript
-        ? "Transcript ready"
-        : "Lecture selected"
-      : "Drop a lecture here";
+        ? t("step1.drop.transcriptReady")
+        : t("step1.drop.selected")
+      : t("step1.drop.default");
   const dropDescription = dragging
-    ? "MP4, MOV or MKV"
+    ? t("step1.drop.hintDragging")
     : hasSource
       ? project?.transcript
-        ? "The transcript is saved in this project. Continue to clip discovery, or replace the lecture."
-        : "Ready for local transcription. Drop another file to replace it."
-      : "MP4, MOV or MKV. Long-form Tafseer lectures are expected; audio stays on this machine.";
+        ? t("step1.drop.hintTranscript")
+        : t("step1.drop.hintSelected")
+      : t("step1.drop.hintDefault");
 
   return (
     <>
@@ -616,12 +618,11 @@ export function Step1Ingest() {
           <header className="flex flex-wrap items-end justify-between gap-3">
             <div className="space-y-1.5">
               <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
-                Step 1 of 4
+                {t("step1.eyebrow")}
               </p>
-              <h1 className="text-lg font-medium text-foreground">Add your lecture</h1>
+              <h1 className="text-lg font-medium text-foreground">{t("step1.title")}</h1>
               <p className="max-w-prose text-sm leading-relaxed text-muted-foreground">
-                Drop a long-form Tafseer lecture. We'll transcribe the Thai–Arabic audio and find
-                clip-worthy moments for you.
+                {t("step1.subtitle")}
               </p>
             </div>
             {project ? (
@@ -685,7 +686,7 @@ export function Step1Ingest() {
                     }}
                   >
                     <FolderOpen className="size-3.5" />
-                    Browse files
+                    {t("step1.browse")}
                   </Button>
                   <div className="flex gap-1">
                     {LECTURE_EXTENSIONS.map((extension) => (
@@ -723,7 +724,7 @@ export function Step1Ingest() {
                         void handleBrowse();
                       }}
                     >
-                      Change
+                      {t("step1.change")}
                     </Button>
                   </div>
                 ) : null}
@@ -744,7 +745,9 @@ export function Step1Ingest() {
                     <div className="space-y-0.5">
                       <div className="flex items-center gap-1.5">
                         <CheckCircle2 className="size-3.5 text-muted-foreground" />
-                        <h2 className="text-[13px] font-medium text-foreground">Transcript ready</h2>
+                        <h2 className="text-[13px] font-medium text-foreground">
+                          {t("step1.transcript.title")}
+                        </h2>
                       </div>
                       <p className="text-xs leading-relaxed text-muted-foreground">
                         {project.transcript.segments.length} segments ·{" "}
@@ -759,11 +762,11 @@ export function Step1Ingest() {
                   <Separator className="my-3" />
                   <div className="flex flex-wrap items-center gap-2">
                     <Button size="sm" className="gap-1.5" onClick={() => setStep(2)}>
-                      Continue to clip discovery
+                      {t("step1.transcript.continue")}
                       <ChevronRight className="size-3.5" />
                     </Button>
                     <Button variant="ghost" size="sm" onClick={() => void handleBrowse()}>
-                      Replace lecture
+                      {t("step1.transcript.replace")}
                     </Button>
                   </div>
                 </section>
@@ -772,12 +775,11 @@ export function Step1Ingest() {
                   <div className="flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin text-muted-foreground" />
                     <p className="text-[13px] font-medium text-foreground">
-                      Extracting audio and transcribing…
+                      {t("step1.busy.title")}
                     </p>
                   </div>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    Transcription runs in the background. Long lectures can take a few minutes —
-                    the app stays responsive.
+                    {t("step1.busy.description")}
                   </p>
                   <div className="mt-3 flex items-center justify-between gap-3">
                     <span className="text-xs tabular-nums text-muted-foreground">
@@ -801,11 +803,10 @@ export function Step1Ingest() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="space-y-0.5">
                       <h2 className="text-[13px] font-medium text-foreground">
-                        Transcribe the lecture
+                        {t("step1.transcribe.title")}
                       </h2>
                       <p className="text-xs leading-relaxed text-muted-foreground">
-                        We pull out the audio and transcribe the Thai–Arabic speech. Your glossary
-                        is applied to the transcript afterwards.
+                        {t("step1.transcribe.description")}
                       </p>
                     </div>
                     <Badge variant="outline" className="shrink-0">
@@ -823,7 +824,7 @@ export function Step1Ingest() {
                   {sidecar.status === "offline" ? (
                     <InlineError
                       className="mt-2"
-                      title="The processing engine didn't start."
+                      title={t("step1.offline.title")}
                       action={
                         <>
                           <Button
@@ -832,7 +833,7 @@ export function Step1Ingest() {
                             className="h-5 text-destructive"
                             onClick={() => void refreshHealth()}
                           >
-                            Retry
+                            {t("common.retry")}
                           </Button>
                           <Button
                             variant="ghost"
@@ -840,7 +841,7 @@ export function Step1Ingest() {
                             className="h-5 text-destructive"
                             onClick={() => void handleRestartApp()}
                           >
-                            Restart the app
+                            {t("common.restart")}
                           </Button>
                           <Button
                             variant="ghost"
@@ -848,13 +849,12 @@ export function Step1Ingest() {
                             className="h-5 text-destructive"
                             onClick={() => void handleCopyDiagnostics()}
                           >
-                            Copy diagnostics
+                            {t("common.copyDiagnostics")}
                           </Button>
                         </>
                       }
                     >
-                      Transcription needs the engine. Retry, or restart the app if this keeps
-                      happening.
+                      {t("step1.offline.description")}
                     </InlineError>
                   ) : null}
 
@@ -865,11 +865,11 @@ export function Step1Ingest() {
                     onClick={() => void handleTranscribe()}
                   >
                     <Captions className="size-4" />
-                    Transcribe lecture & find clips
+                    {t("step1.transcribe.cta")}
                   </Button>
                   {!project?.sourcePath ? (
                     <p className="mt-1.5 text-[10px] text-muted-foreground">
-                      Choose a lecture file first.
+                      {t("step1.transcribe.chooseFirst")}
                     </p>
                   ) : null}
                 </section>
@@ -888,7 +888,7 @@ export function Step1Ingest() {
                       <div className="space-y-0.5">
                         <h2 className="text-[13px] font-medium text-foreground">Clip brief</h2>
                         <p className="text-xs leading-relaxed text-muted-foreground">
-                          Tell the AI what kind of moments to look for.
+                          {t("step1.brief.description")}
                         </p>
                       </div>
                       <Badge variant="outline" className="shrink-0 text-[10px]">
@@ -928,7 +928,7 @@ export function Step1Ingest() {
                         className="gap-1 text-muted-foreground"
                         onClick={handleOpenPrompt}
                       >
-                        Edit clip brief
+                        {t("step1.brief.edit")}
                       </Button>
                     </div>
                   </section>
@@ -938,17 +938,17 @@ export function Step1Ingest() {
                       htmlFor="session-guide"
                       className="text-[13px] font-medium text-foreground"
                     >
-                      Session topic guide
+                      {t("step1.guide.title")}
                     </Label>
                     <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-                      Optional notes for this lecture only.
+                      {t("step1.guide.description")}
                     </p>
                     <Textarea
                       id="session-guide"
                       value={project?.sessionGuide ?? ""}
                       onChange={(event) => handleGuideChange(event.target.value)}
                       rows={4}
-                      placeholder="Focus on stories of the Prophets and practical rulings; ignore the first 10 minutes of audio checks."
+                      placeholder={t("step1.guide.placeholder")}
                       className="mt-2 resize-y text-xs leading-relaxed"
                     />
                   </section>
@@ -958,11 +958,13 @@ export function Step1Ingest() {
               <section className="rounded-lg border border-border bg-card/40 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="space-y-0.5">
-                    <h2 className="text-[13px] font-medium text-foreground">AI setup</h2>
+                    <h2 className="text-[13px] font-medium text-foreground">
+                      {t("step1.ai.title")}
+                    </h2>
                     <p className="text-xs leading-relaxed text-muted-foreground">
                       {engineUiMode === "automatic"
-                        ? "We pick the best available option for you."
-                        : "Choose where each step runs."}
+                        ? t("step1.ai.automaticDescription")
+                        : t("step1.ai.advancedDescription")}
                     </p>
                   </div>
                   <div className="flex items-center gap-1.5">
@@ -997,8 +999,7 @@ export function Step1Ingest() {
                     {transcriptionMode === "local" ? (
                       <div className="space-y-1.5">
                         <p className="text-xs leading-relaxed text-muted-foreground/80">
-                          The first transcription on this computer downloads about 1.5 GB of AI
-                          files.
+                          {t("step1.ai.downloadNote")}
                         </p>
                         <GpuInlineHint summary={acceleration} />
                       </div>
@@ -1017,7 +1018,7 @@ export function Step1Ingest() {
                       className="gap-1 text-muted-foreground"
                       onClick={() => openSettings("providers")}
                     >
-                      Change AI settings
+                      {t("step1.ai.change")}
                     </Button>
                   </div>
                 ) : (
@@ -1043,8 +1044,7 @@ export function Step1Ingest() {
                         {transcriptionMode === "local" ? (
                           <div className="space-y-1.5">
                             <p className="text-xs leading-relaxed text-muted-foreground/80">
-                              The first transcription on this computer downloads about 1.5 GB of AI
-                              files.
+                              {t("step1.ai.downloadNote")}
                             </p>
                             <GpuInlineHint summary={acceleration} />
                           </div>
@@ -1096,7 +1096,7 @@ export function Step1Ingest() {
           </div>
 
           <p className="pb-2 text-center text-[10px] text-muted-foreground/60">
-            Audio, transcripts and clips stay on this machine unless Cloud mode is selected.
+            {t("step1.privacy")}
           </p>
         </div>
       </div>

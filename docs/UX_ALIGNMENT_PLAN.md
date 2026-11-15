@@ -505,7 +505,7 @@ pnpm build
 | PR-2 Automatic/Advanced (`ux/pr-2-automatic-mode`) | ✅ implemented | typecheck + 15/15 Playwright + build |
 | PR-3 errors & dead-ends (`ux/pr-3-errors`) | ✅ implemented | typecheck + 15/15 Playwright + build |
 | PR-4 AI presets + Ollama detect (`ux/pr-4-ai-presets`) | ✅ implemented | 49/49 backend (2 new checks), 15/15 Playwright, build |
-| PR-5 string extraction | ⏸ not started | gated on PR-1..4 merging (per §7) |
+| PR-5 string extraction | ✅ implemented as groundwork | typed `src/lib/i18n.ts` + persisted UI language + Thai Step 1; new Playwright check |
 
 **Notes for the next agent**
 

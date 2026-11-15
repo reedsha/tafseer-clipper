@@ -115,4 +115,17 @@ test.describe("app shell", () => {
     const bodyText = await page.locator("body").innerText();
     expect(bodyText).not.toMatch(/GTX|RTX|NVIDIA NVENC|4–6 GB|4-6 GB/);
   });
+
+  test("interface language switches the add-lecture screen to Thai", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Add your lecture" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Open settings" }).click();
+    await page.getByRole("tab", { name: "Editor & Export" }).click();
+    await page.getByRole("combobox", { name: "Language", exact: true }).click();
+    await page.getByRole("option", { name: "ไทย" }).click();
+    await page.getByRole("button", { name: "Close settings" }).click();
+
+    await expect(page.getByRole("heading", { name: "เพิ่มบทบรรยายของคุณ" })).toBeVisible();
+  });
 });

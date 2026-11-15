@@ -96,6 +96,7 @@ import {
   type EngineMode,
   type StylePreset,
   type ThaiStyle,
+  type UiLanguage,
 } from "@/store/settingsStore";
 import type { SettingsTab } from "@/store/uiStore";
 import { useUiStore } from "@/store/uiStore";
@@ -706,8 +707,10 @@ export function SettingsDrawer() {
     importedFonts,
     fontsDir,
     sidecar,
+    uiLanguage,
     setTranscriptionMode,
     setAnalysisMode,
+    setUiLanguage,
     updateCloud,
     updateOllama,
     updateCloudStt,
@@ -1882,6 +1885,28 @@ export function SettingsDrawer() {
             {/* -------------------------------- Editor ------------------------------- */}
             <TabsContent value="editor" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
               <div className="space-y-5">
+                <Section
+                  title="Interface"
+                  description="Language of the app. Thai covers the add-lecture screen first; more screens follow."
+                >
+                  <Field label="Language">
+                    <Select
+                      value={uiLanguage}
+                      onValueChange={(value) => setUiLanguage(value as UiLanguage)}
+                    >
+                      <SelectTrigger className="w-full" aria-label="Language">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="en">English</SelectItem>
+                        <SelectItem value="th">ไทย</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                </Section>
+
+                <Separator />
+
                 <Section
                   title="Cut buffer padding"
                   description="Extra headroom kept before and after detected speech so clips never cut mid-word."
