@@ -86,9 +86,9 @@ These five libraries are pre-approved. Use each only for its assigned job:
 
 ## 5. CI/CD, Versioning & Release Rules
 
-1. **Never manually edit version numbers** in manifests; versions are managed automatically via Release Please PRs.
-2. **Always use Conventional Commit formatting** for PR titles (`feat:`, `fix:`, `chore:`, `feat!:`).
-3. **Never push directly to `main`**; always open a PR and ensure local `lint`, `test`, and `build` pass first.
+1. **Versions are managed by Release Please** (this repo uses it): do not hand-edit version numbers in manifests; open an empty conventional commit (`chore: release X.Y.Z`) instead. If you ever drop Release Please, version manually.
+2. **Conventional Commit formatting** (`feat:`, `fix:`, `chore:`, `feat!:`) is required **only while Release Please is in use** (it parses commit messages for version bumps). Otherwise free-form is fine.
+3. **Solo-friendly commit flow:** CI runs on push to `main`; committing directly to `main` is allowed. Use a feature branch + PR only for risky/experimental work. Always ensure local `lint`, `test`, and `build` pass before pushing.
 4. **Release lifecycle:** Merging to `main` updates Staging and refreshes the Release PR; merging the Release PR ships to Production.
 
 ### Repository-specific detail
