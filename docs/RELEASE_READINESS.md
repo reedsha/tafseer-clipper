@@ -441,7 +441,7 @@ Re-run after every dependency PR landed, on the merged tree rather than a branch
 
 | Check | Result |
 |---|---|
-| `backend/test_phase1_e2e.py` | **44/44**, exit 0 (42 before the probe regressions were added in §9.7) |
+| `backend/test_phase1_e2e.py` | **45/45**, exit 0 (40 before the GPU-fallback and probe regressions) |
 | `cargo test --locked` (with `sha2` 0.11) | **11 passed** |
 | `pnpm build` (`tsc && vite build`) | built in 879 ms |
 | Local Python env | aligned to the merged `requirements.txt` (`numpy` 2.5.4, `pillow` 13.0.0, `av` 16.1.0) |
@@ -480,7 +480,22 @@ Verified in **both** directions, which the invalid-model version could not be:
 
 The positive case is simulated by copying a real system DLL under those names — legitimate here
 because the probe's only question is whether the library can be **loaded**, which is exactly what was
-broken. `backend/test_phase1_e2e.py` still reports **42/42** afterwards.
+broken. `backend/test_phase1_e2e.py` still reports **45/45** afterwards.
+
+**The regression test had to be split, because CI has no GPU.** The first version asserted
+`transcription == "gpu"` with the simulated pack — which is impossible on a runner without an NVIDIA
+GPU, since the report computes `transcription_gpu = gpu_detected and runtime`. CI failed exactly
+there:
+
+```
+[FAIL] accel: probe reports GPU when the compute libraries actually load
+       cuda_runtime=False transcription=cpu reason=no-nvidia-gpu
+```
+
+So the check is now two: `accel: compute libraries load when they are present` (portable — it only
+asks whether the DLLs load) and, gated on `gpu_detected`, either the positive assertion or
+`accel: probe does not claim GPU on a machine without one`. That keeps real coverage on GPU-less CI
+instead of a silent skip.
 
 ### 9.4 Rebuilt artifacts (Stream 4, 2026-11-15)
 

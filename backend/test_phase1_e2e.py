@@ -1023,31 +1023,56 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
     # Too permissive = the original bug (claiming a CUDA runtime that is not
     # loadable, then 500ing at the first inference). Too strict = the product's
     # headline feature silently disabled for everyone who installed the pack.
-    # Both directions are pinned here.
     probe_dir = Path(tempfile.mkdtemp(prefix="tafseer-probe-"))
     previous_cuda_dir = os.environ.get("TAFSEER_CUDA_DIR")
     try:
         system32 = Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32" / "kernel32.dll"
-        if system32.is_file():
+        if not system32.is_file():
+            check(
+                "accel: compute libraries load when they are present",
+                False,
+                f"fixture missing: {system32}",
+            )
+        else:
+            # Copies of a real system DLL under the CUDA names. Legitimate here:
+            # the only question is whether the library can be *loaded*, which is
+            # exactly what the defective probe got wrong.
             for name in ("cublas64_12.dll", "cudnn64_9.dll"):
                 shutil.copy2(system32, probe_dir / name)
             os.environ["TAFSEER_CUDA_DIR"] = str(probe_dir)
             accel.clear_cache()
-            with_pack = accel.acceleration_report()
             check(
-                "accel: probe reports GPU when the compute libraries actually load",
-                with_pack["cuda_runtime"] is True
-                and with_pack["transcription"] == "gpu"
-                and with_pack["reason"] is None,
-                f"cuda_runtime={with_pack['cuda_runtime']} "
-                f"transcription={with_pack['transcription']} reason={with_pack['reason']}",
+                "accel: compute libraries load when they are present",
+                accel._load_cuda_compute_libraries() is True,
+                f"dir={probe_dir}",
             )
-        else:
-            check(
-                "accel: probe reports GPU when the compute libraries actually load",
-                False,
-                f"fixture missing: {system32}",
-            )
+
+            # The full report can only claim "gpu" where there IS a GPU, so this
+            # half is machine-dependent by definition. CI runners have none, so
+            # assert the honest negative there instead of skipping silently.
+            report = accel.acceleration_report()
+            if report["gpu_detected"]:
+                check(
+                    "accel: probe reports GPU when the compute libraries actually load",
+                    report["cuda_runtime"] is True
+                    and report["transcription"] == "gpu"
+                    and report["reason"] is None,
+                    f"cuda_runtime={report['cuda_runtime']} "
+                    f"transcription={report['transcription']} reason={report['reason']}",
+                )
+            else:
+                info(
+                    "accel: GPU positive-direction check is not applicable on a "
+                    "machine without an NVIDIA GPU; asserting the negative instead"
+                )
+                check(
+                    "accel: probe does not claim GPU on a machine without one",
+                    report["cuda_runtime"] is False
+                    and report["transcription"] == "cpu"
+                    and report["reason"] == "no-nvidia-gpu",
+                    f"cuda_runtime={report['cuda_runtime']} "
+                    f"transcription={report['transcription']} reason={report['reason']}",
+                )
     finally:
         if previous_cuda_dir is None:
             os.environ.pop("TAFSEER_CUDA_DIR", None)
