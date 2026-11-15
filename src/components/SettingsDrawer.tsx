@@ -57,6 +57,7 @@ import { formatBytes } from "@/lib/format";
 import { loadImportedFonts } from "@/lib/fonts";
 import { isTauriRuntime } from "@/lib/media";
 import { buildProviderFor, describeProviderGap } from "@/lib/providers";
+import { NUMERIC_LIMITS } from "@/lib/settingsLimits";
 import {
   checkForUpdates,
   downloadAndInstall,
@@ -238,6 +239,38 @@ function withCurrentColor(
     : [...options, { value: current, label: `Custom (${current})` }];
 }
 
+/** Human-readable label for an auto-save interval outside the preset list. */
+function formatIntervalLabel(ms: number): string {
+  if (ms % 60_000 === 0) {
+    const minutes = ms / 60_000;
+    return `Custom (${minutes} min)`;
+  }
+  if (ms % 1_000 === 0) return `Custom (${ms / 1_000} s)`;
+  return `Custom (${ms} ms)`;
+}
+
+/**
+ * Keep the interval Select honest for values that are not one of the presets:
+ * an imported or migrated interval must render as a label, never as a blank
+ * trigger with no visible value.
+ */
+function withCurrentInterval(
+  options: { value: string; label: string }[],
+  currentMs: number,
+): { value: string; label: string }[] {
+  const value = String(currentMs);
+  return options.some((option) => option.value === value)
+    ? options
+    : [...options, { value, label: formatIntervalLabel(currentMs) }];
+}
+
+/** The 0–100 % view of the stored 0–1 box-opacity fraction. */
+const BOX_OPACITY_PERCENT = {
+  min: NUMERIC_LIMITS.boxOpacity.min * 100,
+  max: NUMERIC_LIMITS.boxOpacity.max * 100,
+  step: NUMERIC_LIMITS.boxOpacity.step * 100,
+};
+
 function downloadJson(text: string, fileName: string): void {
   const blob = new Blob([text], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -399,6 +432,21 @@ export function SettingsDrawer() {
     return [...families].sort((a, b) => a.localeCompare(b));
   }, [importedFonts]);
 
+  /**
+   * Rows where the replacement is typed but the match text is missing cannot
+   * be applied (Step 1 skips them). They survive a restart now, so the panel
+   * has to say why they are inert instead of letting them look active.
+   */
+  const incompleteGlossaryCount = glossary.filter(
+    (entry) => entry.replace.trim() !== "" && !entry.find.trim(),
+  ).length;
+
+  /** Rename can only do something when the trimmed name is new and non-empty. */
+  const renamingPreset = renamingId
+    ? presets.find((item) => item.id === renamingId) ?? null
+    : null;
+  const renameUnchanged = !renameValue.trim() || renameValue.trim() === renamingPreset?.name;
+
   const health = sidecar.health;
   /** Vendor-neutral acceleration state derived from GET /health. */
   const acceleration = describeAcceleration(health);
@@ -478,8 +526,12 @@ export function SettingsDrawer() {
     if (!file) return;
     try {
       const result = importSettings(await file.text());
-      if (result.ok) toast.success("Settings imported");
-      else toast.error("Import failed", { description: result.error });
+      if (result.ok) {
+        syncOpenProjectExportDefaults();
+        toast.success("Settings imported");
+      } else {
+        toast.error("Import failed", { description: result.error });
+      }
     } catch (error) {
       toast.error("Import failed", {
         description: error instanceof Error ? error.message : String(error),
@@ -493,6 +545,23 @@ export function SettingsDrawer() {
     downloadJson(exportSettings(), "tafseer-settings.json");
     toast.success("Settings exported", {
       description: "API keys, fonts, glossary and presets included.",
+    });
+  }
+
+  /**
+   * Import and reset replace the whole settings snapshot in one `set()`, so the
+   * per-field handlers that normally push export defaults into the open project
+   * never ran. Re-sync explicitly or the drawer shows new defaults while the
+   * project keeps rendering with the old ones.
+   */
+  function syncOpenProjectExportDefaults() {
+    const { editor: next } = useSettingsStore.getState();
+    applyExportDefaults({
+      resolution: next.resolution,
+      framing: next.framing,
+      useNvenc: next.useNvenc,
+      exportSrt: next.exportSrt,
+      filenameTemplate: next.filenameTemplate,
     });
   }
 
@@ -913,8 +982,9 @@ export function SettingsDrawer() {
                       value={arabic.fontSize}
                       onChange={(value) => updateArabic({ fontSize: value })}
                       suffix=" px"
-                      min={24}
-                      max={120}
+                      min={NUMERIC_LIMITS.arabicFontSize.min}
+                      max={NUMERIC_LIMITS.arabicFontSize.max}
+                      step={NUMERIC_LIMITS.arabicFontSize.step}
                     />
                   </Field>
                   <Field
@@ -931,9 +1001,9 @@ export function SettingsDrawer() {
                       value={arabic.lineHeightPad}
                       onChange={(value) => updateArabic({ lineHeightPad: value })}
                       suffix="×"
-                      min={1}
-                      max={1.8}
-                      step={0.05}
+                      min={NUMERIC_LIMITS.arabicLineHeightPad.min}
+                      max={NUMERIC_LIMITS.arabicLineHeightPad.max}
+                      step={NUMERIC_LIMITS.arabicLineHeightPad.step}
                     />
                   </Field>
                   <Field
@@ -951,9 +1021,9 @@ export function SettingsDrawer() {
                       value={arabic.outlineWidth}
                       onChange={(value) => updateArabic({ outlineWidth: value })}
                       suffix=" px"
-                      min={0}
-                      max={8}
-                      step={0.5}
+                      min={NUMERIC_LIMITS.arabicOutlineWidth.min}
+                      max={NUMERIC_LIMITS.arabicOutlineWidth.max}
+                      step={NUMERIC_LIMITS.arabicOutlineWidth.step}
                     />
                   </Field>
                   <Field
@@ -971,8 +1041,9 @@ export function SettingsDrawer() {
                       value={Math.round(arabic.boxOpacity * 100)}
                       onChange={(value) => updateArabic({ boxOpacity: value / 100 })}
                       suffix="%"
-                      min={0}
-                      max={100}
+                      min={BOX_OPACITY_PERCENT.min}
+                      max={BOX_OPACITY_PERCENT.max}
+                      step={BOX_OPACITY_PERCENT.step}
                     />
                   </Field>
                   <SwitchRow
@@ -1030,8 +1101,9 @@ export function SettingsDrawer() {
                       value={thai.fontSize}
                       onChange={(value) => updateThai({ fontSize: value })}
                       suffix=" px"
-                      min={20}
-                      max={96}
+                      min={NUMERIC_LIMITS.thaiFontSize.min}
+                      max={NUMERIC_LIMITS.thaiFontSize.max}
+                      step={NUMERIC_LIMITS.thaiFontSize.step}
                     />
                   </Field>
                   <Field
@@ -1049,9 +1121,9 @@ export function SettingsDrawer() {
                       value={thai.outlineWidth}
                       onChange={(value) => updateThai({ outlineWidth: value })}
                       suffix=" px"
-                      min={0}
-                      max={8}
-                      step={0.5}
+                      min={NUMERIC_LIMITS.thaiOutlineWidth.min}
+                      max={NUMERIC_LIMITS.thaiOutlineWidth.max}
+                      step={NUMERIC_LIMITS.thaiOutlineWidth.step}
                     />
                   </Field>
                   <Field
@@ -1069,8 +1141,9 @@ export function SettingsDrawer() {
                       value={Math.round(thai.boxOpacity * 100)}
                       onChange={(value) => updateThai({ boxOpacity: value / 100 })}
                       suffix="%"
-                      min={0}
-                      max={100}
+                      min={BOX_OPACITY_PERCENT.min}
+                      max={BOX_OPACITY_PERCENT.max}
+                      step={BOX_OPACITY_PERCENT.step}
                     />
                   </Field>
                   <SwitchRow
@@ -1172,6 +1245,7 @@ export function SettingsDrawer() {
                           }
                           placeholder="Find"
                           aria-label="Find text"
+                          aria-invalid={entry.replace.trim() !== "" && !entry.find.trim()}
                           className="h-8"
                         />
                         <MoveRight className="size-3.5 shrink-0 text-muted-foreground" />
@@ -1202,6 +1276,14 @@ export function SettingsDrawer() {
                       </div>
                     ))}
                   </div>
+                  {incompleteGlossaryCount > 0 ? (
+                    <p className="text-[11px] leading-relaxed text-status-warning">
+                      {incompleteGlossaryCount} pair
+                      {incompleteGlossaryCount === 1 ? " is" : "s are"} missing the text to
+                      find — {incompleteGlossaryCount === 1 ? "it is" : "they are"} skipped during
+                      transcription until you fill {incompleteGlossaryCount === 1 ? "it" : "them"} in.
+                    </p>
+                  ) : null}
                   <Button
                     variant="outline"
                     size="sm"
@@ -1294,9 +1376,9 @@ export function SettingsDrawer() {
                     value={editor.cutBufferSeconds}
                     onChange={(value) => updateEditor({ cutBufferSeconds: value })}
                     suffix=" s"
-                    min={0}
-                    max={1.5}
-                    step={0.05}
+                    min={NUMERIC_LIMITS.cutBufferSeconds.min}
+                    max={NUMERIC_LIMITS.cutBufferSeconds.max}
+                    step={NUMERIC_LIMITS.cutBufferSeconds.step}
                   />
                 </Section>
 
@@ -1321,8 +1403,9 @@ export function SettingsDrawer() {
                       value={editor.maxCharsPerLine}
                       onChange={(value) => updateEditor({ maxCharsPerLine: Math.round(value) })}
                       suffix=" chars"
-                      min={20}
-                      max={80}
+                      min={NUMERIC_LIMITS.maxCharsPerLine.min}
+                      max={NUMERIC_LIMITS.maxCharsPerLine.max}
+                      step={NUMERIC_LIMITS.maxCharsPerLine.step}
                     />
                   </Field>
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
@@ -1484,7 +1567,10 @@ export function SettingsDrawer() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          {AUTOSAVE_OPTIONS.map((option) => (
+                          {withCurrentInterval(
+                            AUTOSAVE_OPTIONS,
+                            storage.autosaveIntervalMs,
+                          ).map((option) => (
                             <SelectItem key={option.value} value={option.value}>
                               {option.label}
                             </SelectItem>
@@ -1811,10 +1897,12 @@ export function SettingsDrawer() {
             </Button>
             <Button
               size="sm"
+              disabled={!presetName.trim()}
               onClick={() => {
-                createPreset(presetName);
+                const name = presetName.trim();
+                createPreset(name);
                 setPresetDialogOpen(false);
-                toast.success("Style preset saved");
+                toast.success("Style preset saved", { description: name });
               }}
             >
               Save preset
@@ -1839,10 +1927,11 @@ export function SettingsDrawer() {
             </Button>
             <Button
               size="sm"
+              disabled={renameUnchanged}
               onClick={() => {
                 if (renamingId) renamePreset(renamingId, renameValue);
                 setRenamingId(null);
-                toast.success("Preset renamed");
+                toast.success("Preset renamed", { description: renameValue.trim() });
               }}
             >
               Rename
@@ -1896,6 +1985,7 @@ export function SettingsDrawer() {
               size="sm"
               onClick={() => {
                 resetSettings();
+                syncOpenProjectExportDefaults();
                 setResetDialogOpen(false);
                 toast.success("Settings reset to defaults");
               }}
