@@ -80,3 +80,9 @@ backend/.tmp/
 src-tauri/target/
 /src-tauri/gen/
 
+
+# Local agent/tooling scratch (never commit)
+.kangentic/
+build/
+kangentic.json
+
