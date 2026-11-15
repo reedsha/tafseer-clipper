@@ -61,6 +61,22 @@ export function sanitizeFileNameTemplate(template: string): string {
   return stripTrailingDotsAndSpaces(cleaned);
 }
 
+/**
+ * Placeholders the sidecar will not resolve, e.g. a typo like `{LecureName}`.
+ * The sidecar leaves unknown tokens in the file name verbatim, so the Settings
+ * preview warns instead of letting the mistake reach every export.
+ */
+export function unknownTemplateTokens(template: string): string[] {
+  const known = new Set(["LectureName", "Title", "Clip", "Resolution"]);
+  const unknown = new Set<string>();
+  for (const match of template.matchAll(/\{([^{}]*)\}/g)) {
+    const inner = match[1];
+    // `{01}` / `{001}` are the zero-padded clip-number form.
+    if (/^\d{2,3}$/.test(inner) || known.has(inner)) continue;
+    unknown.add(match[0]);
+  }
+  return [...unknown];
+}
 
 /** `Path(...).stem` — the source file name without its last extension. */
 export function fileStem(path: string): string {

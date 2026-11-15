@@ -21,7 +21,7 @@ import {
   writeAutosave,
   writeAutosaveFile,
 } from "@/lib/projectFile";
-import { useSettingsStore } from "./settingsStore";
+import { useSettingsStore, type EditorDefaults } from "./settingsStore";
 
 const MAX_RECENT_PROJECTS = 8;
 
@@ -78,6 +78,23 @@ function stripExtension(fileName: string): string {
 function upsertRecent(list: RecentProject[], entry: RecentProject): RecentProject[] {
   const next = [entry, ...list.filter((item) => item.id !== entry.id)];
   return next.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_RECENT_PROJECTS);
+}
+
+/**
+ * Step 3 and Step 4 edit the project's export settings directly. Mirroring the
+ * shared fields into Settings → Editor keeps the persisted defaults honest;
+ * without it the drawer keeps showing whatever was last edited there while the
+ * exported file follows the project.
+ */
+function mirrorExportDefaults(patch: Partial<ProjectExportSettings>): void {
+  const mirrored: Partial<EditorDefaults> = {};
+  if (patch.resolution !== undefined) mirrored.resolution = patch.resolution;
+  if (patch.framing !== undefined) mirrored.framing = patch.framing;
+  if (patch.useNvenc !== undefined) mirrored.useNvenc = patch.useNvenc;
+  if (patch.exportSrt !== undefined) mirrored.exportSrt = patch.exportSrt;
+  if (patch.filenameTemplate !== undefined) mirrored.filenameTemplate = patch.filenameTemplate;
+  if (Object.keys(mirrored).length === 0) return;
+  useSettingsStore.getState().updateEditor(mirrored);
 }
 
 function finiteNumber(value: unknown, fallback: number): number {
@@ -365,14 +382,16 @@ export const useProjectStore = create<ProjectState>()(
           return { project: touch(state.project, { sessionGuide }), dirty: true };
         }),
 
-      updateExportSettings: (patch) =>
+      updateExportSettings: (patch) => {
+        mirrorExportDefaults(patch);
         set((state) => {
           if (!state.project) return {};
           return {
             project: touch(state.project, { export: { ...state.project.export, ...patch } }),
             dirty: true,
           };
-        }),
+        });
+      },
 
       applyExportDefaults: (patch) =>
         set((state) => {

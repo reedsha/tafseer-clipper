@@ -153,6 +153,8 @@ export interface SettingsState extends SettingsData {
   renamePreset: (id: string, name: string) => void;
   deletePreset: (id: string) => void;
   applyPreset: (id: string) => void;
+  /** Overwrite a preset with the current Arabic/Thai typography. */
+  updatePreset: (id: string) => void;
 
   addPromptPreset: (preset: Omit<PromptPreset, "id">) => string;
   updatePromptPreset: (id: string, patch: Partial<Omit<PromptPreset, "id">>) => void;
@@ -652,6 +654,18 @@ export const useSettingsStore = create<SettingsState>()(
           return {
             arabic: { ...found.arabic },
             thai: { ...found.thai },
+            activePresetId: id,
+          };
+        }),
+      updatePreset: (id) =>
+        set((state) => {
+          if (!state.presets.some((item) => item.id === id)) return {};
+          return {
+            presets: state.presets.map((item) =>
+              item.id === id
+                ? { ...item, arabic: { ...state.arabic }, thai: { ...state.thai } }
+                : item,
+            ),
             activePresetId: id,
           };
         }),

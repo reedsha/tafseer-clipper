@@ -87,3 +87,74 @@ test.describe("settings persistence edges", () => {
     await expect(page.getByText("Preset renamed")).toBeVisible();
   });
 });
+
+test.describe("settings affordances", () => {
+  test("filename templates flag placeholders the sidecar will not resolve", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Open settings" }).click();
+    await page.getByRole("tab", { name: "Editor & Export" }).click();
+
+    const template = page.getByLabel("Filename template");
+    await template.fill("{LectureName}_{LecureName}_{01}");
+
+    const warning = page.getByText(/Unknown placeholder/);
+    await expect(warning).toBeVisible();
+    await expect(warning).toContainText("{LecureName}");
+
+    // A fully supported template clears the warning.
+    await template.fill("{LectureName}_{Clip}_{01}");
+    await expect(page.getByText(/Unknown placeholder/)).toHaveCount(0);
+  });
+
+  test("provider sections say whether the current routing uses them", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Open settings" }).click();
+    await page.getByRole("tab", { name: "AI Providers" }).click();
+
+    const section = (heading: string) =>
+      page.locator("section", { has: page.getByRole("heading", { name: heading }) });
+    const cloud = section("Unified cloud API");
+    const ollama = section("Local Ollama");
+    const cloudStt = section("Cloud STT API");
+
+    // Defaults: cloud analysis + local transcription.
+    await expect(cloud.getByText("In use", { exact: true })).toBeVisible();
+    await expect(ollama.getByText("Not used", { exact: true })).toBeVisible();
+    await expect(cloudStt.getByText("Not used", { exact: true })).toBeVisible();
+
+    await page.getByRole("combobox", { name: "Topic analysis engine" }).click();
+    await page.getByRole("option", { name: "Local Ollama" }).click();
+
+    await expect(cloud.getByText("Not used", { exact: true })).toBeVisible();
+    await expect(ollama.getByText("In use", { exact: true })).toBeVisible();
+    // Routing to Ollama without a model id must warn before Step 2 fails.
+    await expect(ollama.getByText(/Clip discovery will fail/)).toBeVisible();
+  });
+
+  test("editing the live style marks the active preset modified and updates it", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Open settings" }).click();
+    await page.getByRole("tab", { name: "Fonts & Style" }).click();
+
+    const slider = page.getByRole("slider", { name: "Arabic font size" });
+    await expect(page.getByText("Modified", { exact: true })).toHaveCount(0);
+
+    await slider.focus();
+    await slider.press("ArrowRight");
+    await expect(page.getByText("Modified", { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: /Update Studio default/ }).click();
+    await expect(page.getByText("Preset updated")).toBeVisible();
+    await expect(page.getByText("Modified", { exact: true })).toHaveCount(0);
+
+    const persisted = await page.evaluate(() =>
+      JSON.parse(window.localStorage.getItem("tafseer.settings.v1") ?? "null"),
+    );
+    const studio = persisted.state.presets.find(
+      (item: { id: string }) => item.id === "studio-default",
+    );
+    expect(studio.arabic.fontSize).toBe(persisted.state.arabic.fontSize);
+  });
+});

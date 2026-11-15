@@ -386,3 +386,19 @@ export function isGpuEncodingAvailable(summary: AccelerationSummary): boolean {
 export function canEnableGpu(summary: AccelerationSummary): boolean {
   return summary.state === "gpu-detected-needs-runtime";
 }
+
+/**
+ * Human copy for the sidecar's machine-readable `reason` code. Diagnostics keep
+ * the raw code; the Settings panel shows this sentence instead of leaking
+ * `cuda-runtime-missing` into the UI.
+ */
+const ACCELERATION_REASON_COPY: Record<string, string> = {
+  "no-nvidia-gpu": "No supported GPU was detected on this machine.",
+  "cuda-runtime-missing": "A GPU was detected, but the acceleration runtime is not installed.",
+  "cuda-runtime-unusable": "The acceleration runtime is installed but could not be loaded.",
+};
+
+export function humanizeAccelerationReason(reason: string | null): string | null {
+  if (!reason) return null;
+  return ACCELERATION_REASON_COPY[reason] ?? reason;
+}

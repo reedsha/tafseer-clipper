@@ -7,6 +7,9 @@ import {
   Bot,
   Copy,
   Download,
+  Eye,
+  EyeOff,
+  FolderOpen,
   HardDrive,
   Languages,
   Loader2,
@@ -14,6 +17,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Save,
   SlidersHorizontal,
   Trash2,
   Type,
@@ -52,10 +56,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { importFonts, SIDECAR_URL, verifyArabic } from "@/lib/api";
 import { describeAcceleration, isGpuEncodingAvailable } from "@/lib/acceleration";
 import { buildDiagnostics, copyText } from "@/lib/diagnostics";
-import { sanitizeFileNameTemplate } from "@/lib/filenameTemplate";
+import {
+  sanitizeFileNameTemplate,
+  TEMPLATE_TOKEN_HINTS,
+  unknownTemplateTokens,
+} from "@/lib/filenameTemplate";
 import { formatBytes } from "@/lib/format";
 import { loadImportedFonts } from "@/lib/fonts";
-import { isTauriRuntime } from "@/lib/media";
+import { isTauriRuntime, openDirectory } from "@/lib/media";
 import { buildProviderFor, describeProviderGap } from "@/lib/providers";
 import { NUMERIC_LIMITS } from "@/lib/settingsLimits";
 import {
@@ -68,7 +76,13 @@ import {
   type UpdaterStatus,
 } from "@/lib/updater";
 import { useProjectStore } from "@/store/projectStore";
-import { useSettingsStore, type EngineMode } from "@/store/settingsStore";
+import {
+  useSettingsStore,
+  type ArabicStyle,
+  type EngineMode,
+  type StylePreset,
+  type ThaiStyle,
+} from "@/store/settingsStore";
 import type { SettingsTab } from "@/store/uiStore";
 import { useUiStore } from "@/store/uiStore";
 
@@ -79,19 +93,25 @@ import { useUiStore } from "@/store/uiStore";
 function Section({
   title,
   description,
+  badge,
   children,
 }: {
   title: string;
   description?: string;
+  /** State marker rendered beside the heading ("In use" / "Not used"). */
+  badge?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <section className="space-y-3">
-      <div className="space-y-1">
-        <h3 className="text-[13px] font-medium text-foreground">{title}</h3>
-        {description ? (
-          <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
-        ) : null}
+      <div className="flex items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h3 className="text-[13px] font-medium text-foreground">{title}</h3>
+          {description ? (
+            <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+          ) : null}
+        </div>
+        {badge ? <div className="shrink-0 pt-0.5">{badge}</div> : null}
       </div>
       <div className="space-y-3">{children}</div>
     </section>
@@ -139,7 +159,51 @@ function SwitchRow({
           <p className="text-[11px] leading-relaxed text-muted-foreground">{description}</p>
         ) : null}
       </div>
-      <Switch checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} />
+      <Switch
+        checked={checked}
+        onCheckedChange={onCheckedChange}
+        disabled={disabled}
+        aria-label={label}
+      />
+    </div>
+  );
+}
+
+/** Password-style field with an explicit reveal toggle. */
+function SecretInput({
+  value,
+  onChange,
+  label,
+  placeholder,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  label: string;
+  placeholder?: string;
+}) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="relative">
+      <Input
+        type={visible ? "text" : "password"}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        aria-label={label}
+        autoComplete="off"
+        spellCheck={false}
+        className="pr-9"
+      />
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-xs"
+        className="absolute right-1 top-1/2 -translate-y-1/2"
+        aria-label={visible ? `Hide ${label}` : `Show ${label}`}
+        onClick={() => setVisible((current) => !current)}
+      >
+        {visible ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+      </Button>
     </div>
   );
 }
@@ -179,6 +243,19 @@ function NumberField({
         />
       </span>
     </div>
+  );
+}
+
+/** Marks a provider block the current engine routing does (not) call. */
+function UsageBadge({ active }: { active: boolean }) {
+  return active ? (
+    <Badge variant="secondary" className="text-[10px]">
+      In use
+    </Badge>
+  ) : (
+    <Badge variant="outline" className="text-[10px] text-muted-foreground">
+      Not used
+    </Badge>
   );
 }
 
@@ -229,6 +306,35 @@ const SHORTCUTS = [
   { keys: "Ctrl Enter", action: "Split subtitle at cursor" },
   { keys: "Ctrl K", action: "Command palette" },
 ];
+
+/** Named sidecar models, plus a Custom escape hatch for anything else. */
+const WHISPER_MODELS = [
+  { value: "large-v3-turbo", label: "large-v3-turbo · recommended" },
+  { value: "large-v3", label: "large-v3 · most accurate" },
+  { value: "medium", label: "medium" },
+  { value: "small", label: "small" },
+  { value: "base", label: "base" },
+  { value: "tiny", label: "tiny · fastest" },
+];
+
+/** True when every Arabic/Thai field still equals the saved preset. */
+function presetMatchesStyle(
+  preset: StylePreset,
+  arabic: ArabicStyle,
+  thai: ThaiStyle,
+): boolean {
+  return (
+    (Object.keys(arabic) as (keyof ArabicStyle)[]).every(
+      (key) => preset.arabic[key] === arabic[key],
+    ) &&
+    (Object.keys(thai) as (keyof ThaiStyle)[]).every((key) => preset.thai[key] === thai[key])
+  );
+}
+
+/** Date-stamped backup name so two exports never overwrite each other. */
+function settingsBackupFileName(now = new Date()): string {
+  return `tafseer-settings-${now.toISOString().slice(0, 10)}.json`;
+}
 
 function withCurrentColor(
   options: { value: string; label: string }[],
@@ -393,6 +499,7 @@ export function SettingsDrawer() {
     renamePreset,
     deletePreset,
     applyPreset,
+    updatePreset,
     addGlossaryEntry,
     updateGlossaryEntry,
     removeGlossaryEntry,
@@ -425,6 +532,7 @@ export function SettingsDrawer() {
   const [renameValue, setRenameValue] = useState("");
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [customWhisperModel, setCustomWhisperModel] = useState(false);
 
   const fontFamilies = useMemo(() => {
     const families = new Set(SYSTEM_FONTS);
@@ -446,6 +554,21 @@ export function SettingsDrawer() {
     ? presets.find((item) => item.id === renamingId) ?? null
     : null;
   const renameUnchanged = !renameValue.trim() || renameValue.trim() === renamingPreset?.name;
+
+  /** First missing provider field for the Step 3 fast-model probe, if any. */
+  const providerGap = describeProviderGap({ analysisMode, ollama, cloud }, "fast");
+  const activePreset = activePresetId
+    ? presets.find((item) => item.id === activePresetId) ?? null
+    : null;
+  /** The live style drifted from the preset it claims to be. */
+  const activePresetModified = activePreset
+    ? !presetMatchesStyle(activePreset, arabic, thai)
+    : false;
+  const whisperModelIsPreset = WHISPER_MODELS.some((item) => item.value === whisper.model);
+  const showCustomWhisperModel = customWhisperModel || !whisperModelIsPreset;
+  const templateTokens = unknownTemplateTokens(editor.filenameTemplate);
+  const cloudSttIncomplete = !cloudStt.baseUrl.trim() || !cloudStt.apiKey.trim();
+  const ollamaIncomplete = !ollama.model.trim();
 
   const health = sidecar.health;
   /** Vendor-neutral acceleration state derived from GET /health. */
@@ -528,7 +651,16 @@ export function SettingsDrawer() {
       const result = importSettings(await file.text());
       if (result.ok) {
         syncOpenProjectExportDefaults();
-        toast.success("Settings imported");
+        // A backup carries font names, not font files; re-register the ones that
+        // are actually present so the Step 3 preview can resolve them again.
+        const { importedFonts: restoredFonts } = useSettingsStore.getState();
+        if (restoredFonts.length > 0) void loadImportedFonts(restoredFonts);
+        toast.success("Settings imported", {
+          description:
+            restoredFonts.length > 0
+              ? "Font names were restored — re-import any .ttf/.otf files that are missing."
+              : undefined,
+        });
       } else {
         toast.error("Import failed", { description: result.error });
       }
@@ -542,9 +674,9 @@ export function SettingsDrawer() {
   }
 
   function handleExportSettings() {
-    downloadJson(exportSettings(), "tafseer-settings.json");
+    downloadJson(exportSettings(), settingsBackupFileName());
     toast.success("Settings exported", {
-      description: "API keys, fonts, glossary and presets included.",
+      description: "Includes API keys in plain text — keep the file private.",
     });
   }
 
@@ -713,7 +845,7 @@ export function SettingsDrawer() {
                       value={transcriptionMode}
                       onValueChange={(value) => setTranscriptionMode(value as EngineMode)}
                     >
-                      <SelectTrigger className="w-full">
+                      <SelectTrigger className="w-full" aria-label="Transcription engine">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -727,7 +859,7 @@ export function SettingsDrawer() {
                       value={analysisMode}
                       onValueChange={(value) => setAnalysisMode(value as EngineMode)}
                     >
-                      <SelectTrigger className="w-full">
+                      <SelectTrigger className="w-full" aria-label="Topic analysis engine">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -743,24 +875,24 @@ export function SettingsDrawer() {
                 <Section
                   title="Unified cloud API"
                   description="OpenAI-compatible endpoint used for Step 2 clip reasoning and Step 3 Arabic verification."
+                  badge={<UsageBadge active={analysisMode === "cloud"} />}
                 >
                   <Field label="Base URL">
                     <Input
                       value={cloud.baseUrl}
                       onChange={(event) => updateCloud({ baseUrl: event.target.value })}
                       placeholder="https://api.openai.com/v1"
+                      aria-label="Cloud API base URL"
                       spellCheck={false}
                       autoComplete="off"
                     />
                   </Field>
                   <Field label="API key">
-                    <Input
-                      type="password"
+                    <SecretInput
+                      label="Cloud API key"
                       value={cloud.apiKey}
-                      onChange={(event) => updateCloud({ apiKey: event.target.value })}
+                      onChange={(value) => updateCloud({ apiKey: value })}
                       placeholder="sk-…"
-                      autoComplete="off"
-                      spellCheck={false}
                     />
                   </Field>
                   <div className="grid gap-3 sm:grid-cols-2">
@@ -771,6 +903,7 @@ export function SettingsDrawer() {
                           updateCloud({ reasoningModel: event.target.value })
                         }
                         placeholder="gpt-4.1 / qwen3:14b"
+                        aria-label="Reasoning model"
                         spellCheck={false}
                       />
                     </Field>
@@ -779,10 +912,16 @@ export function SettingsDrawer() {
                         value={cloud.fastTextModel}
                         onChange={(event) => updateCloud({ fastTextModel: event.target.value })}
                         placeholder="gpt-4.1-mini / qwen3:4b"
+                        aria-label="Fast text model"
                         spellCheck={false}
                       />
                     </Field>
                   </div>
+                  {analysisMode === "cloud" && providerGap ? (
+                    <p className="text-[11px] leading-relaxed text-status-warning">
+                      Step 3 cannot run yet: add {providerGap}.
+                    </p>
+                  ) : null}
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
                       variant="outline"
@@ -799,8 +938,11 @@ export function SettingsDrawer() {
                       Test connection
                     </Button>
                     <span className="text-[11px] text-muted-foreground">
-                      Pings the sidecar, then sends one small /verify-arabic probe with the
-                      configured provider.
+                      Pings the sidecar, then asks{" "}
+                      {analysisMode === "local"
+                        ? "your Ollama model"
+                        : "the unified cloud API"}{" "}
+                      to verify one Arabic verse.
                     </span>
                   </div>
                 </Section>
@@ -810,12 +952,14 @@ export function SettingsDrawer() {
                 <Section
                   title="Local Ollama"
                   description="OpenAI-compatible local runtime for offline clip discovery."
+                  badge={<UsageBadge active={analysisMode === "local"} />}
                 >
                   <Field label="Ollama URL">
                     <Input
                       value={ollama.baseUrl}
                       onChange={(event) => updateOllama({ baseUrl: event.target.value })}
                       placeholder="http://localhost:11434/v1"
+                      aria-label="Ollama URL"
                       spellCheck={false}
                     />
                   </Field>
@@ -824,9 +968,15 @@ export function SettingsDrawer() {
                       value={ollama.model}
                       onChange={(event) => updateOllama({ model: event.target.value })}
                       placeholder="qwen3:14b"
+                      aria-label="Ollama model id"
                       spellCheck={false}
                     />
                   </Field>
+                  {analysisMode === "local" && ollamaIncomplete ? (
+                    <p className="text-[11px] leading-relaxed text-status-warning">
+                      Clip discovery will fail until you enter a model id.
+                    </p>
+                  ) : null}
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-[11px] leading-relaxed text-muted-foreground">
                       Model detection is not part of the six-endpoint sidecar contract — enter the
@@ -840,23 +990,24 @@ export function SettingsDrawer() {
                 <Section
                   title="Cloud STT API"
                   description="Optional external speech-to-text endpoint used when the transcription engine is set to Cloud."
+                  badge={<UsageBadge active={transcriptionMode === "cloud"} />}
                 >
                   <Field label="Base URL">
                     <Input
                       value={cloudStt.baseUrl}
                       onChange={(event) => updateCloudStt({ baseUrl: event.target.value })}
                       placeholder="https://api.openai.com/v1"
+                      aria-label="Cloud STT base URL"
                       spellCheck={false}
                     />
                   </Field>
                   <div className="grid gap-3 sm:grid-cols-2">
                     <Field label="API key">
-                      <Input
-                        type="password"
+                      <SecretInput
+                        label="Cloud STT API key"
                         value={cloudStt.apiKey}
-                        onChange={(event) => updateCloudStt({ apiKey: event.target.value })}
+                        onChange={(value) => updateCloudStt({ apiKey: value })}
                         placeholder="sk-…"
-                        autoComplete="off"
                       />
                     </Field>
                     <Field label="Model">
@@ -864,10 +1015,16 @@ export function SettingsDrawer() {
                         value={cloudStt.model}
                         onChange={(event) => updateCloudStt({ model: event.target.value })}
                         placeholder="whisper-1"
+                        aria-label="Cloud STT model"
                         spellCheck={false}
                       />
                     </Field>
                   </div>
+                  {transcriptionMode === "cloud" && cloudSttIncomplete ? (
+                    <p className="text-[11px] leading-relaxed text-status-warning">
+                      Cloud transcription needs a base URL and an API key.
+                    </p>
+                  ) : null}
                 </Section>
               </div>
             </TabsContent>
@@ -946,7 +1103,7 @@ export function SettingsDrawer() {
                         value={arabic.fontFamily}
                         onValueChange={(value) => updateArabic({ fontFamily: value })}
                       >
-                        <SelectTrigger className="w-full">
+                        <SelectTrigger className="w-full" aria-label="Arabic font family">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -967,16 +1124,7 @@ export function SettingsDrawer() {
                       />
                     </Field>
                   </div>
-                  <Field
-                    label="Font size"
-                    hint={
-                      <NumberFlow
-                        value={arabic.fontSize}
-                        suffix=" px"
-                        format={{ maximumFractionDigits: 0 }}
-                      />
-                    }
-                  >
+                  <Field label="Font size">
                     <NumberField
                       ariaLabel="Arabic font size"
                       value={arabic.fontSize}
@@ -987,15 +1135,7 @@ export function SettingsDrawer() {
                       step={NUMERIC_LIMITS.arabicFontSize.step}
                     />
                   </Field>
-                  <Field
-                    label="Harakat line-height padding"
-                    hint={
-                      <NumberFlow
-                        value={arabic.lineHeightPad}
-                        format={{ minimumFractionDigits: 1, maximumFractionDigits: 2 }}
-                      />
-                    }
-                  >
+                  <Field label="Harakat line-height padding">
                     <NumberField
                       ariaLabel="Arabic harakat padding"
                       value={arabic.lineHeightPad}
@@ -1006,16 +1146,7 @@ export function SettingsDrawer() {
                       step={NUMERIC_LIMITS.arabicLineHeightPad.step}
                     />
                   </Field>
-                  <Field
-                    label="Outline width"
-                    hint={
-                      <NumberFlow
-                        value={arabic.outlineWidth}
-                        suffix=" px"
-                        format={{ maximumFractionDigits: 1 }}
-                      />
-                    }
-                  >
+                  <Field label="Outline width">
                     <NumberField
                       ariaLabel="Arabic outline width"
                       value={arabic.outlineWidth}
@@ -1026,16 +1157,7 @@ export function SettingsDrawer() {
                       step={NUMERIC_LIMITS.arabicOutlineWidth.step}
                     />
                   </Field>
-                  <Field
-                    label="Box opacity"
-                    hint={
-                      <NumberFlow
-                        value={Math.round(arabic.boxOpacity * 100)}
-                        suffix="%"
-                        format={{ maximumFractionDigits: 0 }}
-                      />
-                    }
-                  >
+                  <Field label="Box opacity">
                     <NumberField
                       ariaLabel="Arabic box opacity"
                       value={Math.round(arabic.boxOpacity * 100)}
@@ -1065,7 +1187,7 @@ export function SettingsDrawer() {
                         value={thai.fontFamily}
                         onValueChange={(value) => updateThai({ fontFamily: value })}
                       >
-                        <SelectTrigger className="w-full">
+                        <SelectTrigger className="w-full" aria-label="Thai font family">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -1086,16 +1208,7 @@ export function SettingsDrawer() {
                       />
                     </Field>
                   </div>
-                  <Field
-                    label="Font size"
-                    hint={
-                      <NumberFlow
-                        value={thai.fontSize}
-                        suffix=" px"
-                        format={{ maximumFractionDigits: 0 }}
-                      />
-                    }
-                  >
+                  <Field label="Font size">
                     <NumberField
                       ariaLabel="Thai font size"
                       value={thai.fontSize}
@@ -1106,16 +1219,7 @@ export function SettingsDrawer() {
                       step={NUMERIC_LIMITS.thaiFontSize.step}
                     />
                   </Field>
-                  <Field
-                    label="Outline width"
-                    hint={
-                      <NumberFlow
-                        value={thai.outlineWidth}
-                        suffix=" px"
-                        format={{ maximumFractionDigits: 1 }}
-                      />
-                    }
-                  >
+                  <Field label="Outline width">
                     <NumberField
                       ariaLabel="Thai outline width"
                       value={thai.outlineWidth}
@@ -1126,16 +1230,7 @@ export function SettingsDrawer() {
                       step={NUMERIC_LIMITS.thaiOutlineWidth.step}
                     />
                   </Field>
-                  <Field
-                    label="Box opacity"
-                    hint={
-                      <NumberFlow
-                        value={Math.round(thai.boxOpacity * 100)}
-                        suffix="%"
-                        format={{ maximumFractionDigits: 0 }}
-                      />
-                    }
-                  >
+                  <Field label="Box opacity">
                     <NumberField
                       ariaLabel="Thai box opacity"
                       value={Math.round(thai.boxOpacity * 100)}
@@ -1160,52 +1255,74 @@ export function SettingsDrawer() {
                   description="One-click visual themes applied to the dual-line preview and the FFmpeg .ass burn-in."
                 >
                   <div className="space-y-1.5">
-                    {presets.map((preset) => (
-                      <div
-                        key={preset.id}
-                        className={cn(
-                          "flex items-center gap-1.5 rounded-md border px-2.5 py-2",
-                          preset.id === activePresetId
-                            ? "border-ring/40 bg-accent/40"
-                            : "border-border bg-card/40",
-                        )}
-                      >
-                        <Button
-                          variant="ghost"
-                          className="h-auto min-w-0 flex-1 flex-col items-start justify-start gap-0 px-0 py-0 text-left font-normal hover:bg-transparent"
-                          onClick={() => {
-                            applyPreset(preset.id);
-                            toast.success("Preset applied", { description: preset.name });
-                          }}
+                    {presets.map((preset) => {
+                      const isActive = preset.id === activePresetId;
+                      const drifted = isActive && activePresetModified;
+                      return (
+                        <div
+                          key={preset.id}
+                          className={cn(
+                            "flex items-center gap-1.5 rounded-md border px-2.5 py-2",
+                            isActive
+                              ? "border-ring/40 bg-accent/40"
+                              : "border-border bg-card/40",
+                          )}
                         >
-                          <span className="block truncate text-xs font-medium text-foreground">
-                            {preset.name}
-                          </span>
-                          <span className="text-[11px] text-muted-foreground">
-                            Arabic {preset.arabic.fontSize}px · Thai {preset.thai.fontSize}px
-                          </span>
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          aria-label={`Rename ${preset.name}`}
-                          onClick={() => {
-                            setRenamingId(preset.id);
-                            setRenameValue(preset.name);
-                          }}
-                        >
-                          <Pencil className="size-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          aria-label={`Delete ${preset.name}`}
-                          onClick={() => setDeletingId(preset.id)}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </Button>
-                      </div>
-                    ))}
+                          <Button
+                            variant="ghost"
+                            className="h-auto min-w-0 flex-1 flex-col items-start justify-start gap-0 px-0 py-0 text-left font-normal hover:bg-transparent"
+                            onClick={() => applyPreset(preset.id)}
+                          >
+                            <span className="flex items-center gap-1.5">
+                              <span className="truncate text-xs font-medium text-foreground">
+                                {preset.name}
+                              </span>
+                              {drifted ? (
+                                <Badge variant="outline" className="text-[9px] text-status-warning">
+                                  Modified
+                                </Badge>
+                              ) : null}
+                            </span>
+                            <span className="text-[11px] text-muted-foreground">
+                              Arabic {preset.arabic.fontSize}px · Thai {preset.thai.fontSize}px
+                            </span>
+                          </Button>
+                          {drifted ? (
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              aria-label={`Update ${preset.name} with the current style`}
+                              title="Update this preset with the current style"
+                              onClick={() => {
+                                updatePreset(preset.id);
+                                toast.success("Preset updated", { description: preset.name });
+                              }}
+                            >
+                              <Save className="size-3.5" />
+                            </Button>
+                          ) : null}
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            aria-label={`Rename ${preset.name}`}
+                            onClick={() => {
+                              setRenamingId(preset.id);
+                              setRenameValue(preset.name);
+                            }}
+                          >
+                            <Pencil className="size-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            aria-label={`Delete ${preset.name}`}
+                            onClick={() => setDeletingId(preset.id)}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </div>
+                      );
+                    })}
                   </div>
                   <Button
                     variant="outline"
@@ -1306,17 +1423,9 @@ export function SettingsDrawer() {
                     onChange={(event) => updateWhisper({ initialPrompt: event.target.value })}
                     rows={7}
                     spellCheck={false}
+                    aria-label="Whisper Arabic hint"
                     className="font-mono text-xs leading-relaxed"
                   />
-                </Section>
-
-                <Separator />
-
-                <Section
-                  title="GPU acceleration"
-                  description="Optional. The app detects a supported GPU, then downloads a signed acceleration pack — no driver setup. Without it everything runs on the CPU, which is slower but always available."
-                >
-                  <GpuAccelerationPanel summary={acceleration} />
                 </Section>
 
                 <Separator />
@@ -1327,12 +1436,29 @@ export function SettingsDrawer() {
                 >
                   <div className="grid gap-3 sm:grid-cols-2">
                     <Field label="Whisper model">
-                      <Input
-                        value={whisper.model}
-                        onChange={(event) => updateWhisper({ model: event.target.value })}
-                        placeholder="large-v3-turbo"
-                        spellCheck={false}
-                      />
+                      <Select
+                        value={showCustomWhisperModel ? "custom" : whisper.model}
+                        onValueChange={(value) => {
+                          if (value === "custom") {
+                            setCustomWhisperModel(true);
+                            return;
+                          }
+                          setCustomWhisperModel(false);
+                          updateWhisper({ model: value });
+                        }}
+                      >
+                        <SelectTrigger className="w-full" aria-label="Whisper model">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {WHISPER_MODELS.map((item) => (
+                            <SelectItem key={item.value} value={item.value}>
+                              {item.label}
+                            </SelectItem>
+                          ))}
+                          <SelectItem value="custom">Custom…</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </Field>
                     <Field label="Compute precision">
                       <Select
@@ -1343,23 +1469,43 @@ export function SettingsDrawer() {
                           })
                         }
                       >
-                        <SelectTrigger className="w-full">
+                        <SelectTrigger className="w-full" aria-label="Compute precision">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="int8">Automatic (recommended)</SelectItem>
-                          <SelectItem value="float16">High precision (GPU)</SelectItem>
-                          <SelectItem value="float32">Compatibility</SelectItem>
+                          <SelectItem value="int8">int8 · automatic default</SelectItem>
+                          <SelectItem value="float16">float16 · GPU only</SelectItem>
+                          <SelectItem value="float32">float32 · CPU compatibility</SelectItem>
                         </SelectContent>
                       </Select>
                     </Field>
                   </div>
+                  {showCustomWhisperModel ? (
+                    <Field label="Custom model id" hint="Anything faster-whisper can load">
+                      <Input
+                        value={whisper.model}
+                        onChange={(event) => updateWhisper({ model: event.target.value })}
+                        placeholder="large-v3-turbo"
+                        aria-label="Custom Whisper model id"
+                        spellCheck={false}
+                      />
+                    </Field>
+                  ) : null}
                   <SwitchRow
                     label="Unload Whisper from GPU memory after Step 1"
                     description="Frees GPU memory before encoding starts. No effect when transcription runs on the CPU."
                     checked={whisper.autoUnload}
                     onCheckedChange={(checked) => updateWhisper({ autoUnload: checked })}
                   />
+                </Section>
+
+                <Separator />
+
+                <Section
+                  title="GPU acceleration"
+                  description="Optional. The app detects a supported GPU, then downloads a signed acceleration pack — no driver setup. Without it everything runs on the CPU, which is slower but always available. GPU capability also decides whether hardware encoding can be enabled under Editor & Export."
+                >
+                  <GpuAccelerationPanel summary={acceleration} />
                 </Section>
               </div>
             </TabsContent>
@@ -1388,16 +1534,7 @@ export function SettingsDrawer() {
                   title="Subtitle line wrapping"
                   description="Thai has no inter-word spaces, so cues are broken with dictionary-aware word segmentation before the .ass is written (WrapStyle 2 honours only explicit breaks)."
                 >
-                  <Field
-                    label="Max characters per line"
-                    hint={
-                      <NumberFlow
-                        value={editor.maxCharsPerLine}
-                        suffix=" chars"
-                        format={{ maximumFractionDigits: 0 }}
-                      />
-                    }
-                  >
+                  <Field label="Max characters per line">
                     <NumberField
                       ariaLabel="Max characters per line"
                       value={editor.maxCharsPerLine}
@@ -1426,6 +1563,7 @@ export function SettingsDrawer() {
                         updateEditor({ filenameTemplate: event.target.value });
                         applyExportDefaults({ filenameTemplate: event.target.value });
                       }}
+                      aria-label="Filename template"
                       spellCheck={false}
                       className="font-mono text-xs"
                     />
@@ -1433,11 +1571,64 @@ export function SettingsDrawer() {
                   <p className="break-all rounded-md border border-border bg-card/40 px-2.5 py-1.5 font-mono text-[11px] text-muted-foreground">
                     {sanitizeFileNameTemplate(editor.filenameTemplate)}
                   </p>
+                  {templateTokens.length > 0 ? (
+                    <p className="text-[11px] leading-relaxed text-status-warning">
+                      Unknown placeholder
+                      {templateTokens.length === 1 ? "" : "s"}{" "}
+                      <span className="font-mono">{templateTokens.join(", ")}</span> —{" "}
+                      {templateTokens.length === 1 ? "it is" : "they are"} written into the file name
+                      as typed. Supported:{" "}
+                      <span className="font-mono">
+                        {TEMPLATE_TOKEN_HINTS.map((hint) => hint.token).join(" ")}
+                      </span>
+                      .
+                    </p>
+                  ) : null}
+                  <div className="flex flex-wrap gap-1">
+                    {TEMPLATE_TOKEN_HINTS.map((hint) => (
+                      <button
+                        key={hint.token}
+                        type="button"
+                        title={hint.description}
+                        onClick={() => {
+                          const next = `${editor.filenameTemplate}${hint.token}`;
+                          updateEditor({ filenameTemplate: next });
+                          applyExportDefaults({ filenameTemplate: next });
+                        }}
+                        className="rounded border border-border bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-foreground/80 transition-colors hover:border-ring/50 hover:text-foreground"
+                      >
+                        {hint.token}
+                      </button>
+                    ))}
+                  </div>
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
                     {project
                       ? "Saved as the default and applied to the open project now."
                       : "Saved as the default for new projects."}
                   </p>
+                </Section>
+
+                <Separator />
+
+                <Section
+                  title="Subtitles"
+                  description="Language of the Thai explanation line. The Arabic verse line is always kept."
+                >
+                  <Field label="Subtitle language">
+                    <Select
+                      value={editor.language}
+                      onValueChange={(value) => updateEditor({ language: value })}
+                    >
+                      <SelectTrigger className="w-full" aria-label="Subtitle language">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="th">Thai (with Arabic)</SelectItem>
+                        <SelectItem value="en">English</SelectItem>
+                        <SelectItem value="auto">Auto-detect</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
                 </Section>
 
                 <Separator />
@@ -1453,7 +1644,7 @@ export function SettingsDrawer() {
                           applyExportDefaults({ resolution });
                         }}
                       >
-                        <SelectTrigger className="w-full">
+                        <SelectTrigger className="w-full" aria-label="Target resolution">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -1471,7 +1662,7 @@ export function SettingsDrawer() {
                           applyExportDefaults({ framing });
                         }}
                       >
-                        <SelectTrigger className="w-full">
+                        <SelectTrigger className="w-full" aria-label="9:16 framing">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -1481,29 +1672,16 @@ export function SettingsDrawer() {
                       </Select>
                     </Field>
                   </div>
-                  <Field label="Subtitle language">
-                    <Select
-                      value={editor.language}
-                      onValueChange={(value) => updateEditor({ language: value })}
-                    >
-                      <SelectTrigger className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="th">Thai (with Arabic)</SelectItem>
-                        <SelectItem value="en">English</SelectItem>
-                        <SelectItem value="auto">Auto-detect</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </Field>
                   <SwitchRow
                     label="Hardware encoding (GPU)"
                     description={
                       isGpuEncodingAvailable(acceleration)
                         ? "GPU ready — falls back to CPU encoding automatically if the driver refuses."
-                        : "CPU fallback (slower). Enable GPU acceleration in the Glossary & Whisper tab."
+                        : "CPU encoding is in use. Enable GPU acceleration in the Glossary & Whisper tab to turn this on."
                     }
-                    checked={editor.useNvenc}
+                    // Never claim GPU encoding is on while the hardware path is
+                    // unavailable; the stored preference is kept for when it is.
+                    checked={isGpuEncodingAvailable(acceleration) && editor.useNvenc}
                     disabled={!isGpuEncodingAvailable(acceleration)}
                     onCheckedChange={(checked) => {
                       updateEditor({ useNvenc: checked });
@@ -1563,7 +1741,7 @@ export function SettingsDrawer() {
                           updateStorage({ autosaveIntervalMs: Number(value) })
                         }
                       >
-                        <SelectTrigger className="w-full">
+                        <SelectTrigger className="w-full" aria-label="Auto-save interval">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -1579,14 +1757,36 @@ export function SettingsDrawer() {
                       </Select>
                     </Field>
                     <Field label="Project folder" hint="Used by native save dialogs">
-                      <Input
-                        value={storage.projectFolder}
-                        onChange={(event) =>
-                          updateStorage({ projectFolder: event.target.value })
-                        }
-                        placeholder="Documents\\Tafseer Clipper"
-                        spellCheck={false}
-                      />
+                      <div className="flex gap-2">
+                        <Input
+                          value={storage.projectFolder}
+                          onChange={(event) =>
+                            updateStorage({ projectFolder: event.target.value })
+                          }
+                          placeholder="Documents\\Tafseer Clipper"
+                          aria-label="Project folder"
+                          spellCheck={false}
+                        />
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="shrink-0 gap-1.5"
+                          disabled={!desktopRuntime}
+                          title={
+                            desktopRuntime
+                              ? undefined
+                              : "Available in the installed desktop app"
+                          }
+                          onClick={() => {
+                            void openDirectory().then((folder) => {
+                              if (folder) updateStorage({ projectFolder: folder });
+                            });
+                          }}
+                        >
+                          <FolderOpen className="size-3.5" />
+                          Browse…
+                        </Button>
+                      </div>
                     </Field>
                   </div>
 
@@ -1640,6 +1840,10 @@ export function SettingsDrawer() {
                       </Button>
                     </div>
                     <dl className="divide-y divide-border text-[11px]">
+                      <HealthRow
+                        label="Sidecar version"
+                        value={health ? `v${health.version}` : "—"}
+                      />
                       <HealthRow
                         label="Acceleration"
                         value={health ? <GpuStatusLine summary={acceleration} /> : "—"}
@@ -1738,7 +1942,7 @@ export function SettingsDrawer() {
 
                 <Section
                   title="Portable settings backup"
-                  description="Export or import API keys, custom fonts, glossaries, prompts and style presets."
+                  description="Export or import API keys, glossaries, prompts and style presets. Font files themselves are not included — only the list of imported faces."
                 >
                   <div className="flex flex-wrap gap-2">
                     <input
@@ -1746,6 +1950,7 @@ export function SettingsDrawer() {
                       type="file"
                       accept=".json,application/json"
                       className="hidden"
+                      aria-label="Import settings file"
                       onChange={(event) => void handleSettingsImport(event.target.files)}
                     />
                     <Button
@@ -1776,6 +1981,10 @@ export function SettingsDrawer() {
                       Reset defaults
                     </Button>
                   </div>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    The exported file contains API keys in plain text. Store it somewhere private
+                    and never share it.
+                  </p>
                 </Section>
 
                 <Separator />
@@ -1787,9 +1996,13 @@ export function SettingsDrawer() {
                   <div className="space-y-2 rounded-md border border-border bg-card/40 px-3 py-2.5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="space-y-0.5">
-                        <p className="text-[11px] text-muted-foreground">Current version</p>
+                        <p className="text-[11px] text-muted-foreground">App version</p>
                         <p className="text-xs tabular-nums text-foreground/90">
-                          {health ? `v${health.version}` : "Unavailable — sidecar offline"}
+                          {updater.currentVersion
+                            ? `v${updater.currentVersion}`
+                            : desktopRuntime
+                              ? "Shown after an update check"
+                              : "Desktop app only"}
                         </p>
                       </div>
                       <Badge variant="outline" className="text-[10px]">
@@ -1972,8 +2185,9 @@ export function SettingsDrawer() {
           <DialogHeader>
             <DialogTitle>Reset all settings?</DialogTitle>
             <DialogDescription>
-              Restores the default dark studio configuration, style presets, prompt presets and
-              glossary.
+              Restores the default dark studio configuration and clears every API key, imported
+              font reference, glossary pair, style preset and prompt preset. Export a backup first
+              if you need any of them.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
