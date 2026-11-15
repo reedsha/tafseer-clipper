@@ -190,7 +190,6 @@ export interface WhisperStatus {
   device: string;
   compute_type: string;
 }
-
 /**
  * Vendor-neutral acceleration state reported by `GET /health`.
  *
@@ -225,6 +224,26 @@ export interface HealthResponse {
   whisper: WhisperStatus;
   /** Hardware acceleration summary; absent on older sidecars. */
   acceleration?: AccelerationStatus;
+  /** Detected local AI services; absent on older sidecars. */
+  providers?: ProvidersStatus;
+  /** Coarse capability tier; absent on older sidecars. */
+  hardware?: HardwareStatus;
+}
+
+export interface OllamaProviderStatus {
+  detected: boolean;
+  url: string | null;
+  models: string[];
+}
+
+export interface ProvidersStatus {
+  ollama: OllamaProviderStatus;
+}
+
+export type HardwareTier = "high" | "medium" | "low";
+
+export interface HardwareStatus {
+  tier: HardwareTier;
 }
 
 export function getHealth(signal?: AbortSignal): Promise<HealthResponse> {

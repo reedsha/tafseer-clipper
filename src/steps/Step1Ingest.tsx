@@ -62,7 +62,7 @@ import {
 } from "@/lib/media";
 import { DEFAULT_DISCOVERY_SETTINGS, type ProjectData, type TranscriptData } from "@/lib/projectTypes";
 import { openProjectFile } from "@/lib/projectFile";
-import { describeProviderGap } from "@/lib/providers";
+import { describeProviderGap, whisperModelLabel } from "@/lib/providers";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore, type EngineMode, type EngineUiMode } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
@@ -95,6 +95,7 @@ export function Step1Ingest() {
   const cloud = useSettingsStore((state) => state.cloud);
   const cloudStt = useSettingsStore((state) => state.cloudStt);
   const ollama = useSettingsStore((state) => state.ollama);
+  const whisper = useSettingsStore((state) => state.whisper);
   const promptPresets = useSettingsStore((state) => state.promptPresets);
   const sidecar = useSettingsStore((state) => state.sidecar);
   const setTranscriptionMode = useSettingsStore((state) => state.setTranscriptionMode);
@@ -175,8 +176,8 @@ export function Step1Ingest() {
   const transcriptionDetail =
     transcriptionMode === "local"
       ? `On this computer${
-          sidecar.health ? (acceleration.transcription === "gpu" ? " · GPU" : " · CPU") : ""
-        }`
+          sidecar.health ? ` · ${acceleration.transcription === "gpu" ? "GPU" : "CPU"}` : ""
+        } · ${whisperModelLabel(whisper.model)}`
       : cloudStt.baseUrl
         ? `Your AI account · ${cloudStt.model || "model not set"}`
         : "Your AI account — not set up";

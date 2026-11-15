@@ -28,6 +28,7 @@ import {
 import { cn } from "cn";
 
 import { GpuAccelerationPanel, GpuStatusLine } from "@/components/GpuAcceleration";
+import { FitBadge } from "@/components/FitBadge";
 import { SidecarStatusDot, SIDECAR_STATUS_LABEL } from "@/components/SidecarStatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -64,9 +65,19 @@ import {
 } from "@/lib/filenameTemplate";
 import { formatBytes } from "@/lib/format";
 import { loadImportedFonts } from "@/lib/fonts";
-import { isTauriRuntime, openDirectory } from "@/lib/media";
+import type { HardwareTier } from "@/lib/api";
+import { isTauriRuntime, openDirectory, openExternalUrl } from "@/lib/media";
 import type { Resolution } from "@/lib/projectTypes";
-import { buildProviderFor, describeProviderGap } from "@/lib/providers";
+import {
+  buildProviderFor,
+  CLOUD_MODEL_OPTIONS,
+  CLOUD_PRESETS,
+  describeProviderGap,
+  fitSentence,
+  matchCloudPreset,
+  recommendLocalModel,
+  whisperModelLabel,
+} from "@/lib/providers";
 import { coerceToRange, NUMERIC_LIMITS } from "@/lib/settingsLimits";
 import { estimateThaiLineFit } from "@/lib/subtitleWidth";
 import {
@@ -392,6 +403,62 @@ function LineWidthHint({
   );
 }
 
+/**
+ * Tier-first model chooser: the curated labels lead with plain-language quality
+ * tiers and keep the codename visible, with a free-text escape hatch for any
+ * OpenAI-compatible service.
+ */
+function ModelPicker({
+  value,
+  onChange,
+  label,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  label: string;
+}) {
+  const known = CLOUD_MODEL_OPTIONS.some((option) => option.value === value);
+  const [custom, setCustom] = useState(!known);
+
+  return (
+    <div className="space-y-1.5">
+      <Select
+        value={custom ? "custom" : value}
+        onValueChange={(next) => {
+          if (next === "custom") {
+            setCustom(true);
+            return;
+          }
+          setCustom(false);
+          onChange(next);
+        }}
+      >
+        <SelectTrigger className="w-full" aria-label={label}>
+          <SelectValue placeholder="Choose a model" />
+        </SelectTrigger>
+        <SelectContent>
+          {CLOUD_MODEL_OPTIONS.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+          <SelectItem value="custom">Custom model name…</SelectItem>
+        </SelectContent>
+      </Select>
+      {custom ? (
+        <Input
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="Paste the model name from your AI service"
+          aria-label={`${label} (custom)`}
+          spellCheck={false}
+          className="text-xs"
+        />
+      ) : null}
+    </div>
+  );
+}
+
 /** Marks a provider block the current engine routing does (not) call. */
 function UsageBadge({ active }: { active: boolean }) {
   return active ? (
@@ -455,13 +522,22 @@ const SHORTCUTS = [
 
 /** Named sidecar models, plus a Custom escape hatch for anything else. */
 const WHISPER_MODELS = [
-  { value: "large-v3-turbo", label: "large-v3-turbo · recommended" },
-  { value: "large-v3", label: "large-v3 · most accurate" },
-  { value: "medium", label: "medium" },
-  { value: "small", label: "small" },
-  { value: "base", label: "base" },
-  { value: "tiny", label: "tiny · fastest" },
+  { value: "large-v3-turbo", label: whisperModelLabel("large-v3-turbo") },
+  { value: "large-v3", label: whisperModelLabel("large-v3") },
+  { value: "medium", label: whisperModelLabel("medium") },
+  { value: "small", label: whisperModelLabel("small") },
+  { value: "base", label: whisperModelLabel("base") },
+  { value: "tiny", label: whisperModelLabel("tiny") },
 ];
+
+/** Honest speed hint for the local transcription model on this machine. */
+function whisperFitSentence(tier: HardwareTier | undefined): string {
+  if (tier === "high") return "Best quality runs comfortably on this computer.";
+  if (tier === "medium") {
+    return "Best quality will be slower here — Balanced is a good fit.";
+  }
+  return "Use Fastest here; the better models will be slow.";
+}
 
 /** True when every Arabic/Thai field still equals the saved preset. */
 function presetMatchesStyle(
@@ -717,6 +793,12 @@ export function SettingsDrawer() {
   const ollamaIncomplete = !ollama.model.trim();
 
   const health = sidecar.health;
+  const hardwareTier: HardwareTier | undefined = health?.hardware?.tier;
+  const ollamaStatus = health?.providers?.ollama;
+  const ollamaDetected = ollamaStatus?.detected === true;
+  const ollamaModels = ollamaStatus?.models ?? [];
+  const recommendedLocal = recommendLocalModel(hardwareTier);
+  const cloudPresetId = matchCloudPreset(cloud.baseUrl);
   /** Vendor-neutral acceleration state derived from GET /health. */
   const acceleration = describeAcceleration(health);
 
@@ -788,6 +870,24 @@ export function SettingsDrawer() {
     } finally {
       setTestingConnection(false);
     }
+  }
+
+  async function handleGetOllama() {
+    const opened = await openExternalUrl("https://ollama.com/download");
+    if (opened) return;
+    const copied = await copyText("https://ollama.com/download");
+    toast(copied ? "Download link copied" : "Open ollama.com/download", {
+      description: "Install Ollama, then use Check again.",
+    });
+  }
+
+  async function handleInstallLocalModel() {
+    const command = `ollama pull ${recommendedLocal.model}`;
+    const copied = await copyText(command);
+    toast(copied ? "Command copied" : command, {
+      description: "Paste it into a terminal, then use Check again.",
+    });
+    if (!ollamaDetected) void openExternalUrl("https://ollama.com/download");
   }
 
   async function handleSettingsImport(files: FileList | null) {
@@ -1020,16 +1120,38 @@ export function SettingsDrawer() {
                   description="Used for finding clips and checking the Arabic."
                   badge={<UsageBadge active={analysisMode === "cloud"} />}
                 >
-                  <Field label="Base URL">
-                    <Input
-                      value={cloud.baseUrl}
-                      onChange={(event) => updateCloud({ baseUrl: event.target.value })}
-                      placeholder="https://api.openai.com/v1"
-                      aria-label="Cloud API base URL"
-                      spellCheck={false}
-                      autoComplete="off"
-                    />
+                  <Field label="Service">
+                    <Select
+                      value={cloudPresetId}
+                      onValueChange={(value) => {
+                        const preset = CLOUD_PRESETS.find((item) => item.id === value);
+                        if (preset?.baseUrl) updateCloud({ baseUrl: preset.baseUrl });
+                      }}
+                    >
+                      <SelectTrigger className="w-full" aria-label="AI service">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {CLOUD_PRESETS.map((preset) => (
+                          <SelectItem key={preset.id} value={preset.id}>
+                            {preset.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </Field>
+                  {cloudPresetId === "custom" ? (
+                    <Field label="Server address">
+                      <Input
+                        value={cloud.baseUrl}
+                        onChange={(event) => updateCloud({ baseUrl: event.target.value })}
+                        placeholder="https://api.openai.com/v1"
+                        aria-label="Cloud API server address"
+                        spellCheck={false}
+                        autoComplete="off"
+                      />
+                    </Field>
+                  ) : null}
                   <Field label="API key">
                     {/* Chromium logs a password-manager warning for a
                         `type="password"` field outside a form; this one is
@@ -1044,24 +1166,18 @@ export function SettingsDrawer() {
                     </form>
                   </Field>
                   <div className="grid gap-3 sm:grid-cols-2">
-                    <Field label="Reasoning model (Step 2)">
-                      <Input
+                    <Field label="Model for finding clips">
+                      <ModelPicker
+                        label="Clip-finding model"
                         value={cloud.reasoningModel}
-                        onChange={(event) =>
-                          updateCloud({ reasoningModel: event.target.value })
-                        }
-                        placeholder="gpt-4.1 / qwen3:14b"
-                        aria-label="Reasoning model"
-                        spellCheck={false}
+                        onChange={(value) => updateCloud({ reasoningModel: value })}
                       />
                     </Field>
-                    <Field label="Fast text model (Step 3)">
-                      <Input
+                    <Field label="Model for checking Arabic">
+                      <ModelPicker
+                        label="Arabic-check model"
                         value={cloud.fastTextModel}
-                        onChange={(event) => updateCloud({ fastTextModel: event.target.value })}
-                        placeholder="gpt-4.1-mini / qwen3:4b"
-                        aria-label="Fast text model"
-                        spellCheck={false}
+                        onChange={(value) => updateCloud({ fastTextModel: value })}
                       />
                     </Field>
                   </div>
@@ -1102,35 +1218,108 @@ export function SettingsDrawer() {
                   description="Runs clip finding on this computer, offline."
                   badge={<UsageBadge active={analysisMode === "local"} />}
                 >
-                  <Field label="Ollama URL">
-                    <Input
-                      value={ollama.baseUrl}
-                      onChange={(event) => updateOllama({ baseUrl: event.target.value })}
-                      placeholder="http://localhost:11434/v1"
-                      aria-label="Ollama URL"
-                      spellCheck={false}
-                    />
-                  </Field>
-                  <Field label="Model id">
-                    <Input
-                      value={ollama.model}
-                      onChange={(event) => updateOllama({ model: event.target.value })}
-                      placeholder="qwen3:14b"
-                      aria-label="Ollama model id"
-                      spellCheck={false}
-                    />
-                  </Field>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="outline" className="gap-1.5 text-[10px]">
+                      <span
+                        aria-hidden
+                        className={cn(
+                          "size-1.5 rounded-full",
+                          ollamaDetected ? "bg-status-online" : "bg-muted-foreground/50",
+                        )}
+                      />
+                      {ollamaDetected ? "Ollama found" : "Ollama not found"}
+                    </Badge>
+                    <FitBadge tier={hardwareTier} />
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="h-5 text-muted-foreground"
+                      onClick={() => void refreshHealth()}
+                    >
+                      Check again
+                    </Button>
+                  </div>
+
+                  {hardwareTier ? (
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">
+                      This computer: {fitSentence(hardwareTier)} Recommended:{" "}
+                      {recommendedLocal.label} ({recommendedLocal.model}).
+                    </p>
+                  ) : null}
+
+                  {ollamaDetected ? (
+                    ollamaModels.length > 0 ? (
+                      <Field label="Model">
+                        <Select
+                          value={ollama.model || undefined}
+                          onValueChange={(value) => updateOllama({ model: value })}
+                        >
+                          <SelectTrigger className="w-full" aria-label="Ollama model">
+                            <SelectValue placeholder="Choose an installed model" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {ollamaModels.map((name) => (
+                              <SelectItem key={name} value={name}>
+                                {name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                    ) : (
+                      <p className="text-[11px] leading-relaxed text-status-warning">
+                        Ollama is installed but has no AI models yet.
+                      </p>
+                    )
+                  ) : (
+                    <div className="space-y-2 rounded-md border border-border bg-card/40 px-3 py-2.5">
+                      <p className="text-[11px] leading-relaxed text-muted-foreground">
+                        Ollama isn't installed yet. It's free and runs everything offline.
+                      </p>
+                      <ol className="list-decimal space-y-0.5 pl-4 text-[11px] leading-relaxed text-muted-foreground">
+                        <li>Install Ollama.</li>
+                        <li>Install the recommended model.</li>
+                        <li>Come back and press Check again.</li>
+                      </ol>
+                      <div className="flex flex-wrap gap-1.5">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={() => void handleGetOllama()}
+                        >
+                          <Download className="size-3.5" />
+                          Get Ollama
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={() => void handleInstallLocalModel()}
+                        >
+                          Install a recommended model
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {ollamaDetected && ollamaModels.length === 0 ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={() => void handleInstallLocalModel()}
+                    >
+                      <Download className="size-3.5" />
+                      Install a recommended model
+                    </Button>
+                  ) : null}
+
                   {analysisMode === "local" && ollamaIncomplete ? (
                     <p className="text-[11px] leading-relaxed text-status-warning">
                       Clip finding won't work until you enter a model name.
                     </p>
                   ) : null}
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[11px] leading-relaxed text-muted-foreground">
-                      Enter the model name exactly as Ollama lists it (
-                      <span className="font-mono">ollama list</span>).
-                    </span>
-                  </div>
                 </Section>
 
                 <Separator />
@@ -1140,12 +1329,12 @@ export function SettingsDrawer() {
                   description="Used for transcription when you choose cloud speech-to-text."
                   badge={<UsageBadge active={transcriptionMode === "cloud"} />}
                 >
-                  <Field label="Base URL">
+                  <Field label="Server address">
                     <Input
                       value={cloudStt.baseUrl}
                       onChange={(event) => updateCloudStt({ baseUrl: event.target.value })}
                       placeholder="https://api.openai.com/v1"
-                      aria-label="Cloud STT base URL"
+                      aria-label="Cloud speech-to-text server address"
                       spellCheck={false}
                     />
                   </Field>
@@ -1172,7 +1361,7 @@ export function SettingsDrawer() {
                   </div>
                   {transcriptionMode === "cloud" && cloudSttIncomplete ? (
                     <p className="text-[11px] leading-relaxed text-status-warning">
-                      Cloud transcription needs a base URL and an API key.
+                      Cloud transcription needs a server address and an API key.
                     </p>
                   ) : null}
                 </Section>
@@ -1605,9 +1794,15 @@ export function SettingsDrawer() {
                 <Separator />
 
                 <Section
-                  title="Whisper model"
-                  description="Local transcription model and precision. Larger models are more accurate and slower; the CPU path is unaffected by GPU precision."
+                  title="Transcription model"
+                  description="How accurately speech is transcribed on this computer. Better models are slower."
                 >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <FitBadge tier={hardwareTier} />
+                    <span className="text-[11px] text-muted-foreground">
+                      {whisperFitSentence(hardwareTier)}
+                    </span>
+                  </div>
                   <div className="grid gap-3 sm:grid-cols-2">
                     <Field label="Whisper model">
                       <Select
@@ -1634,7 +1829,7 @@ export function SettingsDrawer() {
                         </SelectContent>
                       </Select>
                     </Field>
-                    <Field label="Compute precision">
+                    <Field label="Transcription precision">
                       <Select
                         value={whisper.computeType}
                         onValueChange={(value) =>
@@ -1643,13 +1838,13 @@ export function SettingsDrawer() {
                           })
                         }
                       >
-                        <SelectTrigger className="w-full" aria-label="Compute precision">
+                        <SelectTrigger className="w-full" aria-label="Transcription precision">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="int8">int8 · automatic default</SelectItem>
-                          <SelectItem value="float16">float16 · GPU only</SelectItem>
-                          <SelectItem value="float32">float32 · CPU compatibility</SelectItem>
+                          <SelectItem value="int8">Automatic (recommended)</SelectItem>
+                          <SelectItem value="float16">GPU, more accurate</SelectItem>
+                          <SelectItem value="float32">CPU, most compatible</SelectItem>
                         </SelectContent>
                       </Select>
                     </Field>
@@ -1660,14 +1855,14 @@ export function SettingsDrawer() {
                         value={whisper.model}
                         onChange={(event) => updateWhisper({ model: event.target.value })}
                         placeholder="large-v3-turbo"
-                        aria-label="Custom Whisper model id"
+                        aria-label="Custom transcription model"
                         spellCheck={false}
                       />
                     </Field>
                   ) : null}
                   <SwitchRow
-                    label="Unload Whisper from GPU memory after Step 1"
-                    description="Frees GPU memory before encoding starts. No effect when transcription runs on the CPU."
+                    label="Free up memory after transcription"
+                    description="Releases the transcription model from GPU memory before rendering. No effect when transcription runs on the CPU."
                     checked={whisper.autoUnload}
                     onCheckedChange={(checked) => updateWhisper({ autoUnload: checked })}
                   />

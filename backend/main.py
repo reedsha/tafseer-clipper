@@ -36,6 +36,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -173,6 +174,24 @@ class AccelerationStatus(BaseModel):
     reason: str | None = None
 
 
+class OllamaProviderStatus(BaseModel):
+    detected: bool = False
+    url: str | None = None
+    models: list[str] = Field(default_factory=list)
+
+
+class ProvidersStatus(BaseModel):
+    """Detected AI services the app can use without extra setup."""
+
+    ollama: OllamaProviderStatus = Field(default_factory=OllamaProviderStatus)
+
+
+class HardwareTier(BaseModel):
+    """Plain capability tier; product names stay in diagnostics (AGENTS.md §3)."""
+
+    tier: Literal["high", "medium", "low"] = "low"
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     version: str
@@ -189,6 +208,10 @@ class HealthResponse(BaseModel):
     whisper: WhisperStatus
     #: Additive: GPU acceleration state + machine-readable reason for CPU.
     acceleration: AccelerationStatus = Field(default_factory=AccelerationStatus)
+    #: Additive: detected local AI services (Ollama) for one-click setup.
+    providers: ProvidersStatus = Field(default_factory=ProvidersStatus)
+    #: Additive: coarse capability tier used for honest model recommendations.
+    hardware: HardwareTier = Field(default_factory=HardwareTier)
 
 
 # --------------------------------------------------------------------------- #
@@ -829,11 +852,109 @@ def _hardware_snapshot() -> dict:
     return snapshot
 
 
+# --------------------------------------------------------------------------- #
+#    Detected providers + capability tier (additive /health fields)
+# --------------------------------------------------------------------------- #
+OLLAMA_DEFAULT_URL = "http://127.0.0.1:11434"
+OLLAMA_PROBE_TIMEOUT_SECONDS = 0.5
+OLLAMA_PROBE_TTL_SECONDS = 30.0
+_ollama_cache: tuple[float, OllamaProviderStatus] | None = None
+_ollama_lock = threading.Lock()
+
+
+def _probe_ollama() -> OllamaProviderStatus:
+    """Detect a local Ollama instance and list its installed models."""
+    global _ollama_cache
+    now = time.monotonic()
+    with _ollama_lock:
+        if _ollama_cache is not None and now - _ollama_cache[0] < OLLAMA_PROBE_TTL_SECONDS:
+            return _ollama_cache[1]
+
+    status = OllamaProviderStatus(detected=False, url=OLLAMA_DEFAULT_URL, models=[])
+    try:
+        response = httpx.get(
+            f"{OLLAMA_DEFAULT_URL}/api/tags", timeout=OLLAMA_PROBE_TIMEOUT_SECONDS
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            entries = payload.get("models") if isinstance(payload, dict) else None
+            names: list[str] = []
+            if isinstance(entries, list):
+                for entry in entries:
+                    name = entry.get("name") if isinstance(entry, dict) else None
+                    if isinstance(name, str) and name:
+                        names.append(name)
+            status = OllamaProviderStatus(
+                detected=True,
+                url=OLLAMA_DEFAULT_URL,
+                models=sorted(set(names)),
+            )
+    except Exception:  # noqa: BLE001 - detection must never fail /health
+        pass
+
+    with _ollama_lock:
+        _ollama_cache = (now, status)
+    return status
+
+
+_total_ram_gb_cache: int | None = None
+
+
+def _total_ram_gb() -> int:
+    """Total physical RAM in GiB; falls back to 0 when it cannot be read."""
+    global _total_ram_gb_cache
+    if _total_ram_gb_cache is not None:
+        return _total_ram_gb_cache
+    value = 0
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                value = int(status.ullTotalPhys // (1024**3))
+        else:
+            with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("MemTotal:"):
+                        value = int(int(line.split()[1]) // (1024**2))
+                        break
+    except Exception:  # noqa: BLE001
+        value = 0
+    _total_ram_gb_cache = value
+    return value
+
+
+def _hardware_tier(vram_mb: int) -> HardwareTier:
+    """Coarse capability tier for honest local-model recommendations."""
+    ram_gb = _total_ram_gb()
+    if vram_mb >= 12_000 or ram_gb >= 32:
+        return HardwareTier(tier="high")
+    if vram_mb >= 6_000 or ram_gb >= 16:
+        return HardwareTier(tier="medium")
+    return HardwareTier(tier="low")
+
+
 @app.get("/health", response_model=HealthResponse, summary="Sidecar readiness & hardware")
 async def health() -> HealthResponse:
     snapshot = await run_in_threadpool(_hardware_snapshot)
     disk_cache_bytes = await run_in_threadpool(_disk_cache_bytes)
     acceleration = await run_in_threadpool(accel.acceleration_report)
+    ollama = await run_in_threadpool(_probe_ollama)
     ffmpeg = config.ffmpeg_path()
     return HealthResponse(
         version=config.APP_VERSION,
@@ -853,6 +974,8 @@ async def health() -> HealthResponse:
             compute_type=str(snapshot["whisper_compute_type"]),
         ),
         acceleration=AccelerationStatus.model_validate(acceleration),
+        providers=ProvidersStatus(ollama=ollama),
+        hardware=_hardware_tier(int(snapshot["vram_mb"])),
     )
 
 
