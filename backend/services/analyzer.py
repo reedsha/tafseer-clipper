@@ -17,12 +17,14 @@ import json
 import logging
 import math
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 import config
+from services.cancel import raise_if_cancelled
 from services.transcriber import normalize_language
 
 logger = logging.getLogger("tafseer.analyzer")
@@ -428,6 +430,7 @@ async def discover_clips(
     max_duration: float = 90.0,
     max_clips: int = 8,
     language: str = "th",
+    cancel_event: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
     """Propose clips across the *whole* lecture, not just its tail.
 
@@ -448,6 +451,9 @@ async def discover_clips(
 
     proposals: list[Any] = []
     for index, window in enumerate(windows):
+        # Natural cancellation boundary: one LLM pass per window; a
+        # disconnected client stops before the next provider call.
+        raise_if_cancelled(cancel_event)
         budget = per_window + (1 if index < remainder else 0)
         if budget < 1:
             continue

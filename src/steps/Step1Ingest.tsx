@@ -68,13 +68,20 @@ import { useUiStore } from "@/store/uiStore";
 /* Step 1                                                                      */
 /* -------------------------------------------------------------------------- */
 
-/* -------------------------------------------------------------------------- */
-/* Step 1                                                                      */
-/* -------------------------------------------------------------------------- */
+/**
+ * One sentence for the provider-gap warning, shared by the inline Step 1
+ * warning and the pre-flight toast so the two can never drift back into
+ * contradictory copy ("clip discovery needs the key" while blocking
+ * transcription).
+ */
+function analysisGapMessage(gap: string): string {
+  return `Topic analysis (Step 2) needs ${gap}. Transcribing now would produce a transcript Step 2 can't search, so it's blocked until this is set.`;
+}
 
 export function Step1Ingest() {
   const project = useProjectStore((state) => state.project);
   const recentProjects = useProjectStore((state) => state.recentProjects);
+  const lastProjectId = useProjectStore((state) => state.lastProjectId);
   const resumeRecent = useProjectStore((state) => state.resumeRecent);
   const setStep = useProjectStore((state) => state.setStep);
 
@@ -445,7 +452,7 @@ export function Step1Ingest() {
     const analysisGap = describeProviderGap(settings, "reasoning");
     if (settings.analysisMode === "cloud" && analysisGap) {
       toast.error("Topic analysis is not configured", {
-        description: `Add ${analysisGap} in Settings → AI Providers before transcribing.`,
+        description: analysisGapMessage(analysisGap),
       });
       useUiStore.getState().openSettings("providers");
       return;
@@ -572,6 +579,7 @@ export function Step1Ingest() {
 
           <RecentProjectsBar
             recentProjects={recentProjects}
+            lastProjectId={lastProjectId}
             onResume={handleResume}
             onOpenFile={() => void handleOpenProject()}
             onViewAll={() => setRecentOpen(true)}
@@ -945,9 +953,7 @@ export function Step1Ingest() {
                 {analysisMode === "cloud" && analysisGap ? (
                   <p className="mt-3 flex items-start gap-1.5 text-[10px] leading-relaxed text-status-warning">
                     <AlertTriangle className="mt-0.5 size-3 shrink-0" />
-                    <span className="flex-1">
-                      Clip discovery needs {analysisGap} — transcription is blocked until it is set.
-                    </span>
+                    <span className="flex-1">{analysisGapMessage(analysisGap)}</span>
                     <Button
                       variant="ghost"
                       size="xs"

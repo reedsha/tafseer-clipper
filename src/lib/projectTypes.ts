@@ -10,6 +10,12 @@ export type AspectRatio = "16:9" | "9:16";
 
 export type FramingMode = "blur-fill" | "center-crop";
 
+/** One label per framing concept, shared by Steps 3 and 4 (panel + queue rows). */
+export const FRAMING_LABELS: Record<FramingMode, string> = {
+  "blur-fill": "Blur fill",
+  "center-crop": "Center crop",
+};
+
 export type Resolution = "1920x1080" | "1080x1920";
 
 export interface TranscriptSegment {

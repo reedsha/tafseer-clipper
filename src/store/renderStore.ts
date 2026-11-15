@@ -15,10 +15,11 @@ import { defaultOutputDirectory } from "@/lib/filenameTemplate";
 import { formatClock } from "@/lib/format";
 import type { SubtitleCue } from "@/lib/projectTypes";
 import { assStyleToSpec, resolveAssStyles } from "@/lib/subtitleStyles";
+import { wrapSubtitleText } from "@/lib/subtitleWrap";
 import { useProjectStore } from "./projectStore";
 import { useSettingsStore } from "./settingsStore";
 
-export type ClipStatus = "queued" | "rendering" | "done" | "error";
+export type ClipStatus = "queued" | "rendering" | "done" | "error" | "cancelled";
 
 export interface ClipJob {
   index: number;
@@ -68,7 +69,10 @@ const STREAM_INTERRUPTED_MESSAGE =
 const STREAM_INTERRUPTED_CLIP_DETAIL =
   "The render stream closed before this clip reported completion.";
 
-function toRenderCues(cues: SubtitleCue[]): { cues: RenderCue[]; skipped: number } {
+function toRenderCues(
+  cues: SubtitleCue[],
+  maxCharsPerLine: number,
+): { cues: RenderCue[]; skipped: number } {
   const valid: RenderCue[] = [];
   let skipped = 0;
   for (const cue of cues) {
@@ -82,7 +86,10 @@ function toRenderCues(cues: SubtitleCue[]): { cues: RenderCue[]; skipped: number
       start: Math.max(0, start),
       end,
       arabic: cue.arabic ?? "",
-      thai: cue.thai ?? "",
+      // Guarantee wrapped output at the boundary: even if a line was typed
+      // past the wrap width and the editor never committed it (blur/split),
+      // the burned `.ass` and the preview still agree. Idempotent.
+      thai: wrapSubtitleText(cue.thai ?? "", maxCharsPerLine),
     });
   }
   return { cues: valid, skipped };
@@ -92,6 +99,8 @@ function toRenderCues(cues: SubtitleCue[]): { cues: RenderCue[]; skipped: number
 let activeAbort: AbortController | null = null;
 /** Incremented per batch/cancel so stale async callbacks can't touch new state. */
 let activeRunId = 0;
+/** Last fallback toast key in the current batch; dedupes repeated warnings. */
+let fallbackToastKeyRef: string | null = null;
 
 interface RenderState {
   job: RenderJobState;
@@ -131,6 +140,8 @@ export const useRenderStore = create<RenderState>()((set) => ({
         size: settings.arabic.fontSize,
         primaryColor: settings.arabic.color,
         outline: settings.arabic.outlineWidth,
+        outlineColor: settings.arabic.outlineColor,
+        boxOpacity: settings.arabic.boxOpacity,
         bold: settings.arabic.bold,
         lineHeightPad: settings.arabic.lineHeightPad,
       },
@@ -139,14 +150,20 @@ export const useRenderStore = create<RenderState>()((set) => ({
         size: settings.thai.fontSize,
         primaryColor: settings.thai.color,
         outline: settings.thai.outlineWidth,
+        outlineColor: settings.thai.outlineColor,
+        boxOpacity: settings.thai.boxOpacity,
         bold: settings.thai.bold,
         lineHeightPad: 1.2,
       },
     );
 
     let skippedCues = 0;
+    const maxCharsPerLine = settings.editor.maxCharsPerLine;
     const renderClips = approvedClips.map((clip) => {
-      const { cues, skipped } = toRenderCues(current.subtitles[clip.id] ?? []);
+      const { cues, skipped } = toRenderCues(
+        current.subtitles[clip.id] ?? [],
+        maxCharsPerLine,
+      );
       skippedCues += skipped;
       return {
         start: clip.start,
@@ -160,6 +177,7 @@ export const useRenderStore = create<RenderState>()((set) => ({
       current.export.outputDir?.trim() || defaultOutputDirectory(current.sourcePath);
 
     const runId = ++activeRunId;
+    fallbackToastKeyRef = null;
     const controller = new AbortController();
     activeAbort?.abort();
     activeAbort = controller;
@@ -222,11 +240,17 @@ export const useRenderStore = create<RenderState>()((set) => ({
               event.reason ?? "GPU encoding failed — the sidecar fell back to CPU encoding.",
           },
         }));
-        toast.warning("GPU encoder unavailable", {
-          description: `${event.failedEncoder ?? "hardware encoder"} failed, retrying with ${
-            event.encoder ?? "libx264"
-          }.`,
-        });
+        // One toast per distinct fallback cause per batch: on a CPU-only
+        // machine every clip would otherwise repeat the same warning.
+        const toastKey = `${event.failedEncoder ?? "hardware encoder"}:${event.reason ?? ""}`;
+        if (fallbackToastKeyRef !== toastKey) {
+          fallbackToastKeyRef = toastKey;
+          toast.warning("GPU encoder unavailable", {
+            description: `${event.failedEncoder ?? "hardware encoder"} failed, retrying with ${
+              event.encoder ?? "libx264"
+            }.`,
+          });
+        }
         return;
       }
 
@@ -235,7 +259,9 @@ export const useRenderStore = create<RenderState>()((set) => ({
         set((state) => ({
           job: {
             ...state.job,
-            overall: event.progress,
+            // Older sidecars may omit fields; keep the previous values instead
+            // of collapsing progress to 0/undefined.
+            overall: event.progress ?? state.job.overall,
             elapsed: event.elapsed ?? state.job.elapsed,
             encoder: event.encoder ?? state.job.encoder,
             clips: state.job.clips.map((clip) =>
@@ -306,25 +332,31 @@ export const useRenderStore = create<RenderState>()((set) => ({
       }
 
       if (event.event === "done") {
+        const failed = event.failedClips ?? useRenderStore.getState().job.failed;
         set((state) => ({
           job: {
             ...state.job,
-            status: event.failedClips ? "error" : "done",
+            status: failed ? "error" : "done",
             overall: 1,
             elapsed: event.elapsed ?? state.job.elapsed,
             rendered: event.renderedClips ?? state.job.rendered,
-            failed: event.failedClips ?? state.job.failed,
+            failed,
             outputDir: event.outputDir ?? state.job.outputDir,
           },
         }));
-        toast.success(
-          event.failedClips ? "Batch finished with errors" : "Batch rendered",
-          {
+        // A batch with failures is an error outcome, not a success: the footer
+        // already shows the failed count, the toast must agree with it.
+        if (failed > 0) {
+          toast.error("Batch finished with errors", {
+            description: `${event.renderedClips ?? 0} clip(s) rendered, ${failed} failed.`,
+          });
+        } else {
+          toast.success("Batch rendered", {
             description: `${event.renderedClips ?? 0} clip(s) in ${formatClock(
               event.elapsed ?? 0,
             )}.`,
-          },
-        );
+          });
+        }
       }
     };
 
@@ -397,7 +429,20 @@ export const useRenderStore = create<RenderState>()((set) => ({
     activeRunId += 1;
     activeAbort?.abort();
     activeAbort = null;
-    set((state) => ({ job: { ...state.job, status: "idle" } }));
+    set((state) => ({
+      job: {
+        ...state.job,
+        status: "idle",
+        message: "Render cancelled.",
+        // Frozen "Encoding"/"Queued" badges would hang forever; mark the
+        // unfinished rows explicitly. Finished clips keep their "Rendered".
+        clips: state.job.clips.map((clip) =>
+          clip.status === "rendering" || clip.status === "queued"
+            ? { ...clip, status: "cancelled", progress: 0 }
+            : clip,
+        ),
+      },
+    }));
     toast("Render cancelled");
   },
 }));

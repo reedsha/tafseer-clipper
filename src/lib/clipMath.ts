@@ -11,6 +11,13 @@ import { clamp } from "./format";
 
 export const MIN_CLIP_SECONDS = 1;
 
+/**
+ * The real render floor: the sidecar's `RenderClip` validator rejects clips
+ * shorter than 0.5 s with a 422 that fails the whole batch. User-driven trims
+ * and nudges use this floor; AI proposals keep the stricter 1 s minimum above.
+ */
+export const MIN_RENDERABLE_CLIP_SECONDS = 0.5;
+
 export interface CutContext {
   /** Lecture duration, or `null` while it is still unknown. */
   duration: number | null;
@@ -34,22 +41,25 @@ export function clampToDuration(value: number, duration: number | null): number 
 }
 
 /**
- * Clamp a speech range to the lecture and enforce the 1 s minimum. Returns
- * `null` when the proposal is unusable (NaN, inverted, too short) or lies
- * entirely outside the lecture — an out-of-range proposal must be dropped, never
- * widened into a fabricated clip at the tail of the video.
+ * Clamp a speech range to the lecture and enforce the given minimum (the 1 s
+ * AI-proposal default; user-driven trims pass
+ * {@link MIN_RENDERABLE_CLIP_SECONDS}). Returns `null` when the proposal is
+ * unusable (NaN, inverted, too short) or lies entirely outside the lecture — an
+ * out-of-range proposal must be dropped, never widened into a fabricated clip
+ * at the tail of the video.
  */
 export function normalizeSpeechRange(
   start: number,
   end: number,
   duration: number | null,
+  minSeconds: number = MIN_CLIP_SECONDS,
 ): CutRange | null {
   if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
   const upper = duration && duration > 0 ? duration : Number.POSITIVE_INFINITY;
   let nextStart = clamp(start, 0, upper);
   let nextEnd = clamp(end, 0, upper);
   if (nextEnd < nextStart) [nextStart, nextEnd] = [nextEnd, nextStart];
-  if (nextEnd - nextStart < MIN_CLIP_SECONDS) return null;
+  if (nextEnd - nextStart < minSeconds) return null;
   return { start: roundSeconds(nextStart), end: roundSeconds(nextEnd) };
 }
 

@@ -35,6 +35,8 @@ export interface CreateProjectInput {
 export interface ProjectState {
   project: ProjectData | null;
   recentProjects: RecentProject[];
+  /** Id of the most recently opened project; the Recent bar leads with it. */
+  lastProjectId: string | null;
   autosavedAt: number | null;
   dirty: boolean;
   /** Set when the durable disk auto-save failed; cleared on the next success. */
@@ -143,6 +145,51 @@ function touch(project: ProjectData, patch: Partial<ProjectData>): ProjectData {
 }
 
 /**
+ * Cue times are stored clip-relative (`cue.start = segment.start - clip.start`)
+ * and `/render-batch` receives `subtitle_timebase: "clip"`, so any change of a
+ * clip's start must shift that clip's cues by the same delta or the burned
+ * subtitles drift silently. `delta` is `oldStart - newStart`.
+ */
+export const CUE_REBASE_EPSILON = 0.0005;
+const MIN_CUE_WINDOW = 0.05;
+
+/** Pure: shift one clip's cues by `delta` and clamp into `[0, clipDuration]`. */
+export function rebaseCuesForClip(
+  subtitles: Record<string, SubtitleCue[]>,
+  clipId: string,
+  delta: number,
+  clipDuration: number,
+): Record<string, SubtitleCue[]> {
+  if (!Number.isFinite(delta) || Math.abs(delta) < CUE_REBASE_EPSILON) return subtitles;
+  const cues = subtitles[clipId];
+  if (!cues || cues.length === 0) return subtitles;
+  const duration = Math.max(0, clipDuration);
+  const shifted = cues.map((cue) => {
+    let start = Math.max(0, Math.min(cue.start + delta, duration));
+    let end = Math.max(0, Math.min(cue.end + delta, duration));
+    // Never delete text: keep a minimum window even when the shift pushes the
+    // cue against a boundary.
+    if (end - start < MIN_CUE_WINDOW) {
+      start = Math.max(0, Math.min(start, Math.max(0, duration - MIN_CUE_WINDOW)));
+      end = Math.min(duration, start + MIN_CUE_WINDOW);
+    }
+    return { ...cue, start, end };
+  });
+  return { ...subtitles, [clipId]: shifted };
+}
+
+/** Shift cues for a clip whose start moved; a no-op below the epsilon. */
+function rebaseCuesForMovedClip(
+  subtitles: Record<string, SubtitleCue[]>,
+  prev: ProjectClip | undefined,
+  next: ProjectClip | undefined,
+): Record<string, SubtitleCue[]> {
+  if (!prev || !next) return subtitles;
+  const delta = prev.start - next.start;
+  return rebaseCuesForClip(subtitles, prev.id, delta, next.end - next.start);
+}
+
+/**
  * Drop the auto-saves of entries evicted from `recentProjects`. The localStorage
  * journal is cleaned synchronously; the durable disk copy is fire-and-forget.
  */
@@ -187,8 +234,13 @@ export const useProjectStore = create<ProjectState>()(
       autosavedAt: null,
       dirty: false,
       lastAutosaveError: null,
+      lastProjectId: null,
 
       createProject: (input = {}) => {
+        // Save the outgoing project before replacing it: the debounced timer
+        // would otherwise write whatever is current at fire time and silently
+        // discard the outgoing project's last edits.
+        if (get().project && get().dirty) get().autosave();
         const now = Date.now();
         const sourceFileName = input.sourceFileName ?? null;
         const name = input.name ?? (sourceFileName ? stripExtension(sourceFileName) : "Untitled lecture");
@@ -232,12 +284,14 @@ export const useProjectStore = create<ProjectState>()(
           autosavedAt: null,
           dirty: true,
           lastAutosaveError: null,
+          lastProjectId: project.id,
           recentProjects,
         });
         return project;
       },
 
       openProject: (project) => {
+        if (get().project && get().dirty) get().autosave();
         const previousRecent = get().recentProjects;
         const recentProjects = upsertRecent(previousRecent, toRecentProject(project));
         pruneEvictedAutosaves(previousRecent, recentProjects);
@@ -246,12 +300,21 @@ export const useProjectStore = create<ProjectState>()(
           autosavedAt: null,
           dirty: false,
           lastAutosaveError: null,
+          lastProjectId: project.id,
           recentProjects,
         });
       },
 
-      closeProject: () =>
-        set({ project: null, autosavedAt: null, dirty: false, lastAutosaveError: null }),
+      closeProject: () => {
+        if (get().project && get().dirty) get().autosave();
+        set({
+          project: null,
+          autosavedAt: null,
+          dirty: false,
+          lastAutosaveError: null,
+          lastProjectId: null,
+        });
+      },
 
       updateProject: (patch) =>
         set((state) => {
@@ -277,10 +340,18 @@ export const useProjectStore = create<ProjectState>()(
       setClips: (clips) =>
         set((state) => {
           if (!state.project) return {};
+          // Re-base cues for existing clips whose start moved (trim commits and
+          // the Step-2 buffer re-apply arrive through here wholesale).
+          let subtitles = state.project.subtitles;
+          for (const prev of state.project.clips) {
+            const next = clips.find((clip) => clip.id === prev.id);
+            subtitles = rebaseCuesForMovedClip(subtitles, prev, next);
+          }
           const selectedClipId = state.project.selectedClipId;
           return {
             project: touch(state.project, {
               clips,
+              subtitles,
               selectedClipId: clips.some((clip) => clip.id === selectedClipId)
                 ? selectedClipId
                 : (clips[0]?.id ?? null),
@@ -305,12 +376,22 @@ export const useProjectStore = create<ProjectState>()(
       updateClip: (id, patch) =>
         set((state) => {
           if (!state.project) return {};
+          const prev = state.project.clips.find((clip) => clip.id === id);
+          const clips = state.project.clips.map((clip) =>
+            clip.id === id ? { ...clip, ...patch } : clip,
+          );
+          let subtitles = state.project.subtitles;
+          if (
+            prev &&
+            typeof patch.start === "number" &&
+            Number.isFinite(patch.start) &&
+            Math.abs(prev.start - patch.start) >= CUE_REBASE_EPSILON
+          ) {
+            const next = clips.find((clip) => clip.id === id);
+            subtitles = rebaseCuesForMovedClip(subtitles, prev, next);
+          }
           return {
-            project: touch(state.project, {
-              clips: state.project.clips.map((clip) =>
-                clip.id === id ? { ...clip, ...patch } : clip,
-              ),
-            }),
+            project: touch(state.project, { clips, subtitles }),
             dirty: true,
           };
         }),
@@ -406,7 +487,14 @@ export const useProjectStore = create<ProjectState>()(
         const { project } = get();
         if (!project) return false;
         const saved = writeAutosave(project);
-        if (!saved) return false;
+        // The durable disk copy is the safety net for exactly the case where
+        // the localStorage journal fails (quota, privacy mode), so it must run
+        // regardless of the journal result.
+        persistAutosaveToDisk(project);
+        if (!saved) {
+          set({ lastAutosaveError: "Local journal write failed — the disk copy still saves." });
+          return false;
+        }
         const savedAt = Date.now();
         const previousRecent = get().recentProjects;
         const recentProjects = upsertRecent(
@@ -417,13 +505,14 @@ export const useProjectStore = create<ProjectState>()(
         set({
           autosavedAt: savedAt,
           dirty: false,
+          lastAutosaveError: null,
           recentProjects,
         });
-        persistAutosaveToDisk(project);
         return true;
       },
 
       resumeRecent: async (projectId) => {
+        if (get().project && get().dirty) get().autosave();
         try {
           // Fast path: the localStorage journal holds the newest snapshot.
           const local = readAutosave(projectId);
@@ -454,9 +543,17 @@ export const useProjectStore = create<ProjectState>()(
         set((state) => {
           const recentProjects = state.recentProjects.filter((item) => item.id !== projectId);
           if (state.project?.id === projectId) {
-            return { recentProjects, project: null, autosavedAt: null, dirty: false };
+            return {
+              recentProjects,
+              project: null,
+              autosavedAt: null,
+              dirty: false,
+              lastProjectId: null,
+            };
           }
-          return { recentProjects };
+          const lastProjectId =
+            state.lastProjectId === projectId ? null : state.lastProjectId;
+          return { recentProjects, lastProjectId };
         });
       },
 
@@ -465,7 +562,10 @@ export const useProjectStore = create<ProjectState>()(
     {
       name: "tafseer.projects.v1",
       version: 2,
-      partialize: (state) => ({ recentProjects: state.recentProjects }),
+      partialize: (state) => ({
+        recentProjects: state.recentProjects,
+        lastProjectId: state.lastProjectId,
+      }),
       // A version bump used to make zustand discard the whole payload (losing
       // Recent Lectures). Revalidate it instead so old v1 data survives.
       migrate: (persisted) => {
@@ -473,9 +573,15 @@ export const useProjectStore = create<ProjectState>()(
         return { recentProjects: normalizeRecentProjects(incoming?.recentProjects) };
       },
       merge: (persisted, current) => {
-        const incoming = persisted as { recentProjects?: unknown } | undefined;
+        const incoming = persisted as {
+          recentProjects?: unknown;
+          lastProjectId?: unknown;
+        } | undefined;
+        const lastProjectId =
+          typeof incoming?.lastProjectId === "string" ? incoming.lastProjectId : null;
         return {
           ...current,
+          lastProjectId,
           recentProjects: Array.isArray(incoming?.recentProjects)
             ? normalizeRecentProjects(incoming.recentProjects)
             : current.recentProjects,
@@ -486,8 +592,11 @@ export const useProjectStore = create<ProjectState>()(
 );
 
 /**
- * Debounced `.tafseer` auto-save. Every project mutation restarts the timer;
- * the interval comes from Settings -> Storage (0 disables auto-save).
+ * Debounced `.tafseer` auto-save with a max-wait: a mutation stream restarts
+ * the timer, but if the last successful save is older than the interval the
+ * save fires immediately, so continuous typing or trim-dragging cannot postpone
+ * the journal write indefinitely. The interval comes from Settings -> Storage
+ * (0 disables auto-save).
  */
 export function startProjectAutosave(): () => void {
   let timer: number | undefined;
@@ -498,9 +607,14 @@ export function startProjectAutosave(): () => void {
     window.clearTimeout(timer);
     const interval = useSettingsStore.getState().storage.autosaveIntervalMs;
     if (!interval || interval <= 0) return;
+    // Reading `autosavedAt` from the store (instead of a closure) keeps the
+    // throttle honest even when another path called `autosave()` directly.
+    const savedAt = useProjectStore.getState().autosavedAt;
+    const sinceLast = savedAt ? Date.now() - savedAt : interval;
+    const wait = Math.max(0, interval - sinceLast);
     timer = window.setTimeout(() => {
       useProjectStore.getState().autosave();
-    }, interval);
+    }, wait);
   };
 
   const unsubscribeProject = useProjectStore.subscribe((state) => {
