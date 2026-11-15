@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   Cpu,
   Crop,
   FileVideo2,
@@ -20,11 +21,17 @@ import {
 } from "lucide-react";
 
 import { encodingAvailabilityText } from "@/components/GpuAcceleration";
+import { InlineError } from "@/components/InlineError";
 import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { TimeFlow } from "@/components/TimeFlow";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
@@ -38,6 +45,7 @@ import {
   resolveClipFileName,
 } from "@/lib/filenameTemplate";
 import { describeAcceleration, isGpuEncodingAvailable } from "@/lib/acceleration";
+import { openDirectory, openPathInShell } from "@/lib/media";
 import type { FramingMode, ProjectClip, Resolution } from "@/lib/projectTypes";
 import { FRAMING_LABELS } from "@/lib/projectTypes";
 import { resolveAssStyles, stylesOverlap } from "@/lib/subtitleStyles";
@@ -59,7 +67,7 @@ function statusVariant(status: ClipStatus): "secondary" | "outline" | "default" 
 function statusLabel(status: ClipStatus): string {
   if (status === "done") return "Rendered";
   if (status === "error") return "Failed";
-  if (status === "rendering") return "Encoding";
+  if (status === "rendering") return "Rendering";
   if (status === "cancelled") return "Cancelled";
   return "Queued";
 }
@@ -165,6 +173,18 @@ export function Step4Export() {
     } catch {
       toast.error("Could not copy the path");
     }
+  };
+
+  const chooseOutputFolder = async () => {
+    const folder = await openDirectory("Choose the output folder");
+    if (folder) updateExportSettings({ outputDir: folder });
+  };
+
+  const openOutputFolder = async () => {
+    const path = sidecarOutputDir ?? resolvedOutputDir;
+    if (!path) return;
+    const opened = await openPathInShell(path);
+    if (!opened) await copyOutputPath();
   };
 
   /* ------------------------------ totals ------------------------------ */
@@ -308,7 +328,7 @@ export function Step4Export() {
               aria-label="Batch render progress"
             />
             {job.message ? (
-              <p className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-relaxed text-status-warning">
+              <p className="mt-1.5 flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
                 <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                 {job.message}
               </p>
@@ -355,7 +375,7 @@ export function Step4Export() {
                           </span>
                           <span className="flex items-center gap-1">
                             <Type className="size-3" />
-                            {cues} cue{cues === 1 ? "" : "s"}
+                            {cues} line{cues === 1 ? "" : "s"}
                           </span>
                           <span className="flex items-center gap-1">
                             <MonitorPlay className="size-3" />
@@ -461,8 +481,8 @@ export function Step4Export() {
               <div className="flex items-start justify-between gap-3 rounded-md border border-border bg-card/40 px-3 py-2.5">
                 <div className="space-y-0.5">
                   <p className="text-xs font-medium text-foreground">Also export .SRT</p>
-                  <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    Writes a subtitle sidecar next to every MP4.
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    Also saves a separate .SRT file next to each video.
                   </p>
                 </div>
                 <Checkbox
@@ -478,11 +498,11 @@ export function Step4Export() {
                     <Cpu className="size-3.5" />
                     Hardware encoding (GPU)
                   </p>
-                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  <p className="text-xs leading-relaxed text-muted-foreground">
                     {encodingAvailabilityText(acceleration)}
                     {encodingAvailable
-                      ? " — falls back to CPU encoding automatically if the driver refuses."
-                      : " — encoding runs on the CPU. Enable GPU acceleration in Settings."}
+                      ? " — if it isn't available, we render on the CPU instead."
+                      : " — rendering runs on the CPU. Turn on GPU acceleration in Settings."}
                   </p>
                 </div>
                 <Switch
@@ -506,7 +526,7 @@ export function Step4Export() {
                     <span className="text-[10px] text-muted-foreground">Windows-safe</span>
                   </TooltipTrigger>
                   <TooltipContent side="left" className="max-w-56 text-xs">
-                    Invalid characters are replaced with underscores, exactly like the sidecar does.
+                    Invalid characters are replaced with underscores automatically.
                   </TooltipContent>
                 </Tooltip>
               </div>
@@ -559,17 +579,27 @@ export function Step4Export() {
               <Label htmlFor="output-dir" className="text-[13px] font-medium text-foreground">
                 Output folder
               </Label>
-              <Input
-                id="output-dir"
-                value={outputDir ?? ""}
-                onChange={(event) =>
-                  updateExportSettings({ outputDir: event.target.value || null })
-                }
-                placeholder={resolvedOutputDir || "Choose a folder"}
-                spellCheck={false}
-                className="font-mono text-xs"
-              />
-              <p className="text-[10px] leading-relaxed text-muted-foreground">
+              <div className="flex items-center gap-2">
+                <Input
+                  id="output-dir"
+                  value={outputDir ?? ""}
+                  onChange={(event) =>
+                    updateExportSettings({ outputDir: event.target.value || null })
+                  }
+                  placeholder={resolvedOutputDir || "Choose a folder"}
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => void chooseOutputFolder()}
+                >
+                  Browse…
+                </Button>
+              </div>
+              <p className="text-xs leading-relaxed text-muted-foreground">
                 {outputDir?.trim()
                   ? "Files are written to this folder."
                   : "Empty — files go to the exports folder next to the lecture."}
@@ -578,32 +608,38 @@ export function Step4Export() {
 
             <Separator />
 
-            <div className="space-y-2 rounded-md border border-border bg-card/40 px-3 py-2.5">
-              <p className="flex items-center gap-1.5 text-xs font-medium text-foreground">
-                <Type className="size-3.5" />
-                Burned-in subtitle styles
-              </p>
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] tabular-nums text-muted-foreground">
-                <dt>Arabic</dt>
-                <dd className="truncate text-foreground/80">
-                  {styles.arabic.font} · {styles.arabic.size}px · margin V {styles.arabic.marginV}
-                </dd>
-                <dt>Thai</dt>
-                <dd className="truncate text-foreground/80">
-                  {styles.thai.font} · {styles.thai.size}px · margin V {styles.thai.marginV}
-                </dd>
-              </dl>
-              {overlap.overlaps ? (
-                <p className="flex items-start gap-1.5 text-[10px] leading-relaxed text-status-warning">
-                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                  The two lines overlap by {Math.abs(Math.round(overlap.gap))} px at this font size.
-                  Reduce the font size or the Harakat padding in Settings → Fonts.
-                </p>
-              ) : null}
-            </div>
+            <Collapsible className="rounded-md border border-border bg-card/40">
+              <CollapsibleTrigger className="group flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left">
+                <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+                  <Type className="size-3.5" />
+                  Burned-in subtitle styles
+                </span>
+                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+              </CollapsibleTrigger>
+              <CollapsibleContent className="space-y-1.5 px-3 pb-2.5">
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] tabular-nums text-muted-foreground">
+                  <dt>Arabic</dt>
+                  <dd className="truncate text-foreground/80">
+                    {styles.arabic.font} · {styles.arabic.size}px · bottom margin{" "}
+                    {styles.arabic.marginV}
+                  </dd>
+                  <dt>Thai</dt>
+                  <dd className="truncate text-foreground/80">
+                    {styles.thai.font} · {styles.thai.size}px · bottom margin {styles.thai.marginV}
+                  </dd>
+                </dl>
+                {overlap.overlaps ? (
+                  <p className="flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
+                    <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                    The two lines overlap by {Math.abs(Math.round(overlap.gap))} px at this font
+                    size. Reduce the font size or the Harakat padding in Settings → Fonts.
+                  </p>
+                ) : null}
+              </CollapsibleContent>
+            </Collapsible>
 
             {clipsWithoutSubtitles > 0 ? (
-              <div className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-2.5 py-2 text-[11px] leading-relaxed text-status-warning">
+              <div className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-2.5 py-2 text-xs leading-relaxed text-status-warning">
                 <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                 <span>
                   {clipsWithoutSubtitles} approved clip
@@ -614,10 +650,9 @@ export function Step4Export() {
             ) : null}
 
             {sidecar.status === "offline" ? (
-              <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] leading-relaxed text-destructive">
-                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                <div className="flex-1 space-y-1">
-                  <p>{sidecar.error ?? "The sidecar is offline."}</p>
+              <InlineError
+                title="The processing engine isn't responding."
+                action={
                   <Button
                     variant="ghost"
                     size="xs"
@@ -626,8 +661,10 @@ export function Step4Export() {
                   >
                     Retry
                   </Button>
-                </div>
-              </div>
+                }
+              >
+                Rendering needs the engine. Retry, or restart the app if this keeps happening.
+              </InlineError>
             ) : null}
           </div>
 
@@ -645,9 +682,9 @@ export function Step4Export() {
             )}
             <p className="text-center text-[10px] text-muted-foreground">
               {running
-                ? "Encoding with FFmpeg inside the sidecar…"
-                : `Burned-in subtitles, ${exportSrt ? ".SRT sidecar, " : ""}${
-                    useNvenc && encodingAvailable ? "GPU encoding" : "CPU encoding"
+                ? "Rendering your clips…"
+                : `Burned-in subtitles, ${exportSrt ? ".SRT file, " : ""}${
+                    useNvenc && encodingAvailable ? "GPU rendering" : "CPU rendering"
                   }.`}
             </p>
           </div>
@@ -672,14 +709,22 @@ export function Step4Export() {
             <>
               <FolderOpen className="size-3.5 shrink-0" />
               {/* The sidecar's `output_dir` (SSE `start`/`done`) is the truth;
-                  the local default is labelled as a fallback. */}
+                  the local default is only a preview. */}
               <span className="min-w-0 flex-1 truncate">
                 {sidecarOutputDir
-                  ? `${sidecarOutputDir} (from the sidecar)`
+                  ? `Saving to: ${sidecarOutputDir}`
                   : resolvedOutputDir
-                    ? `${resolvedOutputDir} (defaults to)`
-                    : "Output folder decided by the sidecar at render time"}
+                    ? `Saving to: ${resolvedOutputDir}`
+                    : "The output folder is chosen when rendering starts."}
               </span>
+              <Button
+                variant="ghost"
+                size="xs"
+                disabled={!sidecarOutputDir && !resolvedOutputDir}
+                onClick={() => void openOutputFolder()}
+              >
+                Open folder
+              </Button>
               <Button
                 variant="ghost"
                 size="xs"

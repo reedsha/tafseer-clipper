@@ -9,7 +9,6 @@ import {
 import NumberFlow from "@number-flow/react";
 import { toast } from "sonner";
 import {
-  AlertTriangle,
   ArrowRight,
   Captions,
   Check,
@@ -33,6 +32,7 @@ import {
 import { cn } from "cn";
 
 import { TimeFlow } from "@/components/TimeFlow";
+import { InlineError } from "@/components/InlineError";
 import { VideoPlayer, type VideoPlayerHandle } from "@/components/VideoPlayer";
 import { WaveformBar } from "@/components/WaveformBar";
 import { Badge } from "@/components/ui/badge";
@@ -163,7 +163,7 @@ function ClipCard({
           {clip.approved ? <Check className="mt-0.5 size-4 shrink-0 text-foreground/80" /> : null}
         </div>
         {clip.rationale ? (
-          <p className="mt-1.5 line-clamp-2 pl-7 text-[11px] leading-relaxed text-muted-foreground">
+          <p className="mt-1.5 line-clamp-2 pl-7 text-xs leading-relaxed text-muted-foreground">
             {clip.rationale}
           </p>
         ) : null}
@@ -405,9 +405,9 @@ export function Step2Discovery() {
     if (!current.transcript || current.transcript.segments.length === 0) {
       // Whisper may legitimately return no segments for silent audio; searching
       // an empty transcript would only burn an LLM call and confuse the editor.
-      toast.error("Whisper found no speech", {
+      toast.error("No speech detected", {
         description:
-          "The transcript has no segments, so there is nothing to search. Re-transcribe the lecture on Step 1 or check the audio.",
+          "We couldn't find any speech in this lecture. Check the audio, then transcribe again on Step 1.",
       });
       return;
     }
@@ -467,18 +467,18 @@ export function Step2Discovery() {
       useProjectStore.getState().setClips(merged);
       if (note.trim()) setRefinement("");
 
-      toast.success(mode === "reroll" ? "Re-roll complete" : "Clip proposals ready", {
+      toast.success(mode === "reroll" ? "More clips found" : "Clip proposals ready", {
         description: `${proposals.length} new clip${proposals.length === 1 ? "" : "s"}${
           result.excluded_ranges_applied > 0
-            ? ` · ${result.excluded_ranges_applied} approved interval${
-                result.excluded_ranges_applied === 1 ? "" : "s"
-              } locked`
+            ? ` — ${result.excluded_ranges_applied} approved clip${
+                result.excluded_ranges_applied === 1 ? " was" : "s were"
+              } kept`
             : ""
-        } · ${result.model}`,
+        }`,
       });
       if (proposals.length === 0) {
         toast("No new clips", {
-          description: "Add a refinement note and re-run on the unapproved parts.",
+          description: "Add a note about what to look for and search again.",
         });
       }
       setStatus("idle");
@@ -702,7 +702,7 @@ export function Step2Discovery() {
       <StepEmptyState
         icon={FileAudio}
         title="Transcript missing"
-        description="This project has no transcript yet. Upload the lecture on Step 1 so the sidecar can extract audio and run Whisper first."
+        description="Add the lecture on Step 1 first — we'll transcribe it and then find clips."
         action={<Button onClick={() => setStep(1)}>Back to upload</Button>}
       />
     );
@@ -713,7 +713,7 @@ export function Step2Discovery() {
       <header className="flex shrink-0 flex-wrap items-end justify-between gap-3 border-b border-border px-4 py-3">
         <div className="min-w-0 space-y-0.5">
           <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-            Step 2 of 4 · Keep &amp; re-roll
+            Step 2 of 4 · Review &amp; find more
           </p>
           <div className="flex min-w-0 items-baseline gap-2">
             <h1 className="text-base font-medium text-foreground">Find clips</h1>
@@ -757,12 +757,11 @@ export function Step2Discovery() {
 
           <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
             {error ? (
-              <div className="mb-2 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] leading-relaxed text-destructive">
-                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                <div className="min-w-0 flex-1 space-y-1">
-                  <p className="font-medium">Discovery failed</p>
-                  <p className="break-words">{error}</p>
-                  <div className="flex flex-wrap gap-1.5 pt-0.5">
+              <InlineError
+                className="mb-2"
+                title="Clip finding failed"
+                action={
+                  <>
                     <Button variant="outline" size="xs" onClick={handleRetry}>
                       Retry
                     </Button>
@@ -774,15 +773,17 @@ export function Step2Discovery() {
                     >
                       Re-transcribe
                     </Button>
-                  </div>
-                </div>
-              </div>
+                  </>
+                }
+              >
+                {error}
+              </InlineError>
             ) : null}
 
             {status === "running" && clips.length > 0 ? (
               <p className="mb-2 flex items-center gap-1.5 text-[10px] text-muted-foreground">
                 <Loader2 className="size-3 animate-spin" />
-                Searching the unclaimed segments…
+                Looking for more moments…
               </p>
             ) : null}
 
@@ -795,16 +796,16 @@ export function Step2Discovery() {
                   />
                 ))}
                 <p className="pt-1 text-center text-[11px] text-muted-foreground">
-                  Searching the transcript for self-contained moments…
+                  Reading the transcript for self-contained moments…
                 </p>
               </div>
             ) : clips.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
                 <ListVideo className="size-5 text-muted-foreground" />
                 <p className="text-xs font-medium text-foreground">No clips proposed yet</p>
-                <p className="text-[11px] leading-relaxed text-muted-foreground">
-                  Run discovery to let the reasoning model search the transcript, or add a
-                  refinement note and try again.
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Let the AI search the transcript for moments — or add a note about what to look
+                  for and try again.
                 </p>
                 <Button
                   variant="outline"
@@ -843,9 +844,9 @@ export function Step2Discovery() {
           <div className="shrink-0 space-y-2 border-t border-border bg-card/20 px-3 py-3">
             <div className="flex items-center justify-between gap-2">
               <Label htmlFor="refinement-note" className="text-[11px] font-medium text-foreground/90">
-                Refinement note
+                What to look for next
               </Label>
-              <span className="text-[10px] text-muted-foreground">applies to the next search</span>
+              <span className="text-[10px] text-muted-foreground">used in the next search</span>
             </div>
             <Textarea
               id="refinement-note"
@@ -870,16 +871,16 @@ export function Step2Discovery() {
                 <RefreshCw className="size-3.5" />
               )}
               {status === "running"
-                ? "Searching unclaimed segments…"
+                ? "Looking for more moments…"
                 : approvedCount > 0
-                  ? "Re-run AI on unapproved parts"
+                  ? "Find more clips (keeps approved)"
                   : "Find clips"}
             </Button>
             <div className="flex items-center justify-between gap-2">
               <p className="text-[10px] leading-relaxed text-muted-foreground">
                 {approvedCount > 0
-                  ? `${approvedCount} approved interval${approvedCount === 1 ? "" : "s"} locked out of the next search.`
-                  : "Approve clips to lock them out of the next re-roll."}
+                  ? `${approvedCount} approved clip${approvedCount === 1 ? "" : "s"} will be kept in the next search.`
+                  : "Approve clips to keep them out of the next search."}
               </p>
               {status === "running" ? (
                 <Button

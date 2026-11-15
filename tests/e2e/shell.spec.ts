@@ -10,7 +10,7 @@ test.describe("app shell", () => {
   test("loads the header, stepper and a live sidecar", async ({ page }) => {
     await page.goto("/");
 
-    await expect(page.getByRole("heading", { name: "Ingest a lecture" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Add your lecture" })).toBeVisible();
 
     const stepper = page.getByRole("navigation", { name: "Wizard steps" });
     await expect(stepper).toBeVisible();
@@ -21,7 +21,7 @@ test.describe("app shell", () => {
     );
 
     // /health is real: the LED flips to online once the sidecar answers.
-    await expect(page.getByRole("button", { name: "Sidecar online" })).toBeVisible({
+    await expect(page.getByRole("button", { name: "Engine ready" })).toBeVisible({
       timeout: 30_000,
     });
   });
@@ -39,9 +39,9 @@ test.describe("app shell", () => {
 
     await expect(page.getByRole("tab")).toHaveCount(5);
     for (const name of [
-      "AI Providers",
+      "AI",
       "Fonts & Style",
-      "Glossary & Whisper",
+      "Glossary & transcription",
       "Editor & Export",
       "Storage & Backup",
     ]) {
@@ -64,7 +64,7 @@ test.describe("app shell", () => {
 
   test("Ctrl+K opens and closes the command palette", async ({ page }) => {
     await page.goto("/");
-    await expect(page.getByRole("button", { name: "Sidecar online" })).toBeVisible({
+    await expect(page.getByRole("button", { name: "Engine ready" })).toBeVisible({
       timeout: 30_000,
     });
 
@@ -87,7 +87,7 @@ test.describe("app shell", () => {
     await expect(
       page.getByRole("button", { name: "Drop a lecture video or browse" }),
     ).toBeVisible();
-    await expect(page.getByText(/~1\.5 GB/)).toBeVisible();
+    await expect(page.getByText(/1\.5 GB/)).toBeVisible();
 
     // The hint names GPU/CPU capability only — never a product line, and the
     // CPU fallback is always stated. Either the GPU is ready or the CPU path
@@ -103,7 +103,7 @@ test.describe("app shell", () => {
     await page.goto("/");
 
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Glossary & Whisper" }).click();
+    await page.getByRole("tab", { name: "Glossary & transcription" }).click();
 
     await expect(page.getByRole("heading", { name: "GPU acceleration" })).toBeVisible();
     // Browser builds cannot download the pack: the section must say so instead
@@ -114,5 +114,18 @@ test.describe("app shell", () => {
     // Product-line wording is banned from the rendered app (AGENTS.md §3).
     const bodyText = await page.locator("body").innerText();
     expect(bodyText).not.toMatch(/GTX|RTX|NVIDIA NVENC|4–6 GB|4-6 GB/);
+  });
+
+  test("interface language switches the add-lecture screen to Thai", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Add your lecture" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Open settings" }).click();
+    await page.getByRole("tab", { name: "Editor & Export" }).click();
+    await page.getByRole("combobox", { name: "Language", exact: true }).click();
+    await page.getByRole("option", { name: "ไทย" }).click();
+    await page.getByRole("button", { name: "Close settings" }).click();
+
+    await expect(page.getByRole("heading", { name: "เพิ่มบทบรรยายของคุณ" })).toBeVisible();
   });
 });

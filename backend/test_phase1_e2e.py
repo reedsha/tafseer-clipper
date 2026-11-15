@@ -533,6 +533,31 @@ def run_http_checks(
             f"reason={accel_report.get('reason')}",
         )
 
+        # Additive provider detection: shape only, a machine may or may not run
+        # Ollama. `detected` must agree with the URL/models it reports.
+        providers = health.get("providers") or {}
+        ollama = providers.get("ollama") if isinstance(providers, dict) else None
+        ollama_ok = (
+            isinstance(ollama, dict)
+            and isinstance(ollama.get("detected"), bool)
+            and (ollama.get("url") is None or isinstance(ollama.get("url"), str))
+            and isinstance(ollama.get("models"), list)
+            and all(isinstance(name, str) for name in ollama.get("models", []))
+            and (ollama.get("detected") is True or ollama.get("models") == [])
+        )
+        check(
+            "GET /health: providers block reports Ollama detection",
+            ollama_ok,
+            f"ollama={ollama}",
+        )
+
+        hardware = health.get("hardware") or {}
+        check(
+            "GET /health: hardware tier is a known value",
+            isinstance(hardware, dict) and hardware.get("tier") in {"high", "medium", "low"},
+            f"hardware={hardware}",
+        )
+
         # ---- 2. /fonts/import ---------------------------------------------- #
         with thai_font.open("rb") as thai_handle, arabic_font.open("rb") as arabic_handle:
             response = client.post(

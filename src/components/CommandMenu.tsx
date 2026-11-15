@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import NumberFlow from "@number-flow/react";
 import { toast } from "sonner";
 import {
   Activity,
@@ -28,9 +27,7 @@ import {
   CommandSeparator,
   CommandShortcut,
 } from "@/components/ui/command";
-import { SIDECAR_URL } from "@/lib/api";
-import { describeAcceleration } from "@/lib/acceleration";
-import { openProjectFile, saveProjectFile, suggestProjectFileName } from "@/lib/projectFile";
+import { describeAcceleration } from "@/lib/acceleration";import { openProjectFile, saveProjectFile, suggestProjectFileName } from "@/lib/projectFile";
 import { STEP_LABELS, type Resolution, type WizardStep } from "@/lib/projectTypes";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore } from "@/store/settingsStore";
@@ -39,9 +36,9 @@ import { useUiStore, type SettingsTab } from "@/store/uiStore";
 const STEPS: WizardStep[] = [1, 2, 3, 4];
 
 const SETTINGS_ENTRIES: { tab: SettingsTab; label: string; icon: typeof Bot }[] = [
-  { tab: "providers", label: "AI providers & models", icon: Bot },
+  { tab: "providers", label: "AI setup & models", icon: Bot },
   { tab: "fonts", label: "Fonts & dual-line style presets", icon: Type },
-  { tab: "glossary", label: "Thai–Arabic glossary, Whisper & GPU", icon: Languages },
+  { tab: "glossary", label: "Glossary, transcription & GPU", icon: Languages },
   { tab: "editor", label: "Editor & export defaults", icon: SlidersHorizontal },
   { tab: "storage", label: "Storage, auto-save & backup", icon: HardDrive },
 ];
@@ -119,32 +116,12 @@ export function CommandMenu() {
     const sidecar = useSettingsStore.getState().sidecar;
     if (sidecar.status === "online" && sidecar.health) {
       const acceleration = describeAcceleration(sidecar.health);
-      toast.success("Sidecar online", {
-        description: (
-          <span className="flex flex-col gap-0.5">
-            <span className="inline-flex items-baseline gap-1">
-              <span>v{sidecar.health.version} ·</span>
-              <span>{acceleration.label}</span>
-            </span>
-            {acceleration.gpuName ? (
-              <span className="text-muted-foreground">Detected: {acceleration.gpuName}</span>
-            ) : null}
-            {acceleration.gpuDetected ? (
-              <span className="inline-flex items-baseline gap-1">
-                <span>GPU memory:</span>
-                <NumberFlow
-                  value={sidecar.health.vram_mb}
-                  suffix=" MB"
-                  format={{ maximumFractionDigits: 0 }}
-                />
-              </span>
-            ) : null}
-          </span>
-        ),
+      toast.success("Everything is running", {
+        description: `Transcription: ${acceleration.transcription === "gpu" ? "GPU" : "CPU"}`,
       });
     } else {
-      toast.error("Sidecar offline", {
-        description: sidecar.error ?? `Start backend.exe on ${SIDECAR_URL}.`,
+      toast.error("The processing engine isn't responding", {
+        description: sidecar.error ?? "Click Retry, or restart the app.",
       });
     }
   }
@@ -271,16 +248,16 @@ export function CommandMenu() {
             onSelect={() => run(() => updateWhisper({ autoUnload: !whisper.autoUnload }))}
           >
             <Gauge />
-            Unload Whisper from GPU memory: {whisper.autoUnload ? "on" : "off"}
+            Unload from GPU memory after transcription: {whisper.autoUnload ? "on" : "off"}
           </CommandItem>
         </CommandGroup>
 
         <CommandSeparator />
 
-        <CommandGroup heading="Sidecar">
+        <CommandGroup heading="App status">
           <CommandItem value="health sidecar status" onSelect={() => run(handleHealthCheck)}>
             <Activity />
-            Check sidecar health
+            Check that everything is running
           </CommandItem>
         </CommandGroup>
       </CommandList>

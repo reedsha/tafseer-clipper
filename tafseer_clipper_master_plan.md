@@ -120,7 +120,7 @@ All power-user configurations live inside a clean tabbed Settings modal/drawer:
 ## 6. Technical Specifications & Backend Contracts
 
 ### A. FastAPI Sidecar Endpoints (`localhost:8008`)
-1. `GET /health` — Confirms sidecar readiness and reports hardware capability: `acceleration` (`transcription: gpu|cpu`, `encoding: gpu|cpu`, `gpu_detected`, `gpu_name`, `cuda_runtime`, `pack_installed`, `reason`), plus CUDA/NVENC/VRAM details.
+1. `GET /health` — Confirms sidecar readiness and reports hardware capability: `acceleration` (`transcription: gpu|cpu`, `encoding: gpu|cpu`, `gpu_detected`, `gpu_name`, `cuda_runtime`, `pack_installed`, `reason`), plus CUDA/NVENC/VRAM details. It also carries additive, backward-compatible `providers` (`ollama: { detected, url, models[] }`) and `hardware: { tier: high|medium|low }` blocks so the UI can offer one-click local AI setup with an honest, vendor-neutral capability verdict. This is response enrichment of an existing endpoint — it does **not** add a seventh endpoint.
 2. `POST /extract-and-transcribe` — Extracts 16kHz WAV via FFmpeg, runs `faster-whisper` (GPU when available, CPU fallback otherwise) or Cloud STT, applies the Thai–Arabic Spelling Glossary, and unloads the Whisper model from GPU memory if enabled.
 3. `POST /discover-clips` — Sends transcript + `base_prompt` + `session_guide` + `refinement_note` + `excluded_ranges` to Unified Cloud API or Ollama; returns structured JSON clip proposals.
 4. `POST /verify-arabic` — Sends an Arabic subtitle line + surrounding Thai context to the Fast Text LLM to verify Uthmani Quranic/Hadith spelling.

@@ -28,7 +28,8 @@ import {
 import { cn } from "cn";
 
 import { GpuAccelerationPanel, GpuStatusLine } from "@/components/GpuAcceleration";
-import { SidecarStatusDot } from "@/components/SidecarStatusDot";
+import { FitBadge } from "@/components/FitBadge";
+import { SidecarStatusDot, SIDECAR_STATUS_LABEL } from "@/components/SidecarStatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -54,7 +55,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { importFonts, SIDECAR_URL, verifyArabic } from "@/lib/api";
+import { importFonts, verifyArabic } from "@/lib/api";
 import { describeAcceleration, isGpuEncodingAvailable } from "@/lib/acceleration";
 import { buildDiagnostics, copyText } from "@/lib/diagnostics";
 import {
@@ -64,9 +65,19 @@ import {
 } from "@/lib/filenameTemplate";
 import { formatBytes } from "@/lib/format";
 import { loadImportedFonts } from "@/lib/fonts";
-import { isTauriRuntime, openDirectory } from "@/lib/media";
+import type { HardwareTier } from "@/lib/api";
+import { isTauriRuntime, openDirectory, openExternalUrl } from "@/lib/media";
 import type { Resolution } from "@/lib/projectTypes";
-import { buildProviderFor, describeProviderGap } from "@/lib/providers";
+import {
+  buildProviderFor,
+  CLOUD_MODEL_OPTIONS,
+  CLOUD_PRESETS,
+  describeProviderGap,
+  fitSentence,
+  matchCloudPreset,
+  recommendLocalModel,
+  whisperModelLabel,
+} from "@/lib/providers";
 import { coerceToRange, NUMERIC_LIMITS } from "@/lib/settingsLimits";
 import { estimateThaiLineFit } from "@/lib/subtitleWidth";
 import {
@@ -85,6 +96,7 @@ import {
   type EngineMode,
   type StylePreset,
   type ThaiStyle,
+  type UiLanguage,
 } from "@/store/settingsStore";
 import type { SettingsTab } from "@/store/uiStore";
 import { useUiStore } from "@/store/uiStore";
@@ -392,6 +404,62 @@ function LineWidthHint({
   );
 }
 
+/**
+ * Tier-first model chooser: the curated labels lead with plain-language quality
+ * tiers and keep the codename visible, with a free-text escape hatch for any
+ * OpenAI-compatible service.
+ */
+function ModelPicker({
+  value,
+  onChange,
+  label,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  label: string;
+}) {
+  const known = CLOUD_MODEL_OPTIONS.some((option) => option.value === value);
+  const [custom, setCustom] = useState(!known);
+
+  return (
+    <div className="space-y-1.5">
+      <Select
+        value={custom ? "custom" : value}
+        onValueChange={(next) => {
+          if (next === "custom") {
+            setCustom(true);
+            return;
+          }
+          setCustom(false);
+          onChange(next);
+        }}
+      >
+        <SelectTrigger className="w-full" aria-label={label}>
+          <SelectValue placeholder="Choose a model" />
+        </SelectTrigger>
+        <SelectContent>
+          {CLOUD_MODEL_OPTIONS.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+          <SelectItem value="custom">Custom model name…</SelectItem>
+        </SelectContent>
+      </Select>
+      {custom ? (
+        <Input
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="Paste the model name from your AI service"
+          aria-label={`${label} (custom)`}
+          spellCheck={false}
+          className="text-xs"
+        />
+      ) : null}
+    </div>
+  );
+}
+
 /** Marks a provider block the current engine routing does (not) call. */
 function UsageBadge({ active }: { active: boolean }) {
   return active ? (
@@ -410,9 +478,9 @@ function UsageBadge({ active }: { active: boolean }) {
 /* -------------------------------------------------------------------------- */
 
 const TABS: { value: SettingsTab; label: string; icon: LucideIcon }[] = [
-  { value: "providers", label: "AI Providers", icon: Bot },
+  { value: "providers", label: "AI", icon: Bot },
   { value: "fonts", label: "Fonts & Style", icon: Type },
-  { value: "glossary", label: "Glossary & Whisper", icon: Languages },
+  { value: "glossary", label: "Glossary & transcription", icon: Languages },
   { value: "editor", label: "Editor & Export", icon: SlidersHorizontal },
   { value: "storage", label: "Storage & Backup", icon: HardDrive },
 ];
@@ -455,13 +523,22 @@ const SHORTCUTS = [
 
 /** Named sidecar models, plus a Custom escape hatch for anything else. */
 const WHISPER_MODELS = [
-  { value: "large-v3-turbo", label: "large-v3-turbo · recommended" },
-  { value: "large-v3", label: "large-v3 · most accurate" },
-  { value: "medium", label: "medium" },
-  { value: "small", label: "small" },
-  { value: "base", label: "base" },
-  { value: "tiny", label: "tiny · fastest" },
+  { value: "large-v3-turbo", label: whisperModelLabel("large-v3-turbo") },
+  { value: "large-v3", label: whisperModelLabel("large-v3") },
+  { value: "medium", label: whisperModelLabel("medium") },
+  { value: "small", label: whisperModelLabel("small") },
+  { value: "base", label: whisperModelLabel("base") },
+  { value: "tiny", label: whisperModelLabel("tiny") },
 ];
+
+/** Honest speed hint for the local transcription model on this machine. */
+function whisperFitSentence(tier: HardwareTier | undefined): string {
+  if (tier === "high") return "Best quality runs comfortably on this computer.";
+  if (tier === "medium") {
+    return "Best quality will be slower here — Balanced is a good fit.";
+  }
+  return "Use Fastest here; the better models will be slow.";
+}
 
 /** True when every Arabic/Thai field still equals the saved preset. */
 function presetMatchesStyle(
@@ -630,8 +707,10 @@ export function SettingsDrawer() {
     importedFonts,
     fontsDir,
     sidecar,
+    uiLanguage,
     setTranscriptionMode,
     setAnalysisMode,
+    setUiLanguage,
     updateCloud,
     updateOllama,
     updateCloudStt,
@@ -717,6 +796,12 @@ export function SettingsDrawer() {
   const ollamaIncomplete = !ollama.model.trim();
 
   const health = sidecar.health;
+  const hardwareTier: HardwareTier | undefined = health?.hardware?.tier;
+  const ollamaStatus = health?.providers?.ollama;
+  const ollamaDetected = ollamaStatus?.detected === true;
+  const ollamaModels = ollamaStatus?.models ?? [];
+  const recommendedLocal = recommendLocalModel(hardwareTier);
+  const cloudPresetId = matchCloudPreset(cloud.baseUrl);
   /** Vendor-neutral acceleration state derived from GET /health. */
   const acceleration = describeAcceleration(health);
 
@@ -753,16 +838,16 @@ export function SettingsDrawer() {
       await refreshHealth();
       const current = useSettingsStore.getState();
       if (current.sidecar.status !== "online" || !current.sidecar.health) {
-        toast.error("Sidecar unreachable", {
-          description: current.sidecar.error ?? `Start backend.exe on ${SIDECAR_URL}.`,
+        toast.error("The processing engine isn't responding", {
+          description: current.sidecar.error ?? "Click Retry, or restart the app.",
         });
         return;
       }
 
       const gap = describeProviderGap(current, "fast");
       if (gap) {
-        toast.error("Provider is not configured", {
-          description: `Add ${gap} below, then test again.`,
+        toast.error("The AI connection isn't set up yet", {
+          description: `Add ${gap} below, then check again.`,
         });
         return;
       }
@@ -776,18 +861,36 @@ export function SettingsDrawer() {
         { timeoutMs: 20_000 },
       );
 
-      toast.success("Provider reachable", {
+      toast.success("Connected", {
         description: `${result.model || "The model"} answered · ${
           result.correction_applied ? "correction applied" : "text unchanged"
         }`,
       });
     } catch (error) {
-      toast.error("Provider check failed", {
+      toast.error("Connection check failed", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
       setTestingConnection(false);
     }
+  }
+
+  async function handleGetOllama() {
+    const opened = await openExternalUrl("https://ollama.com/download");
+    if (opened) return;
+    const copied = await copyText("https://ollama.com/download");
+    toast(copied ? "Download link copied" : "Open ollama.com/download", {
+      description: "Install Ollama, then use Check again.",
+    });
+  }
+
+  async function handleInstallLocalModel() {
+    const command = `ollama pull ${recommendedLocal.model}`;
+    const copied = await copyText(command);
+    toast(copied ? "Command copied" : command, {
+      description: "Paste it into a terminal, then use Check again.",
+    });
+    if (!ollamaDetected) void openExternalUrl("https://ollama.com/download");
   }
 
   async function handleSettingsImport(files: FileList | null) {
@@ -919,7 +1022,7 @@ export function SettingsDrawer() {
       const copied = await copyText(bundle);
       if (copied) {
         toast.success("Diagnostics copied", {
-          description: "Paste the JSON into the support report. No API keys are included.",
+          description: "Paste it into your support request. No API keys are included.",
         });
       } else {
         toast.error("Could not copy diagnostics", {
@@ -982,10 +1085,7 @@ export function SettingsDrawer() {
             {/* ------------------------------ Providers ------------------------------ */}
             <TabsContent value="providers" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
               <div className="space-y-5">
-                <Section
-                  title="Engine routing"
-                  description="All provider calls run inside the FastAPI sidecar. The frontend only sends configuration."
-                >
+                <Section title="Engine routing">
                   <Field label="Transcription engine">
                     <Select
                       value={transcriptionMode}
@@ -995,8 +1095,8 @@ export function SettingsDrawer() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="local">Local Faster-Whisper (on this machine)</SelectItem>
-                        <SelectItem value="cloud">Cloud STT API</SelectItem>
+                        <SelectItem value="local">This computer (offline)</SelectItem>
+                        <SelectItem value="cloud">Cloud speech-to-text</SelectItem>
                       </SelectContent>
                     </Select>
                   </Field>
@@ -1009,8 +1109,8 @@ export function SettingsDrawer() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="cloud">Unified cloud API</SelectItem>
-                        <SelectItem value="local">Local Ollama</SelectItem>
+                        <SelectItem value="cloud">Your AI account</SelectItem>
+                        <SelectItem value="local">This computer (Ollama)</SelectItem>
                       </SelectContent>
                     </Select>
                   </Field>
@@ -1019,20 +1119,42 @@ export function SettingsDrawer() {
                 <Separator />
 
                 <Section
-                  title="Unified cloud API"
-                  description="OpenAI-compatible endpoint used for Step 2 clip reasoning and Step 3 Arabic verification."
+                  title="Your AI account"
+                  description="Used for finding clips and checking the Arabic."
                   badge={<UsageBadge active={analysisMode === "cloud"} />}
                 >
-                  <Field label="Base URL">
-                    <Input
-                      value={cloud.baseUrl}
-                      onChange={(event) => updateCloud({ baseUrl: event.target.value })}
-                      placeholder="https://api.openai.com/v1"
-                      aria-label="Cloud API base URL"
-                      spellCheck={false}
-                      autoComplete="off"
-                    />
+                  <Field label="Service">
+                    <Select
+                      value={cloudPresetId}
+                      onValueChange={(value) => {
+                        const preset = CLOUD_PRESETS.find((item) => item.id === value);
+                        if (preset?.baseUrl) updateCloud({ baseUrl: preset.baseUrl });
+                      }}
+                    >
+                      <SelectTrigger className="w-full" aria-label="AI service">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {CLOUD_PRESETS.map((preset) => (
+                          <SelectItem key={preset.id} value={preset.id}>
+                            {preset.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </Field>
+                  {cloudPresetId === "custom" ? (
+                    <Field label="Server address">
+                      <Input
+                        value={cloud.baseUrl}
+                        onChange={(event) => updateCloud({ baseUrl: event.target.value })}
+                        placeholder="https://api.openai.com/v1"
+                        aria-label="Cloud API server address"
+                        spellCheck={false}
+                        autoComplete="off"
+                      />
+                    </Field>
+                  ) : null}
                   <Field label="API key">
                     {/* Chromium logs a password-manager warning for a
                         `type="password"` field outside a form; this one is
@@ -1047,30 +1169,24 @@ export function SettingsDrawer() {
                     </form>
                   </Field>
                   <div className="grid gap-3 sm:grid-cols-2">
-                    <Field label="Reasoning model (Step 2)">
-                      <Input
+                    <Field label="Model for finding clips">
+                      <ModelPicker
+                        label="Clip-finding model"
                         value={cloud.reasoningModel}
-                        onChange={(event) =>
-                          updateCloud({ reasoningModel: event.target.value })
-                        }
-                        placeholder="gpt-4.1 / qwen3:14b"
-                        aria-label="Reasoning model"
-                        spellCheck={false}
+                        onChange={(value) => updateCloud({ reasoningModel: value })}
                       />
                     </Field>
-                    <Field label="Fast text model (Step 3)">
-                      <Input
+                    <Field label="Model for checking Arabic">
+                      <ModelPicker
+                        label="Arabic-check model"
                         value={cloud.fastTextModel}
-                        onChange={(event) => updateCloud({ fastTextModel: event.target.value })}
-                        placeholder="gpt-4.1-mini / qwen3:4b"
-                        aria-label="Fast text model"
-                        spellCheck={false}
+                        onChange={(value) => updateCloud({ fastTextModel: value })}
                       />
                     </Field>
                   </div>
                   {analysisMode === "cloud" && providerGap ? (
                     <p className="text-[11px] leading-relaxed text-status-warning">
-                      Step 3 cannot run yet: add {providerGap}.
+                      The Arabic checker isn't set up yet: add {providerGap}.
                     </p>
                   ) : null}
                   <div className="flex flex-wrap items-center gap-2">
@@ -1089,10 +1205,10 @@ export function SettingsDrawer() {
                       Test connection
                     </Button>
                     <span className="text-[11px] text-muted-foreground">
-                      Pings the sidecar, then asks{" "}
+                      Checks the connection, then asks{" "}
                       {analysisMode === "local"
                         ? "your Ollama model"
-                        : "the unified cloud API"}{" "}
+                        : "your AI account"}{" "}
                       to verify one Arabic verse.
                     </span>
                   </div>
@@ -1101,54 +1217,127 @@ export function SettingsDrawer() {
                 <Separator />
 
                 <Section
-                  title="Local Ollama"
-                  description="OpenAI-compatible local runtime for offline clip discovery."
+                  title="This computer (Ollama)"
+                  description="Runs clip finding on this computer, offline."
                   badge={<UsageBadge active={analysisMode === "local"} />}
                 >
-                  <Field label="Ollama URL">
-                    <Input
-                      value={ollama.baseUrl}
-                      onChange={(event) => updateOllama({ baseUrl: event.target.value })}
-                      placeholder="http://localhost:11434/v1"
-                      aria-label="Ollama URL"
-                      spellCheck={false}
-                    />
-                  </Field>
-                  <Field label="Model id">
-                    <Input
-                      value={ollama.model}
-                      onChange={(event) => updateOllama({ model: event.target.value })}
-                      placeholder="qwen3:14b"
-                      aria-label="Ollama model id"
-                      spellCheck={false}
-                    />
-                  </Field>
-                  {analysisMode === "local" && ollamaIncomplete ? (
-                    <p className="text-[11px] leading-relaxed text-status-warning">
-                      Clip discovery will fail until you enter a model id.
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="outline" className="gap-1.5 text-[10px]">
+                      <span
+                        aria-hidden
+                        className={cn(
+                          "size-1.5 rounded-full",
+                          ollamaDetected ? "bg-status-online" : "bg-muted-foreground/50",
+                        )}
+                      />
+                      {ollamaDetected ? "Ollama found" : "Ollama not found"}
+                    </Badge>
+                    <FitBadge tier={hardwareTier} />
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="h-5 text-muted-foreground"
+                      onClick={() => void refreshHealth()}
+                    >
+                      Check again
+                    </Button>
+                  </div>
+
+                  {hardwareTier ? (
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">
+                      This computer: {fitSentence(hardwareTier)} Recommended:{" "}
+                      {recommendedLocal.label} ({recommendedLocal.model}).
                     </p>
                   ) : null}
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[11px] leading-relaxed text-muted-foreground">
-                      Model detection is not part of the six-endpoint sidecar contract — enter the
-                      model id exactly as Ollama reports it (<span className="font-mono">ollama list</span>).
-                    </span>
-                  </div>
+
+                  {ollamaDetected ? (
+                    ollamaModels.length > 0 ? (
+                      <Field label="Model">
+                        <Select
+                          value={ollama.model || undefined}
+                          onValueChange={(value) => updateOllama({ model: value })}
+                        >
+                          <SelectTrigger className="w-full" aria-label="Ollama model">
+                            <SelectValue placeholder="Choose an installed model" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {ollamaModels.map((name) => (
+                              <SelectItem key={name} value={name}>
+                                {name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                    ) : (
+                      <p className="text-[11px] leading-relaxed text-status-warning">
+                        Ollama is installed but has no AI models yet.
+                      </p>
+                    )
+                  ) : (
+                    <div className="space-y-2 rounded-md border border-border bg-card/40 px-3 py-2.5">
+                      <p className="text-[11px] leading-relaxed text-muted-foreground">
+                        Ollama isn't installed yet. It's free and runs everything offline.
+                      </p>
+                      <ol className="list-decimal space-y-0.5 pl-4 text-[11px] leading-relaxed text-muted-foreground">
+                        <li>Install Ollama.</li>
+                        <li>Install the recommended model.</li>
+                        <li>Come back and press Check again.</li>
+                      </ol>
+                      <div className="flex flex-wrap gap-1.5">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={() => void handleGetOllama()}
+                        >
+                          <Download className="size-3.5" />
+                          Get Ollama
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={() => void handleInstallLocalModel()}
+                        >
+                          Install a recommended model
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {ollamaDetected && ollamaModels.length === 0 ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={() => void handleInstallLocalModel()}
+                    >
+                      <Download className="size-3.5" />
+                      Install a recommended model
+                    </Button>
+                  ) : null}
+
+                  {analysisMode === "local" && ollamaIncomplete ? (
+                    <p className="text-[11px] leading-relaxed text-status-warning">
+                      Clip finding won't work until you enter a model name.
+                    </p>
+                  ) : null}
                 </Section>
 
                 <Separator />
 
                 <Section
-                  title="Cloud STT API"
-                  description="Optional external speech-to-text endpoint used when the transcription engine is set to Cloud."
+                  title="Cloud speech-to-text"
+                  description="Used for transcription when you choose cloud speech-to-text."
                   badge={<UsageBadge active={transcriptionMode === "cloud"} />}
                 >
-                  <Field label="Base URL">
+                  <Field label="Server address">
                     <Input
                       value={cloudStt.baseUrl}
                       onChange={(event) => updateCloudStt({ baseUrl: event.target.value })}
                       placeholder="https://api.openai.com/v1"
-                      aria-label="Cloud STT base URL"
+                      aria-label="Cloud speech-to-text server address"
                       spellCheck={false}
                     />
                   </Field>
@@ -1175,7 +1364,7 @@ export function SettingsDrawer() {
                   </div>
                   {transcriptionMode === "cloud" && cloudSttIncomplete ? (
                     <p className="text-[11px] leading-relaxed text-status-warning">
-                      Cloud transcription needs a base URL and an API key.
+                      Cloud transcription needs a server address and an API key.
                     </p>
                   ) : null}
                 </Section>
@@ -1187,7 +1376,7 @@ export function SettingsDrawer() {
               <div className="space-y-5">
                 <Section
                   title="Custom font importer"
-                  description="Fonts are copied into the sidecar's fonts/ directory so FFmpeg .ass burn-in resolves Thai and Uthmani Arabic reliably."
+                  description="Fonts are added to the app so exported subtitles always render Thai and Uthmani Arabic correctly."
                 >
                   <div className="flex flex-wrap items-center gap-2">
                     <input
@@ -1429,7 +1618,7 @@ export function SettingsDrawer() {
 
                 <Section
                   title="Saved style presets"
-                  description="One-click visual themes applied to the dual-line preview and the FFmpeg .ass burn-in."
+                  description="One-click visual themes applied to the dual-line preview and the exported subtitles."
                 >
                   <div className="space-y-1.5">
                     {presets.map((preset) => {
@@ -1608,9 +1797,15 @@ export function SettingsDrawer() {
                 <Separator />
 
                 <Section
-                  title="Whisper model"
-                  description="Local transcription model and precision. Larger models are more accurate and slower; the CPU path is unaffected by GPU precision."
+                  title="Transcription model"
+                  description="How accurately speech is transcribed on this computer. Better models are slower."
                 >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <FitBadge tier={hardwareTier} />
+                    <span className="text-[11px] text-muted-foreground">
+                      {whisperFitSentence(hardwareTier)}
+                    </span>
+                  </div>
                   <div className="grid gap-3 sm:grid-cols-2">
                     <Field label="Whisper model">
                       <Select
@@ -1637,7 +1832,7 @@ export function SettingsDrawer() {
                         </SelectContent>
                       </Select>
                     </Field>
-                    <Field label="Compute precision">
+                    <Field label="Transcription precision">
                       <Select
                         value={whisper.computeType}
                         onValueChange={(value) =>
@@ -1646,31 +1841,31 @@ export function SettingsDrawer() {
                           })
                         }
                       >
-                        <SelectTrigger className="w-full" aria-label="Compute precision">
+                        <SelectTrigger className="w-full" aria-label="Transcription precision">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="int8">int8 · automatic default</SelectItem>
-                          <SelectItem value="float16">float16 · GPU only</SelectItem>
-                          <SelectItem value="float32">float32 · CPU compatibility</SelectItem>
+                          <SelectItem value="int8">Automatic (recommended)</SelectItem>
+                          <SelectItem value="float16">GPU, more accurate</SelectItem>
+                          <SelectItem value="float32">CPU, most compatible</SelectItem>
                         </SelectContent>
                       </Select>
                     </Field>
                   </div>
                   {showCustomWhisperModel ? (
-                    <Field label="Custom model id" hint="Anything faster-whisper can load">
+                    <Field label="Custom model name" hint="Any Whisper model name">
                       <Input
                         value={whisper.model}
                         onChange={(event) => updateWhisper({ model: event.target.value })}
                         placeholder="large-v3-turbo"
-                        aria-label="Custom Whisper model id"
+                        aria-label="Custom transcription model"
                         spellCheck={false}
                       />
                     </Field>
                   ) : null}
                   <SwitchRow
-                    label="Unload Whisper from GPU memory after Step 1"
-                    description="Frees GPU memory before encoding starts. No effect when transcription runs on the CPU."
+                    label="Free up memory after transcription"
+                    description="Releases the transcription model from GPU memory before rendering. No effect when transcription runs on the CPU."
                     checked={whisper.autoUnload}
                     onCheckedChange={(checked) => updateWhisper({ autoUnload: checked })}
                   />
@@ -1690,6 +1885,28 @@ export function SettingsDrawer() {
             {/* -------------------------------- Editor ------------------------------- */}
             <TabsContent value="editor" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
               <div className="space-y-5">
+                <Section
+                  title="Interface"
+                  description="Language of the app. Thai covers the add-lecture screen first; more screens follow."
+                >
+                  <Field label="Language">
+                    <Select
+                      value={uiLanguage}
+                      onValueChange={(value) => setUiLanguage(value as UiLanguage)}
+                    >
+                      <SelectTrigger className="w-full" aria-label="Language">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="en">English</SelectItem>
+                        <SelectItem value="th">ไทย</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                </Section>
+
+                <Separator />
+
                 <Section
                   title="Cut buffer padding"
                   description="Extra headroom kept before and after detected speech so clips never cut mid-word."
@@ -1965,27 +2182,22 @@ export function SettingsDrawer() {
                 <Separator />
 
                 <Section
-                  title="Sidecar & hardware"
-                  description="Read-only snapshot from GET /health."
+                  title="Engine & hardware"
+                  description="Read-only snapshot of the running engine."
                 >
                   <div className="rounded-md border border-border bg-card/40">
                     <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
                       <div className="flex items-center gap-2">
                         <SidecarStatusDot status={sidecar.status} />
                         <span className="text-xs text-foreground/90">
-                          {sidecar.status === "online"
-                            ? `Online${health ? ` · v${health.version}` : ""}`
-                            : sidecar.status === "checking"
-                              ? "Checking…"
-                              : sidecar.status === "offline"
-                                ? "Offline"
-                                : "Not checked"}
+                          {SIDECAR_STATUS_LABEL[sidecar.status]}
+                          {sidecar.status === "online" && health ? ` · v${health.version}` : ""}
                         </span>
                       </div>
                       <Button
                         variant="ghost"
                         size="icon-xs"
-                        aria-label="Refresh sidecar health"
+                        aria-label="Refresh engine status"
                         onClick={() => void refreshHealth()}
                       >
                         <RefreshCw
@@ -1998,7 +2210,7 @@ export function SettingsDrawer() {
                     </div>
                     <dl className="divide-y divide-border text-[11px]">
                       <HealthRow
-                        label="Sidecar version"
+                        label="Engine version"
                         value={health ? `v${health.version}` : "—"}
                       />
                       <HealthRow
@@ -2058,7 +2270,7 @@ export function SettingsDrawer() {
 
                 <Section
                   title="Disk cache"
-                  description="Temporary WAV extracts and preview files created by the sidecar."
+                  description="Temporary audio extracts and preview files created by the app."
                 >
                   <div className="space-y-1.5 rounded-md border border-border bg-card/40 px-3 py-2">
                     <div className="flex items-baseline justify-between gap-3">
@@ -2088,10 +2300,9 @@ export function SettingsDrawer() {
                     </p>
                   </div>
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    The sidecar prunes its own scratch space on startup: generated job folders
-                    older than 24 h and extracted WAVs older than 7 days are deleted, while saved
-                    transcripts are kept. There is no manual clear button in the six-endpoint
-                    contract.
+                    Temporary files are cleaned up automatically on startup: job folders older
+                    than 24 hours and extracted audio older than 7 days are deleted, while saved
+                    transcripts are kept.
                   </p>
                 </Section>
 
@@ -2218,7 +2429,7 @@ export function SettingsDrawer() {
 
                 <Section
                   title="Diagnostics"
-                  description="Copy a support bundle with versions, paths and the last sidecar health snapshot."
+                  description="Copy a support bundle with versions, paths and the last engine health snapshot."
                 >
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
@@ -2236,7 +2447,7 @@ export function SettingsDrawer() {
                       Copy diagnostics
                     </Button>
                     <span className="text-[11px] text-muted-foreground">
-                      JSON to the clipboard · API keys excluded
+                      Diagnostics to the clipboard · API keys excluded
                     </span>
                   </div>
                 </Section>

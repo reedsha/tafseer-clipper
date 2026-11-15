@@ -24,9 +24,10 @@ import { cn } from "cn";
 
 import { PromptDrawer } from "@/components/PromptDrawer";
 import { GpuInlineHint } from "@/components/GpuAcceleration";
+import { InlineError } from "@/components/InlineError";
 import { RecentProjectsBar } from "@/components/RecentProjectsBar";
 import { SegmentedToggle } from "@/components/SegmentedToggle";
-import { SidecarStatusDot } from "@/components/SidecarStatusDot";
+import { SidecarStatusDot, SIDECAR_STATUS_LABEL } from "@/components/SidecarStatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -47,9 +48,12 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
-import { extractAndTranscribe, SIDECAR_URL } from "@/lib/api";
+import { extractAndTranscribe } from "@/lib/api";
 import { describeAcceleration } from "@/lib/acceleration";
+import { buildDiagnostics, copyText } from "@/lib/diagnostics";
 import { formatBytes, formatClock, stripExtension } from "@/lib/format";
+import { useI18n } from "@/lib/i18n";
+import { relaunchApp } from "@/lib/updater";
 import {
   LECTURE_EXTENSIONS,
   fileFromDrop,
@@ -59,9 +63,9 @@ import {
 } from "@/lib/media";
 import { DEFAULT_DISCOVERY_SETTINGS, type ProjectData, type TranscriptData } from "@/lib/projectTypes";
 import { openProjectFile } from "@/lib/projectFile";
-import { describeProviderGap } from "@/lib/providers";
+import { describeProviderGap, whisperModelLabel } from "@/lib/providers";
 import { useProjectStore } from "@/store/projectStore";
-import { useSettingsStore, type EngineMode } from "@/store/settingsStore";
+import { useSettingsStore, type EngineMode, type EngineUiMode } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
 
 /* -------------------------------------------------------------------------- */
@@ -75,7 +79,7 @@ import { useUiStore } from "@/store/uiStore";
  * transcription).
  */
 function analysisGapMessage(gap: string): string {
-  return `Topic analysis (Step 2) needs ${gap}. Transcribing now would produce a transcript Step 2 can't search, so it's blocked until this is set.`;
+  return `Clip finding needs an AI connection first (${gap}). Set it up and transcription starts right away.`;
 }
 
 export function Step1Ingest() {
@@ -87,6 +91,8 @@ export function Step1Ingest() {
 
   const transcriptionMode = useSettingsStore((state) => state.transcriptionMode);
   const analysisMode = useSettingsStore((state) => state.analysisMode);
+  const engineUiMode = useSettingsStore((state) => state.engineUiMode);
+  const setEngineUiMode = useSettingsStore((state) => state.setEngineUiMode);
   const cloud = useSettingsStore((state) => state.cloud);
   const cloudStt = useSettingsStore((state) => state.cloudStt);
   const ollama = useSettingsStore((state) => state.ollama);
@@ -101,6 +107,7 @@ export function Step1Ingest() {
   const setRecentOpen = useUiStore((state) => state.setRecentOpen);
 
   const [dragging, setDragging] = useState(false);
+  const { t } = useI18n();
   const [browserFile, setBrowserFile] = useState<{ name: string; size: number } | null>(null);
   const [promptOpen, setPromptOpen] = useState(false);
   const [pendingReplace, setPendingReplace] = useState<{ path: string; name: string } | null>(null);
@@ -163,32 +170,51 @@ export function Step1Ingest() {
   const promptPreview =
     project?.basePrompt.trim() ||
     activePreset?.prompt ||
-    "The sidecar's built-in editorial policy will be used.";
+    "The built-in defaults will be used.";
 
   /** Vendor-neutral acceleration state derived from GET /health. */
   const acceleration = describeAcceleration(sidecar.health);
 
   const transcriptionDetail =
     transcriptionMode === "local"
-      ? `faster-whisper ${whisper.model} · ${whisper.computeType}${
-          sidecar.health ? (acceleration.transcription === "gpu" ? " · GPU" : " · CPU") : ""
-        }`
-      : `Cloud STT · ${cloudStt.model || "model not set"}${
-          cloudStt.baseUrl ? "" : " · endpoint missing"
-        }`;
+      ? `On this computer${
+          sidecar.health ? ` · ${acceleration.transcription === "gpu" ? "GPU" : "CPU"}` : ""
+        } · ${whisperModelLabel(whisper.model)}`
+      : cloudStt.baseUrl
+        ? `Your AI account · ${cloudStt.model || "model not set"}`
+        : "Your AI account — not set up";
 
   const analysisDetail =
     analysisMode === "cloud"
-      ? `${cloud.reasoningModel || "reasoning model not set"} · ${
-          cloud.apiKey ? "key saved" : "no API key"
-        }`
-      : `Ollama · ${ollama.model || "model not set"}`;
+      ? cloud.reasoningModel && cloud.apiKey
+        ? `Your AI account · ${cloud.reasoningModel}`
+        : "Your AI account — not set up"
+      : ollama.model
+        ? `This computer · ${ollama.model}`
+        : "This computer — no model chosen";
 
   /** Missing provider field that would block Step 2 discovery, if any. */
   const analysisGap =
     analysisMode === "cloud"
       ? describeProviderGap({ analysisMode, ollama, cloud }, "reasoning")
       : null;
+
+  /** One-line, vendor-neutral description for Automatic mode. */
+  const transcriptionSummary =
+    transcriptionMode === "local"
+      ? `Transcribing on this computer${
+          sidecar.health ? ` (${acceleration.transcription === "gpu" ? "GPU" : "CPU"})` : ""
+        }`
+      : "Transcribing with your AI account";
+  const analysisSummary =
+    analysisMode === "local"
+      ? ollama.model
+        ? "clip finding on this computer"
+        : "clip finding on this computer — no model chosen"
+      : cloud.reasoningModel && cloud.apiKey
+        ? "clip finding with your AI account"
+        : "clip finding needs an AI connection";
+  const automaticSummary = `${transcriptionSummary} · ${analysisSummary}`;
 
   const ensureProject = useCallback((): ProjectData => {
     const current = useProjectStore.getState().project;
@@ -246,25 +272,21 @@ export function Step1Ingest() {
         stagePath(maybePath, file.name);
         return;
       }
-      if (useProjectStore.getState().project?.sourcePath) {
-        toast.error("Desktop shell required", {
-          description:
-            "The open lecture already has a file path. Drop the replacement from Explorer inside the desktop app.",
-        });
-        return;
-      }
-      if (useProjectStore.getState().project?.transcript) {
-        toast.error("Replace the lecture first", {
-          description:
-            "This project already has a transcript. Use Replace lecture in the desktop shell to start a new one.",
+      const projectNow = useProjectStore.getState().project;
+      if (projectNow?.sourcePath || projectNow?.transcript) {
+        toast.error("Please open the Tafseer Clipper desktop app", {
+          description: import.meta.env.DEV
+            ? "The open lecture already has a file path. Drop the replacement from Explorer inside the desktop app."
+            : "Lectures are transcribed in the desktop app.",
         });
         return;
       }
       setBrowserFile({ name: file.name, size: file.size });
       setError(null);
       toast("File selected", {
-        description:
-          "The browser cannot expose an absolute path. Launch the desktop shell to transcribe it.",
+        description: import.meta.env.DEV
+          ? "The browser preview cannot read files from disk. Launch the desktop app to transcribe it."
+          : "Please open the Tafseer Clipper desktop app to transcribe this lecture.",
       });
     },
     [stagePath],
@@ -380,8 +402,7 @@ export function Step1Ingest() {
     const resumed = await resumeRecent(projectId);
     if (!resumed) {
       toast.error("Auto-save not found", {
-        description:
-          "No .tafseer snapshot was found for this lecture on disk or in local storage.",
+        description: "No saved copy of this lecture was found on disk or in local storage.",
       });
       return;
     }
@@ -431,16 +452,17 @@ export function Step1Ingest() {
     const current = useProjectStore.getState().project;
     if (!current?.sourcePath) {
       toast.error("Lecture path missing", {
-        description:
-          "The browser preview cannot read absolute paths. Drop the file from Explorer in the desktop shell.",
+        description: import.meta.env.DEV
+          ? "The browser preview cannot read absolute paths. Drop the file from Explorer in the desktop app."
+          : "Choose the lecture again from the desktop app.",
       });
       return;
     }
 
     const settings = useSettingsStore.getState();
     if (settings.transcriptionMode === "cloud" && !settings.cloudStt.baseUrl.trim()) {
-      toast.error("Cloud STT is not configured", {
-        description: "Set the endpoint, model and API key in Settings → AI Providers.",
+      toast.error("Cloud transcription isn't set up", {
+        description: "Set the service, model and API key in Settings → AI.",
       });
       useUiStore.getState().openSettings("providers");
       return;
@@ -451,7 +473,7 @@ export function Step1Ingest() {
     // transcribed, so catch it before Whisper starts.
     const analysisGap = describeProviderGap(settings, "reasoning");
     if (settings.analysisMode === "cloud" && analysisGap) {
-      toast.error("Topic analysis is not configured", {
+      toast.error("Clip finding isn't set up yet", {
         description: analysisGapMessage(analysisGap),
       });
       useUiStore.getState().openSettings("providers");
@@ -516,11 +538,8 @@ export function Step1Ingest() {
       store.setStep(2);
 
       toast.success("Transcript ready", {
-        description: `${result.segments.length} segments · ${result.model} · ${result.device}`,
+        description: `${formatClock(result.duration)} of speech transcribed`,
       });
-      if (result.vram_unloaded) {
-        toast.success("Whisper unloaded from GPU memory");
-      }
     } catch (caught) {
       if (!mountedRef.current || abortRef.current !== controller) return;
       if (controller.signal.aborted) {
@@ -536,24 +555,61 @@ export function Step1Ingest() {
     }
   }
 
+  async function handleRestartApp() {
+    try {
+      await relaunchApp();
+    } catch (caught) {
+      toast.error("Could not restart", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
+    }
+  }
+
+  async function handleCopyDiagnostics() {
+    try {
+      const state = useSettingsStore.getState();
+      const bundle = await buildDiagnostics({
+        health: state.sidecar.health,
+        sidecarStatus: state.sidecar.status,
+        sidecarError: state.sidecar.error,
+        projectFolder: state.storage.projectFolder,
+        lastAutosaveError: useProjectStore.getState().lastAutosaveError,
+      });
+      const copied = await copyText(bundle);
+      if (copied) {
+        toast.success("Diagnostics copied", {
+          description: "Paste it into your support request. No API keys are included.",
+        });
+      } else {
+        toast.error("Could not copy diagnostics", {
+          description: "The clipboard is unavailable in this window.",
+        });
+      }
+    } catch (caught) {
+      toast.error("Could not build diagnostics", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
+    }
+  }
+
   const hasSource = Boolean(
     project?.sourcePath || project?.sourceFileName || project?.transcript,
   );
   const displayName = browserFile?.name ?? project?.sourceFileName ?? null;
   const dropTitle = dragging
-    ? "Release to load the lecture"
+    ? t("step1.drop.dragging")
     : hasSource
       ? project?.transcript
-        ? "Transcript ready"
-        : "Lecture selected"
-      : "Drop a lecture here";
+        ? t("step1.drop.transcriptReady")
+        : t("step1.drop.selected")
+      : t("step1.drop.default");
   const dropDescription = dragging
-    ? "MP4, MOV or MKV"
+    ? t("step1.drop.hintDragging")
     : hasSource
       ? project?.transcript
-        ? "The transcript is saved in this project. Continue to clip discovery, or replace the lecture."
-        : "Ready for local transcription. Drop another file to replace it."
-      : "MP4, MOV or MKV. Long-form Tafseer lectures are expected; audio stays on this machine.";
+        ? t("step1.drop.hintTranscript")
+        : t("step1.drop.hintSelected")
+      : t("step1.drop.hintDefault");
 
   return (
     <>
@@ -562,12 +618,11 @@ export function Step1Ingest() {
           <header className="flex flex-wrap items-end justify-between gap-3">
             <div className="space-y-1.5">
               <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
-                Step 1 of 4
+                {t("step1.eyebrow")}
               </p>
-              <h1 className="text-lg font-medium text-foreground">Ingest a lecture</h1>
+              <h1 className="text-lg font-medium text-foreground">{t("step1.title")}</h1>
               <p className="max-w-prose text-sm leading-relaxed text-muted-foreground">
-                Drop a long-form Tafseer lecture, pick an editorial preset, then let the sidecar
-                extract and transcribe the Thai–Arabic audio.
+                {t("step1.subtitle")}
               </p>
             </div>
             {project ? (
@@ -631,7 +686,7 @@ export function Step1Ingest() {
                     }}
                   >
                     <FolderOpen className="size-3.5" />
-                    Browse files
+                    {t("step1.browse")}
                   </Button>
                   <div className="flex gap-1">
                     {LECTURE_EXTENSIONS.map((extension) => (
@@ -669,16 +724,17 @@ export function Step1Ingest() {
                         void handleBrowse();
                       }}
                     >
-                      Change
+                      {t("step1.change")}
                     </Button>
                   </div>
                 ) : null}
 
                 {browserFile ? (
-                  <p className="mt-3 flex max-w-md items-start gap-1.5 text-left text-[11px] leading-relaxed text-status-warning">
+                  <p className="mt-3 flex max-w-md items-start gap-1.5 text-left text-xs leading-relaxed text-status-warning">
                     <Info className="mt-0.5 size-3.5 shrink-0" />
-                    This browser preview cannot expose the file's absolute path. Launch the desktop
-                    shell and drop the same file from Explorer to transcribe it.
+                    {import.meta.env.DEV
+                      ? "Dev preview: the browser cannot read this file from disk. Drop the same file from Explorer in the desktop app to transcribe it."
+                      : "Open the Tafseer Clipper desktop app to transcribe this lecture."}
                   </p>
                 ) : null}
               </section>
@@ -689,9 +745,11 @@ export function Step1Ingest() {
                     <div className="space-y-0.5">
                       <div className="flex items-center gap-1.5">
                         <CheckCircle2 className="size-3.5 text-muted-foreground" />
-                        <h2 className="text-[13px] font-medium text-foreground">Transcript ready</h2>
+                        <h2 className="text-[13px] font-medium text-foreground">
+                          {t("step1.transcript.title")}
+                        </h2>
                       </div>
-                      <p className="text-[11px] leading-relaxed text-muted-foreground">
+                      <p className="text-xs leading-relaxed text-muted-foreground">
                         {project.transcript.segments.length} segments ·{" "}
                         {formatClock(project.duration ?? 0)} ·{" "}
                         {project.transcript.language?.toUpperCase() ?? "AUTO"}
@@ -704,11 +762,11 @@ export function Step1Ingest() {
                   <Separator className="my-3" />
                   <div className="flex flex-wrap items-center gap-2">
                     <Button size="sm" className="gap-1.5" onClick={() => setStep(2)}>
-                      Continue to clip discovery
+                      {t("step1.transcript.continue")}
                       <ChevronRight className="size-3.5" />
                     </Button>
                     <Button variant="ghost" size="sm" onClick={() => void handleBrowse()}>
-                      Replace lecture
+                      {t("step1.transcript.replace")}
                     </Button>
                   </div>
                 </section>
@@ -717,12 +775,11 @@ export function Step1Ingest() {
                   <div className="flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin text-muted-foreground" />
                     <p className="text-[13px] font-medium text-foreground">
-                      Extracting audio and transcribing…
+                      {t("step1.busy.title")}
                     </p>
                   </div>
-                  <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                    Whisper runs inside the sidecar. Long lectures can take a few minutes; the
-                    editor stays responsive.
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    {t("step1.busy.description")}
                   </p>
                   <div className="mt-3 flex items-center justify-between gap-3">
                     <span className="text-xs tabular-nums text-muted-foreground">
@@ -746,12 +803,10 @@ export function Step1Ingest() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="space-y-0.5">
                       <h2 className="text-[13px] font-medium text-foreground">
-                        Transcribe the lecture
+                        {t("step1.transcribe.title")}
                       </h2>
-                      <p className="text-[11px] leading-relaxed text-muted-foreground">
-                        FFmpeg extracts a 16 kHz WAV, then Whisper or your Cloud STT endpoint
-                        transcribes the Thai–Arabic audio. The Thai–Arabic glossary is applied
-                        after transcription.
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        {t("step1.transcribe.description")}
                       </p>
                     </div>
                     <Badge variant="outline" className="shrink-0">
@@ -761,34 +816,46 @@ export function Step1Ingest() {
 
                   <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
                     <SidecarStatusDot status={sidecar.status} />
-                    <span>
-                      {sidecar.status === "online"
-                        ? "Sidecar online"
-                        : sidecar.status === "checking"
-                          ? "Checking sidecar"
-                          : sidecar.status === "offline"
-                            ? "Sidecar offline"
-                            : "Sidecar not checked"}
-                    </span>
+                    <span>{SIDECAR_STATUS_LABEL[sidecar.status]}</span>
                     <span className="text-muted-foreground/50">·</span>
                     <span className="truncate">{transcriptionDetail}</span>
                   </div>
 
                   {sidecar.status === "offline" ? (
-                    <div className="mt-2 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] leading-relaxed text-destructive">
-                      <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                      <span className="flex-1">
-                        {sidecar.error ?? `Start backend.exe on ${SIDECAR_URL}.`}
-                      </span>
-                      <Button
-                        variant="ghost"
-                        size="xs"
-                        className="h-5 text-destructive"
-                        onClick={() => void refreshHealth()}
-                      >
-                        Retry
-                      </Button>
-                    </div>
+                    <InlineError
+                      className="mt-2"
+                      title={t("step1.offline.title")}
+                      action={
+                        <>
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="h-5 text-destructive"
+                            onClick={() => void refreshHealth()}
+                          >
+                            {t("common.retry")}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="h-5 text-destructive"
+                            onClick={() => void handleRestartApp()}
+                          >
+                            {t("common.restart")}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="h-5 text-destructive"
+                            onClick={() => void handleCopyDiagnostics()}
+                          >
+                            {t("common.copyDiagnostics")}
+                          </Button>
+                        </>
+                      }
+                    >
+                      {t("step1.offline.description")}
+                    </InlineError>
                   ) : null}
 
                   <Button
@@ -798,182 +865,238 @@ export function Step1Ingest() {
                     onClick={() => void handleTranscribe()}
                   >
                     <Captions className="size-4" />
-                    Transcribe lecture & find clips
+                    {t("step1.transcribe.cta")}
                   </Button>
                   {!project?.sourcePath ? (
                     <p className="mt-1.5 text-[10px] text-muted-foreground">
-                      Choose a lecture file first.
+                      {t("step1.transcribe.chooseFirst")}
                     </p>
                   ) : null}
                 </section>
               )}
 
               {error ? (
-                <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[11px] leading-relaxed text-destructive">
-                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                  <span>{error}</span>
-                </div>
+                <InlineError title="Transcription failed">{error}</InlineError>
               ) : null}
             </div>
 
             <aside className="space-y-4">
-              <section className="rounded-lg border border-border bg-card/40 p-4">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="space-y-0.5">
-                    <h2 className="text-[13px] font-medium text-foreground">Prompt preset</h2>
-                    <p className="text-[11px] leading-relaxed text-muted-foreground">
-                      Editorial policy for the clip discovery model.
-                    </p>
-                  </div>
-                  <Badge variant="outline" className="shrink-0 text-[10px]">
-                    {promptBadge}
-                  </Badge>
-                </div>
-
-                <Select value={presetValue} onValueChange={handlePresetChange}>
-                  <SelectTrigger className="mt-3 w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="default">Editorial default (sidecar)</SelectItem>
-                    {promptPresets.map((preset) => (
-                      <SelectItem key={preset.id} value={preset.id}>
-                        {preset.name}
-                      </SelectItem>
-                    ))}
-                    {presetValue === "custom" ? (
-                      <SelectItem value="custom">Custom prompt (edit…)</SelectItem>
-                    ) : null}
-                  </SelectContent>
-                </Select>
-
-                <p className="mt-2 line-clamp-3 text-[11px] leading-relaxed text-muted-foreground">
-                  {promptPreview}
-                </p>
-
-                <div className="mt-3 flex items-center justify-between gap-2">
-                  <span className="text-[10px] text-muted-foreground">
-                    {discovery.minDuration}–{discovery.maxDuration} s · up to {discovery.maxClips}{" "}
-                    clips
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    className="gap-1 text-muted-foreground"
-                    onClick={handleOpenPrompt}
-                  >
-                    Edit base prompt
-                  </Button>
-                </div>
-              </section>
-
-              <section className="rounded-lg border border-border bg-card/40 p-4">
-                <Label htmlFor="session-guide" className="text-[13px] font-medium text-foreground">
-                  Session topic guide
-                </Label>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                  Optional notes for this lecture only.
-                </p>
-                <Textarea
-                  id="session-guide"
-                  value={project?.sessionGuide ?? ""}
-                  onChange={(event) => handleGuideChange(event.target.value)}
-                  rows={4}
-                  placeholder="Focus on stories of the Prophets and practical rulings; ignore the first 10 minutes of audio checks."
-                  className="mt-2 resize-y text-xs leading-relaxed"
-                />
-              </section>
-
-              <section className="rounded-lg border border-border bg-card/40 p-4">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="space-y-0.5">
-                    <h2 className="text-[13px] font-medium text-foreground">Engines</h2>
-                    <p className="text-[11px] leading-relaxed text-muted-foreground">
-                      Routing only; all inference runs in the sidecar.
-                    </p>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label="Open AI provider settings"
-                    onClick={() => openSettings("providers")}
-                  >
-                    <Settings2 className="size-3.5" />
-                  </Button>
-                </div>
-
-                <div className="mt-3 space-y-3">
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <Label className="text-[11px] text-muted-foreground">Transcription</Label>
-                      <span className="min-w-0 truncate text-[10px] text-muted-foreground/80">
-                        {transcriptionDetail}
-                      </span>
+              {hasSource ? (
+                <>
+                  <section className="rounded-lg border border-border bg-card/40 p-4">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="space-y-0.5">
+                        <h2 className="text-[13px] font-medium text-foreground">Clip brief</h2>
+                        <p className="text-xs leading-relaxed text-muted-foreground">
+                          {t("step1.brief.description")}
+                        </p>
+                      </div>
+                      <Badge variant="outline" className="shrink-0 text-[10px]">
+                        {promptBadge}
+                      </Badge>
                     </div>
-                    <SegmentedToggle<EngineMode>
-                      label="Transcription engine"
-                      value={transcriptionMode}
+
+                    <Select value={presetValue} onValueChange={handlePresetChange}>
+                      <SelectTrigger className="mt-3 w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">Built-in default</SelectItem>
+                        {promptPresets.map((preset) => (
+                          <SelectItem key={preset.id} value={preset.id}>
+                            {preset.name}
+                          </SelectItem>
+                        ))}
+                        {presetValue === "custom" ? (
+                          <SelectItem value="custom">Edit clip brief…</SelectItem>
+                        ) : null}
+                      </SelectContent>
+                    </Select>
+
+                    <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-muted-foreground">
+                      {promptPreview}
+                    </p>
+
+                    <div className="mt-3 flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-muted-foreground">
+                        {discovery.minDuration}–{discovery.maxDuration} s · up to{" "}
+                        {discovery.maxClips} clips
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        className="gap-1 text-muted-foreground"
+                        onClick={handleOpenPrompt}
+                      >
+                        {t("step1.brief.edit")}
+                      </Button>
+                    </div>
+                  </section>
+
+                  <section className="rounded-lg border border-border bg-card/40 p-4">
+                    <Label
+                      htmlFor="session-guide"
+                      className="text-[13px] font-medium text-foreground"
+                    >
+                      {t("step1.guide.title")}
+                    </Label>
+                    <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                      {t("step1.guide.description")}
+                    </p>
+                    <Textarea
+                      id="session-guide"
+                      value={project?.sessionGuide ?? ""}
+                      onChange={(event) => handleGuideChange(event.target.value)}
+                      rows={4}
+                      placeholder={t("step1.guide.placeholder")}
+                      className="mt-2 resize-y text-xs leading-relaxed"
+                    />
+                  </section>
+                </>
+              ) : null}
+
+              <section className="rounded-lg border border-border bg-card/40 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <h2 className="text-[13px] font-medium text-foreground">
+                      {t("step1.ai.title")}
+                    </h2>
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      {engineUiMode === "automatic"
+                        ? t("step1.ai.automaticDescription")
+                        : t("step1.ai.advancedDescription")}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <SegmentedToggle<EngineUiMode>
+                      label="AI setup mode"
+                      value={engineUiMode}
                       options={[
-                        { value: "local", label: "Local Whisper" },
-                        { value: "cloud", label: "Cloud API" },
+                        { value: "automatic", label: "Automatic" },
+                        { value: "advanced", label: "Advanced" },
                       ]}
-                      onChange={setTranscriptionMode}
+                      onChange={setEngineUiMode}
                       disabled={busy}
                     />
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label="Open AI settings"
+                      onClick={() => openSettings("providers")}
+                    >
+                      <Settings2 className="size-3.5" />
+                    </Button>
+                  </div>
+                </div>
+
+                {engineUiMode === "automatic" ? (
+                  <div className="mt-3 space-y-2">
+                    <p className="flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
+                      <SidecarStatusDot status={sidecar.status} className="mt-1.5" />
+                      <span className="flex-1">{automaticSummary}</span>
+                    </p>
+
                     {transcriptionMode === "local" ? (
                       <div className="space-y-1.5">
-                        <p className="text-[10px] leading-relaxed text-muted-foreground/80">
-                          First local run downloads the faster-whisper model (~1.5 GB).
+                        <p className="text-xs leading-relaxed text-muted-foreground/80">
+                          {t("step1.ai.downloadNote")}
                         </p>
                         <GpuInlineHint summary={acceleration} />
                       </div>
                     ) : null}
-                  </div>
 
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <Label className="text-[11px] text-muted-foreground">Topic analysis</Label>
-                      <span className="min-w-0 truncate text-[10px] text-muted-foreground/80">
-                        {analysisDetail}
-                      </span>
-                    </div>
-                    <SegmentedToggle<EngineMode>
-                      label="Topic analysis engine"
-                      value={analysisMode}
-                      options={[
-                        { value: "local", label: "Local Ollama" },
-                        { value: "cloud", label: "Cloud API" },
-                      ]}
-                      onChange={setAnalysisMode}
-                      disabled={busy}
-                    />
-                  </div>
-                </div>
+                    {analysisMode === "cloud" && analysisGap ? (
+                      <p className="flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
+                        <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+                        <span className="flex-1">{analysisGapMessage(analysisGap)}</span>
+                      </p>
+                    ) : null}
 
-                {analysisMode === "cloud" && analysisGap ? (
-                  <p className="mt-3 flex items-start gap-1.5 text-[10px] leading-relaxed text-status-warning">
-                    <AlertTriangle className="mt-0.5 size-3 shrink-0" />
-                    <span className="flex-1">{analysisGapMessage(analysisGap)}</span>
                     <Button
                       variant="ghost"
                       size="xs"
-                      className="h-5 shrink-0 text-status-warning"
+                      className="gap-1 text-muted-foreground"
                       onClick={() => openSettings("providers")}
                     >
-                      Fix
+                      {t("step1.ai.change")}
                     </Button>
-                  </p>
-                ) : null}
+                  </div>
+                ) : (
+                  <>
+                    <div className="mt-3 space-y-3">
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <Label className="text-[11px] text-muted-foreground">Transcription</Label>
+                          <span className="min-w-0 truncate text-[11px] text-muted-foreground/80">
+                            {transcriptionDetail}
+                          </span>
+                        </div>
+                        <SegmentedToggle<EngineMode>
+                          label="Transcription engine"
+                          value={transcriptionMode}
+                          options={[
+                            { value: "local", label: "This computer" },
+                            { value: "cloud", label: "Your AI account" },
+                          ]}
+                          onChange={setTranscriptionMode}
+                          disabled={busy}
+                        />
+                        {transcriptionMode === "local" ? (
+                          <div className="space-y-1.5">
+                            <p className="text-xs leading-relaxed text-muted-foreground/80">
+                              {t("step1.ai.downloadNote")}
+                            </p>
+                            <GpuInlineHint summary={acceleration} />
+                          </div>
+                        ) : null}
+                      </div>
 
-                <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground/80">
-                  API keys, models and the Whisper prompt live in Settings → AI Providers.
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <Label className="text-[11px] text-muted-foreground">Topic analysis</Label>
+                          <span className="min-w-0 truncate text-[11px] text-muted-foreground/80">
+                            {analysisDetail}
+                          </span>
+                        </div>
+                        <SegmentedToggle<EngineMode>
+                          label="Topic analysis engine"
+                          value={analysisMode}
+                          options={[
+                            { value: "local", label: "This computer" },
+                            { value: "cloud", label: "Your AI account" },
+                          ]}
+                          onChange={setAnalysisMode}
+                          disabled={busy}
+                        />
+                      </div>
+                    </div>
+
+                    {analysisMode === "cloud" && analysisGap ? (
+                      <p className="mt-3 flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
+                        <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+                        <span className="flex-1">{analysisGapMessage(analysisGap)}</span>
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          className="h-5 shrink-0 text-status-warning"
+                          onClick={() => openSettings("providers")}
+                        >
+                          Fix
+                        </Button>
+                      </p>
+                    ) : null}
+                  </>
+                )}
+
+                <p className="mt-3 text-xs leading-relaxed text-muted-foreground/80">
+                  Connections, models and the transcription prompt live in Settings → AI.
                 </p>
               </section>
             </aside>
           </div>
 
           <p className="pb-2 text-center text-[10px] text-muted-foreground/60">
-            Audio, transcripts and clips stay on this machine unless Cloud mode is selected.
+            {t("step1.privacy")}
           </p>
         </div>
       </div>

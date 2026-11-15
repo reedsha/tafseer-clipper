@@ -49,19 +49,19 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
     setBasePrompt(trimmed);
     if (!trimmed) {
       setPromptPreset(null);
-      toast("Using the backend default prompt", {
-        description: "The sidecar's built-in editorial policy will be used.",
+      toast("Using the built-in defaults", {
+        description: "You can add a clip brief any time from Step 1.",
       });
       onOpenChange(false);
       return;
     }
     if (activePreset && trimmed !== activePreset.prompt.trim()) {
       setPromptPreset(null);
-      toast.success("Base prompt updated", {
-        description: "Edited away from the preset — this project now uses a custom prompt.",
+      toast.success("Clip brief updated", {
+        description: "Edited away from the preset — this project now uses a custom brief.",
       });
     } else {
-      toast.success("Base prompt updated");
+      toast.success("Clip brief updated");
     }
     onOpenChange(false);
   }
@@ -76,15 +76,15 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
       return;
     }
     if (!prompt) {
-      toast.error("The prompt is empty", {
-        description: "Write the editorial policy before saving a preset.",
+      toast.error("The brief is empty", {
+        description: "Write the clip brief before saving a preset.",
       });
       return;
     }
     const discovery = project?.discovery ?? DEFAULT_DISCOVERY_SETTINGS;
     const id = addPromptPreset({
       name,
-      description: "Saved from the base prompt drawer.",
+      description: "Saved from the clip brief drawer.",
       prompt,
       minDuration: discovery.minDuration,
       maxDuration: discovery.maxDuration,
@@ -100,7 +100,7 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
   function handleResetToPreset() {
     if (!activePreset) {
       setDraft("");
-      toast("Draft cleared", { description: "Leave it empty to use the backend default." });
+      toast("Draft cleared", { description: "Leave it empty to use the built-in defaults." });
       return;
     }
     setDraft(activePreset.prompt);
@@ -122,15 +122,15 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
           <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
             <div className="space-y-0.5">
               <Drawer.Title className="text-sm font-medium text-foreground">
-                Base system prompt
+                Clip brief
               </Drawer.Title>
               <Drawer.Description className="text-xs text-muted-foreground">
-                Editorial policy for clip discovery. Strict JSON and timing rules are appended by
-                the sidecar.
+                Tell the AI what kind of clips to find. We add the timing and formatting rules
+                automatically.
               </Drawer.Description>
             </div>
             <Drawer.Close asChild>
-              <Button variant="ghost" size="icon-sm" aria-label="Close base prompt">
+              <Button variant="ghost" size="icon-sm" aria-label="Close clip brief">
                 <X className="size-4" />
               </Button>
             </Drawer.Close>
@@ -149,14 +149,14 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
                   </span>
                 ) : (
                   <span className="text-[11px] text-muted-foreground">
-                    Empty text falls back to the sidecar's built-in policy.
+                    Leave empty to use the built-in defaults.
                   </span>
                 )}
               </div>
 
               <div className="space-y-1.5">
                 <Label htmlFor="base-prompt" className="text-xs font-medium text-foreground/90">
-                  Prompt text
+                  What to look for
                 </Label>
                 <Textarea
                   id="base-prompt"

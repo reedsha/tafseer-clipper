@@ -54,14 +54,14 @@ test.describe("settings persistence edges", () => {
   test("a glossary pair with only the replacement typed survives a restart", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Glossary & Whisper" }).click();
+    await page.getByRole("tab", { name: "Glossary & transcription" }).click();
 
     await page.getByRole("button", { name: "Add pair" }).click();
     await page.getByLabel("Replace with").last().fill("ทดสอบ");
 
     await page.reload();
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Glossary & Whisper" }).click();
+    await page.getByRole("tab", { name: "Glossary & transcription" }).click();
 
     await expect(page.getByLabel("Replace with").last()).toHaveValue("ทดสอบ");
     // The row is kept, so the panel must say why it is inert.
@@ -110,13 +110,13 @@ test.describe("settings affordances", () => {
   test("provider sections say whether the current routing uses them", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "AI Providers" }).click();
+    await page.getByRole("tab", { name: "AI" }).click();
 
     const section = (heading: string) =>
       page.locator("section", { has: page.getByRole("heading", { name: heading }) });
-    const cloud = section("Unified cloud API");
-    const ollama = section("Local Ollama");
-    const cloudStt = section("Cloud STT API");
+    const cloud = section("Your AI account");
+    const ollama = section("This computer (Ollama)");
+    const cloudStt = section("Cloud speech-to-text");
 
     // Defaults: cloud analysis + local transcription.
     await expect(cloud.getByText("In use", { exact: true })).toBeVisible();
@@ -124,12 +124,12 @@ test.describe("settings affordances", () => {
     await expect(cloudStt.getByText("Not used", { exact: true })).toBeVisible();
 
     await page.getByRole("combobox", { name: "Topic analysis engine" }).click();
-    await page.getByRole("option", { name: "Local Ollama" }).click();
+    await page.getByRole("option", { name: "This computer (Ollama)" }).click();
 
     await expect(cloud.getByText("Not used", { exact: true })).toBeVisible();
     await expect(ollama.getByText("In use", { exact: true })).toBeVisible();
-    // Routing to Ollama without a model id must warn before Step 2 fails.
-    await expect(ollama.getByText(/Clip discovery will fail/)).toBeVisible();
+    // Routing to Ollama without a model name must warn before Step 2 fails.
+    await expect(ollama.getByText(/won't work until you enter a model name/)).toBeVisible();
   });
 
   test("editing the live style marks the active preset modified and updates it", async ({

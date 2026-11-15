@@ -13,6 +13,12 @@ import {
 /* -------------------------------------------------------------------------- */
 
 export type EngineMode = "local" | "cloud";
+
+/** Step 1 presentation: automatic hides every engine/model control. */
+export type EngineUiMode = "automatic" | "advanced";
+
+/** Interface language; Thai entries may fall back to English until reviewed. */
+export type UiLanguage = "en" | "th";
 export type ComputeType = "int8" | "float16" | "float32";
 export type FramingMode = "blur-fill" | "center-crop";
 export type Resolution = "1920x1080" | "1080x1920";
@@ -117,6 +123,8 @@ export interface SidecarState {
 export interface SettingsData {
   transcriptionMode: EngineMode;
   analysisMode: EngineMode;
+  engineUiMode: EngineUiMode;
+  uiLanguage: UiLanguage;
   cloud: CloudProviderSettings;
   ollama: OllamaSettings;
   cloudStt: CloudSttSettings;
@@ -138,6 +146,8 @@ export interface SettingsState extends SettingsData {
 
   setTranscriptionMode: (mode: EngineMode) => void;
   setAnalysisMode: (mode: EngineMode) => void;
+  setEngineUiMode: (mode: EngineUiMode) => void;
+  setUiLanguage: (language: UiLanguage) => void;
   updateCloud: (patch: Partial<CloudProviderSettings>) => void;
   updateOllama: (patch: Partial<OllamaSettings>) => void;
   updateCloudStt: (patch: Partial<CloudSttSettings>) => void;
@@ -284,6 +294,8 @@ const DEFAULT_GLOSSARY: GlossaryEntry[] = [
 const DEFAULT_DATA: SettingsData = {
   transcriptionMode: "local",
   analysisMode: "cloud",
+  engineUiMode: "automatic",
+  uiLanguage: "en",
   cloud: {
     baseUrl: "https://api.openai.com/v1",
     apiKey: "",
@@ -508,6 +520,8 @@ function coerceSettingsData(raw: unknown): SettingsData {
   return {
     transcriptionMode: asMode(raw.transcriptionMode, DEFAULT_DATA.transcriptionMode),
     analysisMode: asMode(raw.analysisMode, DEFAULT_DATA.analysisMode),
+    engineUiMode: raw.engineUiMode === "advanced" ? "advanced" : "automatic",
+    uiLanguage: raw.uiLanguage === "th" ? "th" : "en",
     cloud: {
       baseUrl: asString(cloud.baseUrl, DEFAULT_DATA.cloud.baseUrl),
       apiKey: asString(cloud.apiKey, DEFAULT_DATA.cloud.apiKey),
@@ -572,6 +586,8 @@ function pickSettingsData(state: SettingsState): SettingsData {
   return {
     transcriptionMode: state.transcriptionMode,
     analysisMode: state.analysisMode,
+    engineUiMode: state.engineUiMode,
+    uiLanguage: state.uiLanguage,
     cloud: state.cloud,
     ollama: state.ollama,
     cloudStt: state.cloudStt,
@@ -603,6 +619,8 @@ export const useSettingsStore = create<SettingsState>()(
 
       setTranscriptionMode: (mode) => set({ transcriptionMode: mode }),
       setAnalysisMode: (mode) => set({ analysisMode: mode }),
+      setEngineUiMode: (mode) => set({ engineUiMode: mode }),
+      setUiLanguage: (language) => set({ uiLanguage: language }),
 
       updateCloud: (patch) => set((state) => ({ cloud: { ...state.cloud, ...patch } })),
       updateOllama: (patch) => set((state) => ({ ollama: { ...state.ollama, ...patch } })),
