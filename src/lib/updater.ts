@@ -111,7 +111,7 @@ export function subscribeUpdaterStatus(listener: () => void): () => void {
   };
 }
 
-/** React binding for the status snapshot (Settings → Storage → Updates). */
+/** React binding for the status snapshot (Settings → Main → Updates). */
 export function useUpdaterStatus(): UpdaterStatus {
   return useSyncExternalStore(subscribeUpdaterStatus, getUpdaterStatus, getUpdaterStatus);
 }

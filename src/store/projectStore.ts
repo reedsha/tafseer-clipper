@@ -64,7 +64,7 @@ export interface ProjectState {
   setPromptPreset: (presetId: string | null) => void;
   setSessionGuide: (guide: string) => void;
   updateExportSettings: (patch: Partial<ProjectExportSettings>) => void;
-  /** Apply Settings → Editor export defaults to the active project only. */
+  /** Apply the Settings → 4 · Export defaults to the active project only. */
   applyExportDefaults: (patch: Partial<ProjectExportSettings>) => void;
 
   autosave: () => boolean;
@@ -84,7 +84,7 @@ function upsertRecent(list: RecentProject[], entry: RecentProject): RecentProjec
 
 /**
  * Step 3 and Step 4 edit the project's export settings directly. Mirroring the
- * shared fields into Settings → Editor keeps the persisted defaults honest;
+ * shared fields into Settings → 4 · Export keeps the persisted defaults honest;
  * without it the drawer keeps showing whatever was last edited there while the
  * exported file follows the project.
  */
@@ -263,7 +263,7 @@ export const useProjectStore = create<ProjectState>()(
           clips: [],
           selectedClipId: null,
           subtitles: {},
-          // Seed from Settings → Editor so the render path reads one source of
+          // Seed from Settings → 4 · Export so the render path reads one source of
           // truth (`project.export.*`) instead of a static default table.
           export: {
             resolution: editor.resolution,

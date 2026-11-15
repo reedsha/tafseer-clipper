@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type SettingsTab = "providers" | "fonts" | "glossary" | "editor" | "storage";
+export type SettingsTab = "stage1" | "stage2" | "stage3" | "stage4" | "main";
 
 interface UiState {
   commandOpen: boolean;
@@ -18,12 +18,12 @@ interface UiState {
 export const useUiStore = create<UiState>()((set) => ({
   commandOpen: false,
   settingsOpen: false,
-  settingsTab: "providers",
+  settingsTab: "main",
   recentOpen: false,
 
   setCommandOpen: (commandOpen) => set({ commandOpen }),
   toggleCommand: () => set((state) => ({ commandOpen: !state.commandOpen })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
-  openSettings: (tab = "providers") => set({ settingsOpen: true, settingsTab: tab }),
+  openSettings: (tab = "main") => set({ settingsOpen: true, settingsTab: tab }),
   setRecentOpen: (recentOpen) => set({ recentOpen }),
 }));

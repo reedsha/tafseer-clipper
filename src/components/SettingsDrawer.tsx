@@ -4,20 +4,18 @@ import NumberFlow from "@number-flow/react";
 import { toast } from "sonner";
 import {
   AlertTriangle,
-  Bot,
   Copy,
   Download,
   Eye,
   EyeOff,
   FolderOpen,
-  HardDrive,
-  Languages,
   Loader2,
   MoveRight,
   Pencil,
   Plus,
   RefreshCw,
   Save,
+  Scissors,
   SlidersHorizontal,
   Trash2,
   Type,
@@ -93,7 +91,6 @@ import { useProjectStore } from "@/store/projectStore";
 import {
   useSettingsStore,
   type ArabicStyle,
-  type EngineMode,
   type StylePreset,
   type ThaiStyle,
   type UiLanguage,
@@ -478,11 +475,11 @@ function UsageBadge({ active }: { active: boolean }) {
 /* -------------------------------------------------------------------------- */
 
 const TABS: { value: SettingsTab; label: string; icon: LucideIcon }[] = [
-  { value: "providers", label: "AI", icon: Bot },
-  { value: "fonts", label: "Fonts & Style", icon: Type },
-  { value: "glossary", label: "Glossary & transcription", icon: Languages },
-  { value: "editor", label: "Editor & Export", icon: SlidersHorizontal },
-  { value: "storage", label: "Storage & Backup", icon: HardDrive },
+  { value: "stage1", label: "1 · Upload & Transcribe", icon: Upload },
+  { value: "stage2", label: "2 · Find Clips", icon: Scissors },
+  { value: "stage3", label: "3 · Subtitles", icon: Type },
+  { value: "stage4", label: "4 · Export", icon: Download },
+  { value: "main", label: "Main", icon: SlidersHorizontal },
 ];
 
 const ARABIC_COLORS = [
@@ -708,8 +705,6 @@ export function SettingsDrawer() {
     fontsDir,
     sidecar,
     uiLanguage,
-    setTranscriptionMode,
-    setAnalysisMode,
     setUiLanguage,
     updateCloud,
     updateOllama,
@@ -1082,254 +1077,12 @@ export function SettingsDrawer() {
               </TabsList>
             </div>
 
-            {/* ------------------------------ Providers ------------------------------ */}
-            <TabsContent value="providers" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+            {/* --------------------- Stage 1 · Upload & Transcribe --------------------- */}
+            <TabsContent value="stage1" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
               <div className="space-y-5">
-                <Section title="Engine routing">
-                  <Field label="Transcription engine">
-                    <Select
-                      value={transcriptionMode}
-                      onValueChange={(value) => setTranscriptionMode(value as EngineMode)}
-                    >
-                      <SelectTrigger className="w-full" aria-label="Transcription engine">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="local">This computer (offline)</SelectItem>
-                        <SelectItem value="cloud">Cloud speech-to-text</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </Field>
-                  <Field label="Topic analysis engine">
-                    <Select
-                      value={analysisMode}
-                      onValueChange={(value) => setAnalysisMode(value as EngineMode)}
-                    >
-                      <SelectTrigger className="w-full" aria-label="Topic analysis engine">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="cloud">Your AI account</SelectItem>
-                        <SelectItem value="local">This computer (Ollama)</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </Field>
-                </Section>
-
-                <Separator />
-
-                <Section
-                  title="Your AI account"
-                  description="Used for finding clips and checking the Arabic."
-                  badge={<UsageBadge active={analysisMode === "cloud"} />}
-                >
-                  <Field label="Service">
-                    <Select
-                      value={cloudPresetId}
-                      onValueChange={(value) => {
-                        const preset = CLOUD_PRESETS.find((item) => item.id === value);
-                        if (preset?.baseUrl) updateCloud({ baseUrl: preset.baseUrl });
-                      }}
-                    >
-                      <SelectTrigger className="w-full" aria-label="AI service">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {CLOUD_PRESETS.map((preset) => (
-                          <SelectItem key={preset.id} value={preset.id}>
-                            {preset.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </Field>
-                  {cloudPresetId === "custom" ? (
-                    <Field label="Server address">
-                      <Input
-                        value={cloud.baseUrl}
-                        onChange={(event) => updateCloud({ baseUrl: event.target.value })}
-                        placeholder="https://api.openai.com/v1"
-                        aria-label="Cloud API server address"
-                        spellCheck={false}
-                        autoComplete="off"
-                      />
-                    </Field>
-                  ) : null}
-                  <Field label="API key">
-                    {/* Chromium logs a password-manager warning for a
-                        `type="password"` field outside a form; this one is
-                        inert (implicit submits are cancelled). */}
-                    <form onSubmit={(event) => event.preventDefault()}>
-                      <SecretInput
-                        label="Cloud API key"
-                        value={cloud.apiKey}
-                        onChange={(value) => updateCloud({ apiKey: value })}
-                        placeholder="sk-…"
-                      />
-                    </form>
-                  </Field>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <Field label="Model for finding clips">
-                      <ModelPicker
-                        label="Clip-finding model"
-                        value={cloud.reasoningModel}
-                        onChange={(value) => updateCloud({ reasoningModel: value })}
-                      />
-                    </Field>
-                    <Field label="Model for checking Arabic">
-                      <ModelPicker
-                        label="Arabic-check model"
-                        value={cloud.fastTextModel}
-                        onChange={(value) => updateCloud({ fastTextModel: value })}
-                      />
-                    </Field>
-                  </div>
-                  {analysisMode === "cloud" && providerGap ? (
-                    <p className="text-[11px] leading-relaxed text-status-warning">
-                      The Arabic checker isn't set up yet: add {providerGap}.
-                    </p>
-                  ) : null}
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="gap-1.5"
-                      onClick={() => void handleTestConnection()}
-                      disabled={testingConnection}
-                    >
-                      {testingConnection ? (
-                        <Loader2 className="size-3.5 animate-spin" />
-                      ) : (
-                        <RefreshCw className="size-3.5" />
-                      )}
-                      Test connection
-                    </Button>
-                    <span className="text-[11px] text-muted-foreground">
-                      Checks the connection, then asks{" "}
-                      {analysisMode === "local"
-                        ? "your Ollama model"
-                        : "your AI account"}{" "}
-                      to verify one Arabic verse.
-                    </span>
-                  </div>
-                </Section>
-
-                <Separator />
-
-                <Section
-                  title="This computer (Ollama)"
-                  description="Runs clip finding on this computer, offline."
-                  badge={<UsageBadge active={analysisMode === "local"} />}
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant="outline" className="gap-1.5 text-[10px]">
-                      <span
-                        aria-hidden
-                        className={cn(
-                          "size-1.5 rounded-full",
-                          ollamaDetected ? "bg-status-online" : "bg-muted-foreground/50",
-                        )}
-                      />
-                      {ollamaDetected ? "Ollama found" : "Ollama not found"}
-                    </Badge>
-                    <FitBadge tier={hardwareTier} />
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      className="h-5 text-muted-foreground"
-                      onClick={() => void refreshHealth()}
-                    >
-                      Check again
-                    </Button>
-                  </div>
-
-                  {hardwareTier ? (
-                    <p className="text-[11px] leading-relaxed text-muted-foreground">
-                      This computer: {fitSentence(hardwareTier)} Recommended:{" "}
-                      {recommendedLocal.label} ({recommendedLocal.model}).
-                    </p>
-                  ) : null}
-
-                  {ollamaDetected ? (
-                    ollamaModels.length > 0 ? (
-                      <Field label="Model">
-                        <Select
-                          value={ollama.model || undefined}
-                          onValueChange={(value) => updateOllama({ model: value })}
-                        >
-                          <SelectTrigger className="w-full" aria-label="Ollama model">
-                            <SelectValue placeholder="Choose an installed model" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {ollamaModels.map((name) => (
-                              <SelectItem key={name} value={name}>
-                                {name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </Field>
-                    ) : (
-                      <p className="text-[11px] leading-relaxed text-status-warning">
-                        Ollama is installed but has no AI models yet.
-                      </p>
-                    )
-                  ) : (
-                    <div className="space-y-2 rounded-md border border-border bg-card/40 px-3 py-2.5">
-                      <p className="text-[11px] leading-relaxed text-muted-foreground">
-                        Ollama isn't installed yet. It's free and runs everything offline.
-                      </p>
-                      <ol className="list-decimal space-y-0.5 pl-4 text-[11px] leading-relaxed text-muted-foreground">
-                        <li>Install Ollama.</li>
-                        <li>Install the recommended model.</li>
-                        <li>Come back and press Check again.</li>
-                      </ol>
-                      <div className="flex flex-wrap gap-1.5">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="gap-1.5"
-                          onClick={() => void handleGetOllama()}
-                        >
-                          <Download className="size-3.5" />
-                          Get Ollama
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="gap-1.5"
-                          onClick={() => void handleInstallLocalModel()}
-                        >
-                          Install a recommended model
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-
-                  {ollamaDetected && ollamaModels.length === 0 ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="gap-1.5"
-                      onClick={() => void handleInstallLocalModel()}
-                    >
-                      <Download className="size-3.5" />
-                      Install a recommended model
-                    </Button>
-                  ) : null}
-
-                  {analysisMode === "local" && ollamaIncomplete ? (
-                    <p className="text-[11px] leading-relaxed text-status-warning">
-                      Clip finding won't work until you enter a model name.
-                    </p>
-                  ) : null}
-                </Section>
-
-                <Separator />
-
                 <Section
                   title="Cloud speech-to-text"
-                  description="Used for transcription when you choose cloud speech-to-text."
+                  description="Used for transcription when you choose cloud speech-to-text. The engine itself is switched on the Step 1 screen."
                   badge={<UsageBadge active={transcriptionMode === "cloud"} />}
                 >
                   <Field label="Server address">
@@ -1367,12 +1120,239 @@ export function SettingsDrawer() {
                       Cloud transcription needs a server address and an API key.
                     </p>
                   ) : null}
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    Step 1 currently transcribes with:{" "}
+                    {transcriptionMode === "local"
+                      ? "this computer (offline)"
+                      : "cloud speech-to-text"}
+                    .
+                  </p>
+                </Section>
+
+                <Separator />
+
+                <Section
+                  title="Transcription model"
+                  description="How accurately speech is transcribed on this computer. Better models are slower."
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <FitBadge tier={hardwareTier} />
+                    <span className="text-[11px] text-muted-foreground">
+                      {whisperFitSentence(hardwareTier)}
+                    </span>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="Whisper model">
+                      <Select
+                        value={showCustomWhisperModel ? "custom" : whisper.model}
+                        onValueChange={(value) => {
+                          if (value === "custom") {
+                            setCustomWhisperModel(true);
+                            return;
+                          }
+                          setCustomWhisperModel(false);
+                          updateWhisper({ model: value });
+                        }}
+                      >
+                        <SelectTrigger className="w-full" aria-label="Whisper model">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {WHISPER_MODELS.map((item) => (
+                            <SelectItem key={item.value} value={item.value}>
+                              {item.label}
+                            </SelectItem>
+                          ))}
+                          <SelectItem value="custom">Custom…</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    <Field label="Transcription precision">
+                      <Select
+                        value={whisper.computeType}
+                        onValueChange={(value) =>
+                          updateWhisper({
+                            computeType: value as typeof whisper.computeType,
+                          })
+                        }
+                      >
+                        <SelectTrigger className="w-full" aria-label="Transcription precision">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="int8">Automatic (recommended)</SelectItem>
+                          <SelectItem value="float16">GPU, more accurate</SelectItem>
+                          <SelectItem value="float32">CPU, most compatible</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                  </div>
+                  {showCustomWhisperModel ? (
+                    <Field label="Custom model name" hint="Any Whisper model name">
+                      <Input
+                        value={whisper.model}
+                        onChange={(event) => updateWhisper({ model: event.target.value })}
+                        placeholder="large-v3-turbo"
+                        aria-label="Custom transcription model"
+                        spellCheck={false}
+                      />
+                    </Field>
+                  ) : null}
+                  <SwitchRow
+                    label="Free up memory after transcription"
+                    description="Releases the transcription model from GPU memory before rendering. No effect when transcription runs on the CPU."
+                    checked={whisper.autoUnload}
+                    onCheckedChange={(checked) => updateWhisper({ autoUnload: checked })}
+                  />
+                  <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-card/40 px-3 py-2">
+                    <GpuStatusLine summary={acceleration} />
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="gap-1 text-muted-foreground"
+                      onClick={() => openSettings("main")}
+                    >
+                      Manage in Main
+                      <MoveRight className="size-3" />
+                    </Button>
+                  </div>
+                </Section>
+
+                <Separator />
+
+                <Section
+                  title="Whisper Arabic hint"
+                  description="Editable initial_prompt vocabulary that improves Thai-to-Arabic code-switching accuracy."
+                >
+                  <Textarea
+                    value={whisper.initialPrompt}
+                    onChange={(event) => updateWhisper({ initialPrompt: event.target.value })}
+                    rows={7}
+                    spellCheck={false}
+                    aria-label="Whisper Arabic hint"
+                    className="font-mono text-xs leading-relaxed"
+                  />
+                </Section>
+
+                <Separator />
+
+                <Section
+                  title="Thai–Arabic spelling glossary"
+                  description="Applied automatically after transcription to fix common spelling variants."
+                >
+                  <div className="space-y-2">
+                    {glossary.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        No replacement pairs yet.
+                      </p>
+                    ) : null}
+                    {glossary.map((entry) => (
+                      <div key={entry.id} className="flex items-center gap-2">
+                        <Input
+                          value={entry.find}
+                          onChange={(event) =>
+                            updateGlossaryEntry(entry.id, { find: event.target.value })
+                          }
+                          placeholder="Find"
+                          aria-label="Find text"
+                          aria-invalid={entry.replace.trim() !== "" && !entry.find.trim()}
+                          className="h-8"
+                        />
+                        <MoveRight className="size-3.5 shrink-0 text-muted-foreground" />
+                        <Input
+                          value={entry.replace}
+                          onChange={(event) =>
+                            updateGlossaryEntry(entry.id, { replace: event.target.value })
+                          }
+                          placeholder="Replace"
+                          aria-label="Replace with"
+                          className="h-8"
+                        />
+                        <Switch
+                          checked={entry.enabled}
+                          onCheckedChange={(checked) =>
+                            updateGlossaryEntry(entry.id, { enabled: checked })
+                          }
+                          aria-label="Enable replacement"
+                        />
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label="Remove replacement"
+                          onClick={() => removeGlossaryEntry(entry.id)}
+                        >
+                          <Trash2 className="size-3.5" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                  {incompleteGlossaryCount > 0 ? (
+                    <p className="text-[11px] leading-relaxed text-status-warning">
+                      {incompleteGlossaryCount} pair
+                      {incompleteGlossaryCount === 1 ? " is" : "s are"} missing the text to
+                      find — {incompleteGlossaryCount === 1 ? "it is" : "they are"} skipped during
+                      transcription until you fill {incompleteGlossaryCount === 1 ? "it" : "them"} in.
+                    </p>
+                  ) : null}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5"
+                    onClick={addGlossaryEntry}
+                  >
+                    <Plus className="size-3.5" />
+                    Add pair
+                  </Button>
                 </Section>
               </div>
             </TabsContent>
 
-            {/* -------------------------------- Fonts -------------------------------- */}
-            <TabsContent value="fonts" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+            {/* ---------------------------- Stage 2 · Find Clips ---------------------------- */}
+            <TabsContent value="stage2" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+              <div className="space-y-5">
+                <Section
+                  title="Clip discovery model"
+                  description="Step 2 clip reasoning runs through the Topic analysis engine chosen on the Step 1 screen. All provider calls happen inside the sidecar."
+                >
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    Topic analysis engine:{" "}
+                    {analysisMode === "cloud" ? "Your AI account" : "This computer (Ollama)"} —
+                    switch engines on the Step 1 screen. Keys and endpoints live in Main settings.
+                  </p>
+                  <Field label="Model for finding clips">
+                    <ModelPicker
+                      label="Clip-finding model"
+                      value={cloud.reasoningModel}
+                      onChange={(value) => updateCloud({ reasoningModel: value })}
+                    />
+                  </Field>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    Used when the engine is your AI account; in This computer (Ollama) mode the
+                    model configured in Main settings is used instead.
+                  </p>
+                </Section>
+
+                <Separator />
+
+                <Section
+                  title="Cut buffer padding"
+                  description="Extra headroom kept before and after detected speech so clips never cut mid-word."
+                >
+                  <NumberField
+                    ariaLabel="Cut buffer padding"
+                    value={editor.cutBufferSeconds}
+                    onChange={(value) => updateEditor({ cutBufferSeconds: value })}
+                    suffix=" s"
+                    min={NUMERIC_LIMITS.cutBufferSeconds.min}
+                    max={NUMERIC_LIMITS.cutBufferSeconds.max}
+                    step={NUMERIC_LIMITS.cutBufferSeconds.step}
+                  />
+                </Section>
+              </div>
+            </TabsContent>
+
+            {/* ---------------------------- Stage 3 · Subtitles ---------------------------- */}
+            <TabsContent value="stage3" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
               <div className="space-y-5">
                 <Section
                   title="Custom font importer"
@@ -1703,227 +1683,33 @@ export function SettingsDrawer() {
                     Save current as preset
                   </Button>
                 </Section>
-              </div>
-            </TabsContent>
-
-            {/* ------------------------------- Glossary ------------------------------ */}
-            <TabsContent value="glossary" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
-              <div className="space-y-5">
-                <Section
-                  title="Thai–Arabic spelling glossary"
-                  description="Applied automatically after transcription to fix common spelling variants."
-                >
-                  <div className="space-y-2">
-                    {glossary.length === 0 ? (
-                      <p className="text-xs text-muted-foreground">
-                        No replacement pairs yet.
-                      </p>
-                    ) : null}
-                    {glossary.map((entry) => (
-                      <div key={entry.id} className="flex items-center gap-2">
-                        <Input
-                          value={entry.find}
-                          onChange={(event) =>
-                            updateGlossaryEntry(entry.id, { find: event.target.value })
-                          }
-                          placeholder="Find"
-                          aria-label="Find text"
-                          aria-invalid={entry.replace.trim() !== "" && !entry.find.trim()}
-                          className="h-8"
-                        />
-                        <MoveRight className="size-3.5 shrink-0 text-muted-foreground" />
-                        <Input
-                          value={entry.replace}
-                          onChange={(event) =>
-                            updateGlossaryEntry(entry.id, { replace: event.target.value })
-                          }
-                          placeholder="Replace"
-                          aria-label="Replace with"
-                          className="h-8"
-                        />
-                        <Switch
-                          checked={entry.enabled}
-                          onCheckedChange={(checked) =>
-                            updateGlossaryEntry(entry.id, { enabled: checked })
-                          }
-                          aria-label="Enable replacement"
-                        />
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          aria-label="Remove replacement"
-                          onClick={() => removeGlossaryEntry(entry.id)}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </Button>
-                      </div>
-                    ))}
-                  </div>
-                  {incompleteGlossaryCount > 0 ? (
-                    <p className="text-[11px] leading-relaxed text-status-warning">
-                      {incompleteGlossaryCount} pair
-                      {incompleteGlossaryCount === 1 ? " is" : "s are"} missing the text to
-                      find — {incompleteGlossaryCount === 1 ? "it is" : "they are"} skipped during
-                      transcription until you fill {incompleteGlossaryCount === 1 ? "it" : "them"} in.
-                    </p>
-                  ) : null}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="gap-1.5"
-                    onClick={addGlossaryEntry}
-                  >
-                    <Plus className="size-3.5" />
-                    Add pair
-                  </Button>
-                </Section>
 
                 <Separator />
 
                 <Section
-                  title="Whisper Arabic hint"
-                  description="Editable initial_prompt vocabulary that improves Thai-to-Arabic code-switching accuracy."
+                  title="Arabic verification"
+                  description="Checks the Uthmani Quranic/Hadith spelling of each Arabic line in Step 3."
                 >
-                  <Textarea
-                    value={whisper.initialPrompt}
-                    onChange={(event) => updateWhisper({ initialPrompt: event.target.value })}
-                    rows={7}
-                    spellCheck={false}
-                    aria-label="Whisper Arabic hint"
-                    className="font-mono text-xs leading-relaxed"
-                  />
-                </Section>
-
-                <Separator />
-
-                <Section
-                  title="Transcription model"
-                  description="How accurately speech is transcribed on this computer. Better models are slower."
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <FitBadge tier={hardwareTier} />
-                    <span className="text-[11px] text-muted-foreground">
-                      {whisperFitSentence(hardwareTier)}
-                    </span>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <Field label="Whisper model">
-                      <Select
-                        value={showCustomWhisperModel ? "custom" : whisper.model}
-                        onValueChange={(value) => {
-                          if (value === "custom") {
-                            setCustomWhisperModel(true);
-                            return;
-                          }
-                          setCustomWhisperModel(false);
-                          updateWhisper({ model: value });
-                        }}
-                      >
-                        <SelectTrigger className="w-full" aria-label="Whisper model">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {WHISPER_MODELS.map((item) => (
-                            <SelectItem key={item.value} value={item.value}>
-                              {item.label}
-                            </SelectItem>
-                          ))}
-                          <SelectItem value="custom">Custom…</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </Field>
-                    <Field label="Transcription precision">
-                      <Select
-                        value={whisper.computeType}
-                        onValueChange={(value) =>
-                          updateWhisper({
-                            computeType: value as typeof whisper.computeType,
-                          })
-                        }
-                      >
-                        <SelectTrigger className="w-full" aria-label="Transcription precision">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="int8">Automatic (recommended)</SelectItem>
-                          <SelectItem value="float16">GPU, more accurate</SelectItem>
-                          <SelectItem value="float32">CPU, most compatible</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </Field>
-                  </div>
-                  {showCustomWhisperModel ? (
-                    <Field label="Custom model name" hint="Any Whisper model name">
-                      <Input
-                        value={whisper.model}
-                        onChange={(event) => updateWhisper({ model: event.target.value })}
-                        placeholder="large-v3-turbo"
-                        aria-label="Custom transcription model"
-                        spellCheck={false}
-                      />
-                    </Field>
-                  ) : null}
-                  <SwitchRow
-                    label="Free up memory after transcription"
-                    description="Releases the transcription model from GPU memory before rendering. No effect when transcription runs on the CPU."
-                    checked={whisper.autoUnload}
-                    onCheckedChange={(checked) => updateWhisper({ autoUnload: checked })}
-                  />
-                </Section>
-
-                <Separator />
-
-                <Section
-                  title="GPU acceleration"
-                  description="Optional. The app detects a supported GPU, then downloads a signed acceleration pack — no driver setup. Without it everything runs on the CPU, which is slower but always available. GPU capability also decides whether hardware encoding can be enabled under Editor & Export."
-                >
-                  <GpuAccelerationPanel summary={acceleration} />
-                </Section>
-              </div>
-            </TabsContent>
-
-            {/* -------------------------------- Editor ------------------------------- */}
-            <TabsContent value="editor" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
-              <div className="space-y-5">
-                <Section
-                  title="Interface"
-                  description="Language of the app. Thai covers the add-lecture screen first; more screens follow."
-                >
-                  <Field label="Language">
-                    <Select
-                      value={uiLanguage}
-                      onValueChange={(value) => setUiLanguage(value as UiLanguage)}
-                    >
-                      <SelectTrigger className="w-full" aria-label="Language">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="en">English</SelectItem>
-                        <SelectItem value="th">ไทย</SelectItem>
-                      </SelectContent>
-                    </Select>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    Step 3 verification runs on:{" "}
+                    {analysisMode === "cloud" ? "Your AI account" : "This computer (Ollama)"} —
+                    switch engines on the Step 1 screen. The connection itself is configured in
+                    Main settings.
+                  </p>
+                  <Field label="Model for checking Arabic">
+                    <ModelPicker
+                      label="Arabic-check model"
+                      value={cloud.fastTextModel}
+                      onChange={(value) => updateCloud({ fastTextModel: value })}
+                    />
                   </Field>
                 </Section>
+              </div>
+            </TabsContent>
 
-                <Separator />
-
-                <Section
-                  title="Cut buffer padding"
-                  description="Extra headroom kept before and after detected speech so clips never cut mid-word."
-                >
-                  <NumberField
-                    ariaLabel="Cut buffer padding"
-                    value={editor.cutBufferSeconds}
-                    onChange={(value) => updateEditor({ cutBufferSeconds: value })}
-                    suffix=" s"
-                    min={NUMERIC_LIMITS.cutBufferSeconds.min}
-                    max={NUMERIC_LIMITS.cutBufferSeconds.max}
-                    step={NUMERIC_LIMITS.cutBufferSeconds.step}
-                  />
-                </Section>
-
-                <Separator />
-
+            {/* ------------------------------ Stage 4 · Export ------------------------------ */}
+            <TabsContent value="stage4" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+              <div className="space-y-5">
                 <Section
                   title="Filename template"
                   description="Pattern for exported MP4 names. Windows forbidden characters are sanitized automatically."
@@ -2051,7 +1837,7 @@ export function SettingsDrawer() {
                     description={
                       isGpuEncodingAvailable(acceleration)
                         ? "GPU ready — falls back to CPU encoding automatically if the driver refuses."
-                        : "CPU encoding is in use. Enable GPU acceleration in the Glossary & Whisper tab to turn this on."
+                        : "CPU encoding is in use. Enable GPU acceleration in Settings → Main to turn this on."
                     }
                     // Never claim GPU encoding is on while the hardware path is
                     // unavailable; the stored preference is kept for when it is.
@@ -2077,32 +1863,214 @@ export function SettingsDrawer() {
                       : "These defaults seed every new project."}
                   </p>
                 </Section>
-
-                <Separator />
-
-                <Section title="Keyboard shortcuts">
-                  <div className="space-y-1.5">
-                    {SHORTCUTS.map((shortcut) => (
-                      <div
-                        key={shortcut.keys}
-                        className="flex items-center justify-between gap-4 rounded-md border border-border bg-card/30 px-2.5 py-1.5"
-                      >
-                        <span className="text-[11px] text-muted-foreground">
-                          {shortcut.action}
-                        </span>
-                        <kbd className="rounded border border-border bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-foreground/80">
-                          {shortcut.keys}
-                        </kbd>
-                      </div>
-                    ))}
-                  </div>
-                </Section>
               </div>
             </TabsContent>
 
-            {/* ------------------------------- Storage ------------------------------- */}
-            <TabsContent value="storage" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+            {/* --------------------------------- Main --------------------------------- */}
+            <TabsContent value="main" className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
               <div className="space-y-5">
+                <Section
+                  title="Your AI account"
+                  description="Used for finding clips and checking the Arabic. The per-step models live in each step's settings; all provider calls run inside the sidecar."
+                  badge={<UsageBadge active={analysisMode === "cloud"} />}
+                >
+                  <Field label="Service">
+                    <Select
+                      value={cloudPresetId}
+                      onValueChange={(value) => {
+                        const preset = CLOUD_PRESETS.find((item) => item.id === value);
+                        if (preset?.baseUrl) updateCloud({ baseUrl: preset.baseUrl });
+                      }}
+                    >
+                      <SelectTrigger className="w-full" aria-label="AI service">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {CLOUD_PRESETS.map((preset) => (
+                          <SelectItem key={preset.id} value={preset.id}>
+                            {preset.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                  {cloudPresetId === "custom" ? (
+                    <Field label="Server address">
+                      <Input
+                        value={cloud.baseUrl}
+                        onChange={(event) => updateCloud({ baseUrl: event.target.value })}
+                        placeholder="https://api.openai.com/v1"
+                        aria-label="Cloud API server address"
+                        spellCheck={false}
+                        autoComplete="off"
+                      />
+                    </Field>
+                  ) : null}
+                  <Field label="API key">
+                    {/* Chromium logs a password-manager warning for a
+                        `type="password"` field outside a form; this one is
+                        inert (implicit submits are cancelled). */}
+                    <form onSubmit={(event) => event.preventDefault()}>
+                      <SecretInput
+                        label="Cloud API key"
+                        value={cloud.apiKey}
+                        onChange={(value) => updateCloud({ apiKey: value })}
+                        placeholder="sk-…"
+                      />
+                    </form>
+                  </Field>
+                  {analysisMode === "cloud" && providerGap ? (
+                    <p className="text-[11px] leading-relaxed text-status-warning">
+                      The Arabic checker isn't set up yet: add {providerGap}.
+                    </p>
+                  ) : null}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={() => void handleTestConnection()}
+                      disabled={testingConnection}
+                    >
+                      {testingConnection ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="size-3.5" />
+                      )}
+                      Test connection
+                    </Button>
+                    <span className="text-[11px] text-muted-foreground">
+                      Checks the connection, then asks{" "}
+                      {analysisMode === "local"
+                        ? "your Ollama model"
+                        : "your AI account"}{" "}
+                      to verify one Arabic verse.
+                    </span>
+                  </div>
+                </Section>
+
+                <Separator />
+
+                <Section
+                  title="This computer (Ollama)"
+                  description="Runs clip finding on this computer, offline."
+                  badge={<UsageBadge active={analysisMode === "local"} />}
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="outline" className="gap-1.5 text-[10px]">
+                      <span
+                        aria-hidden
+                        className={cn(
+                          "size-1.5 rounded-full",
+                          ollamaDetected ? "bg-status-online" : "bg-muted-foreground/50",
+                        )}
+                      />
+                      {ollamaDetected ? "Ollama found" : "Ollama not found"}
+                    </Badge>
+                    <FitBadge tier={hardwareTier} />
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="h-5 text-muted-foreground"
+                      onClick={() => void refreshHealth()}
+                    >
+                      Check again
+                    </Button>
+                  </div>
+
+                  {hardwareTier ? (
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">
+                      This computer: {fitSentence(hardwareTier)} Recommended:{" "}
+                      {recommendedLocal.label} ({recommendedLocal.model}).
+                    </p>
+                  ) : null}
+
+                  {ollamaDetected ? (
+                    ollamaModels.length > 0 ? (
+                      <Field label="Model">
+                        <Select
+                          value={ollama.model || undefined}
+                          onValueChange={(value) => updateOllama({ model: value })}
+                        >
+                          <SelectTrigger className="w-full" aria-label="Ollama model">
+                            <SelectValue placeholder="Choose an installed model" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {ollamaModels.map((name) => (
+                              <SelectItem key={name} value={name}>
+                                {name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                    ) : (
+                      <p className="text-[11px] leading-relaxed text-status-warning">
+                        Ollama is installed but has no AI models yet.
+                      </p>
+                    )
+                  ) : (
+                    <div className="space-y-2 rounded-md border border-border bg-card/40 px-3 py-2.5">
+                      <p className="text-[11px] leading-relaxed text-muted-foreground">
+                        Ollama isn't installed yet. It's free and runs everything offline.
+                      </p>
+                      <ol className="list-decimal space-y-0.5 pl-4 text-[11px] leading-relaxed text-muted-foreground">
+                        <li>Install Ollama.</li>
+                        <li>Install the recommended model.</li>
+                        <li>Come back and press Check again.</li>
+                      </ol>
+                      <div className="flex flex-wrap gap-1.5">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={() => void handleGetOllama()}
+                        >
+                          <Download className="size-3.5" />
+                          Get Ollama
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={() => void handleInstallLocalModel()}
+                        >
+                          Install a recommended model
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {ollamaDetected && ollamaModels.length === 0 ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={() => void handleInstallLocalModel()}
+                    >
+                      <Download className="size-3.5" />
+                      Install a recommended model
+                    </Button>
+                  ) : null}
+
+                  {analysisMode === "local" && ollamaIncomplete ? (
+                    <p className="text-[11px] leading-relaxed text-status-warning">
+                      Clip finding won't work until you enter a model name.
+                    </p>
+                  ) : null}
+                </Section>
+
+                <Separator />
+
+                <Section
+                  title="GPU acceleration"
+                  description="Optional. The app detects a supported GPU, then downloads a signed acceleration pack — no driver setup. Without it everything runs on the CPU, which is slower but always available. GPU capability also decides whether hardware encoding can be enabled in Settings → 4 · Export."
+                >
+                  <GpuAccelerationPanel summary={acceleration} />
+                </Section>
+
+                <Separator />
+
                 <Section
                   title="Auto-save & project folder"
                   description="Auto-save writes a .tafseer snapshot after every edit so a lecture can resume at Step 2 or 3."
@@ -2449,6 +2417,48 @@ export function SettingsDrawer() {
                     <span className="text-[11px] text-muted-foreground">
                       Diagnostics to the clipboard · API keys excluded
                     </span>
+                  </div>
+                </Section>
+
+                <Separator />
+
+                <Section
+                  title="Interface"
+                  description="Language of the app. Thai covers the add-lecture screen first; more screens follow."
+                >
+                  <Field label="Language">
+                    <Select
+                      value={uiLanguage}
+                      onValueChange={(value) => setUiLanguage(value as UiLanguage)}
+                    >
+                      <SelectTrigger className="w-full" aria-label="Language">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="en">English</SelectItem>
+                        <SelectItem value="th">ไทย</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                </Section>
+
+                <Separator />
+
+                <Section title="Keyboard shortcuts">
+                  <div className="space-y-1.5">
+                    {SHORTCUTS.map((shortcut) => (
+                      <div
+                        key={shortcut.keys}
+                        className="flex items-center justify-between gap-4 rounded-md border border-border bg-card/30 px-2.5 py-1.5"
+                      >
+                        <span className="text-[11px] text-muted-foreground">
+                          {shortcut.action}
+                        </span>
+                        <kbd className="rounded border border-border bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-foreground/80">
+                          {shortcut.keys}
+                        </kbd>
+                      </div>
+                    ))}
                   </div>
                 </Section>
               </div>

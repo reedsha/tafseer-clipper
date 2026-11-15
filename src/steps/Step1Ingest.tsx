@@ -462,9 +462,9 @@ export function Step1Ingest() {
     const settings = useSettingsStore.getState();
     if (settings.transcriptionMode === "cloud" && !settings.cloudStt.baseUrl.trim()) {
       toast.error("Cloud transcription isn't set up", {
-        description: "Set the service, model and API key in Settings → AI.",
+        description: "Set the service, model and API key in Settings → 1 · Upload & Transcribe.",
       });
-      useUiStore.getState().openSettings("providers");
+      useUiStore.getState().openSettings("stage1");
       return;
     }
 
@@ -476,7 +476,11 @@ export function Step1Ingest() {
       toast.error("Clip finding isn't set up yet", {
         description: analysisGapMessage(analysisGap),
       });
-      useUiStore.getState().openSettings("providers");
+      // The missing field picks the tab: the clip-finding model lives in the
+      // step 2 settings, keys/endpoints/Ollama model in Main.
+      useUiStore
+        .getState()
+        .openSettings(analysisGap.includes("clip-finding model") ? "stage2" : "main");
       return;
     }
 
@@ -981,8 +985,8 @@ export function Step1Ingest() {
                     <Button
                       variant="ghost"
                       size="icon-xs"
-                      aria-label="Open AI settings"
-                      onClick={() => openSettings("providers")}
+                      aria-label="Open AI connection settings"
+                      onClick={() => openSettings("main")}
                     >
                       <Settings2 className="size-3.5" />
                     </Button>
@@ -1016,7 +1020,11 @@ export function Step1Ingest() {
                       variant="ghost"
                       size="xs"
                       className="gap-1 text-muted-foreground"
-                      onClick={() => openSettings("providers")}
+                      onClick={() =>
+                        openSettings(
+                          analysisGap?.includes("clip-finding model") ? "stage2" : "main",
+                        )
+                      }
                     >
                       {t("step1.ai.change")}
                     </Button>
@@ -1079,7 +1087,11 @@ export function Step1Ingest() {
                           variant="ghost"
                           size="xs"
                           className="h-5 shrink-0 text-status-warning"
-                          onClick={() => openSettings("providers")}
+                          onClick={() =>
+                            openSettings(
+                              analysisGap.includes("clip-finding model") ? "stage2" : "main",
+                            )
+                          }
                         >
                           Fix
                         </Button>
@@ -1089,7 +1101,8 @@ export function Step1Ingest() {
                 )}
 
                 <p className="mt-3 text-xs leading-relaxed text-muted-foreground/80">
-                  Connections, models and the transcription prompt live in Settings → AI.
+                  API keys and connections live in Settings → Main; models, the transcription
+                  prompt and the glossary live in each step&rsquo;s settings.
                 </p>
               </section>
             </aside>

@@ -51,7 +51,7 @@ supports 8.1+, and WebView2 is installed by the NSIS bootstrapper when missing
 - [ ] On a machine **without** the GPU pack: transcription falls back to CPU with a visible "CPU (slower)" state instead of failing the step.
 - [ ] Transcription completes; duration/segment count match the lecture; glossary replacements applied.
 - [ ] Cancel during transcription leaves no orphan `ffmpeg.exe`; error is actionable.
-- [ ] Settings → AI Providers: `[Test Connection]` reaches the configured provider and reports the resolved model; a bad key shows the provider's error.
+- [ ] Settings → Main: `[Test Connection]` reaches the configured provider and reports the resolved model; a bad key shows the provider's error.
 - [ ] Prompt preset selection/editing persists across restart.
 
 ## 3. Step 2 — Find Clips

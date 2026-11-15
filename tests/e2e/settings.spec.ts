@@ -26,7 +26,7 @@ test.describe("settings persistence edges", () => {
   }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Storage & Backup" }).click();
+    await page.getByRole("tab", { name: "Main" }).click();
 
     await page
       .locator('input[type="file"][accept*="json"]')
@@ -54,14 +54,14 @@ test.describe("settings persistence edges", () => {
   test("a glossary pair with only the replacement typed survives a restart", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Glossary & transcription" }).click();
+    await page.getByRole("tab", { name: "1 · Upload & Transcribe" }).click();
 
     await page.getByRole("button", { name: "Add pair" }).click();
     await page.getByLabel("Replace with").last().fill("ทดสอบ");
 
     await page.reload();
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Glossary & transcription" }).click();
+    await page.getByRole("tab", { name: "1 · Upload & Transcribe" }).click();
 
     await expect(page.getByLabel("Replace with").last()).toHaveValue("ทดสอบ");
     // The row is kept, so the panel must say why it is inert.
@@ -71,7 +71,7 @@ test.describe("settings persistence edges", () => {
   test("renaming a preset requires a new, non-empty name", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Fonts & Style" }).click();
+    await page.getByRole("tab", { name: "3 · Subtitles" }).click();
 
     await page.getByRole("button", { name: /^Rename / }).first().click();
     const nameInput = page.getByPlaceholder("Preset name");
@@ -93,7 +93,7 @@ test.describe("settings affordances", () => {
   test("filename templates flag placeholders the sidecar will not resolve", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Editor & Export" }).click();
+    await page.getByRole("tab", { name: "4 · Export" }).click();
 
     const template = page.getByLabel("Filename template");
     await template.fill("{LectureName}_{LecureName}_{01}");
@@ -109,23 +109,37 @@ test.describe("settings affordances", () => {
 
   test("provider sections say whether the current routing uses them", async ({ page }) => {
     await page.goto("/");
-    await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "AI" }).click();
+
+    // Engine routing lives on the Step 1 screen now; the settings drawer only
+    // shows which of its sections the routing uses.
+    await page
+      .getByRole("group", { name: "AI setup mode" })
+      .getByRole("button", { name: "Advanced" })
+      .click();
 
     const section = (heading: string) =>
       page.locator("section", { has: page.getByRole("heading", { name: heading }) });
-    const cloud = section("Your AI account");
-    const ollama = section("This computer (Ollama)");
-    const cloudStt = section("Cloud speech-to-text");
 
     // Defaults: cloud analysis + local transcription.
+    await page.getByRole("button", { name: "Open settings" }).click();
+    await page.getByRole("tab", { name: "Main" }).click();
+    const cloud = section("Your AI account");
+    const ollama = section("This computer (Ollama)");
     await expect(cloud.getByText("In use", { exact: true })).toBeVisible();
     await expect(ollama.getByText("Not used", { exact: true })).toBeVisible();
+
+    await page.getByRole("tab", { name: "1 · Upload & Transcribe" }).click();
+    const cloudStt = section("Cloud speech-to-text");
     await expect(cloudStt.getByText("Not used", { exact: true })).toBeVisible();
 
-    await page.getByRole("combobox", { name: "Topic analysis engine" }).click();
-    await page.getByRole("option", { name: "This computer (Ollama)" }).click();
+    await page.getByRole("button", { name: "Close settings" }).click();
+    await page
+      .getByRole("group", { name: "Topic analysis engine" })
+      .getByRole("button", { name: "This computer" })
+      .click();
 
+    await page.getByRole("button", { name: "Open settings" }).click();
+    await page.getByRole("tab", { name: "Main" }).click();
     await expect(cloud.getByText("Not used", { exact: true })).toBeVisible();
     await expect(ollama.getByText("In use", { exact: true })).toBeVisible();
     // Routing to Ollama without a model name must warn before Step 2 fails.
@@ -137,7 +151,7 @@ test.describe("settings affordances", () => {
   }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Fonts & Style" }).click();
+    await page.getByRole("tab", { name: "3 · Subtitles" }).click();
 
     const slider = page.getByRole("slider", { name: "Arabic font size" });
     await expect(page.getByText("Modified", { exact: true })).toHaveCount(0);
@@ -164,7 +178,7 @@ test.describe("settings affordances", () => {
   }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Fonts & Style" }).click();
+    await page.getByRole("tab", { name: "3 · Subtitles" }).click();
 
     const trigger = page.getByRole("button", {
       name: "Type an exact value for Arabic font size",
@@ -185,7 +199,7 @@ test.describe("settings affordances", () => {
     await expect(slider).toHaveAttribute("aria-valuenow", "120");
 
     // Fractional steps snap to the grid the slider can show.
-    await page.getByRole("tab", { name: "Editor & Export" }).click();
+    await page.getByRole("tab", { name: "2 · Find Clips" }).click();
     await page.getByRole("button", { name: "Type an exact value for Cut buffer padding" }).click();
     await page.getByRole("textbox", { name: "Cut buffer padding" }).fill("0.42");
     await page.getByRole("textbox", { name: "Cut buffer padding" }).press("Enter");
@@ -200,10 +214,10 @@ test.describe("settings affordances", () => {
   }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Fonts & Style" }).click();
+    await page.getByRole("tab", { name: "3 · Subtitles" }).click();
 
-    // Master plan §5.2: max chars per line belongs to the Thai defaults, next to
-    // the font size it multiplies into a rendered line width.
+    // Max chars per line belongs to the Thai defaults, next to the font size it
+    // multiplies into a rendered line width.
     const maxChars = page.getByRole("slider", { name: "Max characters per line" });
     await expect(maxChars).toBeVisible();
 
@@ -221,15 +235,15 @@ test.describe("settings affordances", () => {
     const shortened = Number(await maxChars.getAttribute("aria-valuenow"));
     expect(shortened).toBeLessThan(40);
 
-    // The control no longer lives in the editor tab.
-    await page.getByRole("tab", { name: "Editor & Export" }).click();
+    // The control no longer lives with the export settings.
+    await page.getByRole("tab", { name: "4 · Export" }).click();
     await expect(page.getByRole("slider", { name: "Max characters per line" })).toHaveCount(0);
   });
 
   test("horizontal drags inside the drawer never slide the panel", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Fonts & Style" }).click();
+    await page.getByRole("tab", { name: "3 · Subtitles" }).click();
 
     const drawer = page.locator("[data-vaul-drawer]");
     const startX = (await drawer.boundingBox())!.x;

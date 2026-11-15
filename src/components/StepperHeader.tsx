@@ -1,5 +1,5 @@
 import NumberFlow from "@number-flow/react";
-import { Check, Command, History, Settings } from "lucide-react";
+import { Check, Command, History, Settings, Settings2 } from "lucide-react";
 import { cn } from "cn";
 
 import { BrandMark } from "@/components/BrandMark";
@@ -19,9 +19,17 @@ import { STEP_LABELS, type WizardStep } from "@/lib/projectTypes";
 import { useProjectStore } from "@/store/projectStore";
 import { useRenderStore } from "@/store/renderStore";
 import { useSettingsStore } from "@/store/settingsStore";
-import { useUiStore } from "@/store/uiStore";
+import { useUiStore, type SettingsTab } from "@/store/uiStore";
 
 const STEPS: WizardStep[] = [1, 2, 3, 4];
+
+/** Settings drawer tab opened by each stage pill's gear. */
+const STAGE_TABS: Record<WizardStep, SettingsTab> = {
+  1: "stage1",
+  2: "stage2",
+  3: "stage3",
+  4: "stage4",
+};
 
 /**
  * A step is complete when its work exists, not merely because the wizard moved
@@ -78,7 +86,7 @@ export function StepperHeader() {
         <BrandMark variant="bold" className="size-7 text-brand-cream" />
         <div className="leading-tight">
           <div className="text-[13px] font-medium text-foreground">Tafseer Clipper</div>
-          <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+          <div className="hidden text-[10px] uppercase tracking-[0.18em] text-muted-foreground xl:block">
             Subtitle studio
           </div>
         </div>
@@ -86,44 +94,71 @@ export function StepperHeader() {
 
       <Separator orientation="vertical" className="mx-1 h-6" />
 
-      <nav aria-label="Wizard steps" className="flex items-center gap-0.5">
+      <nav aria-label="Wizard steps" className="flex items-center gap-1">
         {STEPS.map((step) => {
           const active = currentStep === step;
           const done = stepCompletion(step, project, renderDoneForProject);
           const disabled = project === null && step !== 1;
           return (
-            <Button
+            <div
               key={step}
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => setStep(step)}
-              disabled={disabled}
-              aria-current={active ? "step" : undefined}
-              aria-label={`${step}. ${STEP_LABELS[step]}${done ? ", complete" : ""}`}
               className={cn(
-                "h-auto gap-2 px-2.5 py-1.5 text-xs font-normal",
+                "flex items-center rounded-md border",
                 active
-                  ? "bg-accent text-foreground hover:bg-accent"
-                  : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+                  ? "border-ring/30 bg-accent"
+                  : "border-border/50 hover:bg-accent/40",
               )}
             >
-              <span
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setStep(step)}
+                disabled={disabled}
+                aria-current={active ? "step" : undefined}
+                aria-label={`${step}. ${STEP_LABELS[step]}${done ? ", complete" : ""}`}
                 className={cn(
-                  "flex size-5 items-center justify-center rounded-full border text-[10px] tabular-nums",
+                  "h-auto gap-2 px-3 py-1.5 text-xs font-normal hover:bg-transparent",
                   active
-                    ? "border-ring/50 bg-secondary text-foreground"
-                    : done
-                      ? "border-border bg-secondary/60 text-foreground"
-                      : "border-border text-muted-foreground",
+                    ? "text-foreground hover:bg-transparent"
+                    : "text-muted-foreground hover:text-foreground",
                 )}
               >
-                {done ? <Check className="size-3" /> : step}
-              </span>
-              <span className="whitespace-nowrap">
-                {step}. {STEP_LABELS[step]}
-              </span>
-            </Button>
+                <span
+                  className={cn(
+                    "flex size-5 items-center justify-center rounded-full border text-[10px] tabular-nums",
+                    active
+                      ? "border-ring/50 bg-secondary text-foreground"
+                      : done
+                        ? "border-border bg-secondary/60 text-foreground"
+                        : "border-border text-muted-foreground",
+                  )}
+                >
+                  {done ? <Check className="size-3" /> : step}
+                </span>
+                <span className="whitespace-nowrap">
+                  {step}. {STEP_LABELS[step]}
+                </span>
+              </Button>
+              <Separator orientation="vertical" className="h-4" />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={`Step ${step} settings`}
+                    onClick={() => openSettings(STAGE_TABS[step])}
+                    className="mr-0.5 text-muted-foreground hover:text-foreground"
+                  >
+                    <Settings2 className="size-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="text-xs">
+                  {STEP_LABELS[step]} settings
+                </TooltipContent>
+              </Tooltip>
+            </div>
           );
         })}
       </nav>

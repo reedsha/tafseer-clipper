@@ -14,11 +14,20 @@ test.describe("app shell", () => {
 
     const stepper = page.getByRole("navigation", { name: "Wizard steps" });
     await expect(stepper).toBeVisible();
-    await expect(stepper.getByRole("button")).toHaveCount(4);
+    // Each stage pill holds the step button plus its settings gear.
+    await expect(stepper.getByRole("button")).toHaveCount(8);
     await expect(stepper.getByRole("button", { name: /1\. Upload/ })).toHaveAttribute(
       "aria-current",
       "step",
     );
+
+    // The gear on a stage pill opens that stage's settings tab.
+    await stepper.getByRole("button", { name: "Step 2 settings" }).click();
+    await expect(page.getByRole("tab", { name: "2 · Find Clips" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await page.getByRole("button", { name: "Close settings" }).click();
 
     // /health is real: the LED flips to online once the sidecar answers.
     await expect(page.getByRole("button", { name: "Engine ready" })).toBeVisible({
@@ -39,16 +48,16 @@ test.describe("app shell", () => {
 
     await expect(page.getByRole("tab")).toHaveCount(5);
     for (const name of [
-      "AI",
-      "Fonts & Style",
-      "Glossary & transcription",
-      "Editor & Export",
-      "Storage & Backup",
+      "1 · Upload & Transcribe",
+      "2 · Find Clips",
+      "3 · Subtitles",
+      "4 · Export",
+      "Main",
     ]) {
       await expect(page.getByRole("tab", { name })).toBeVisible();
     }
 
-    await page.getByRole("tab", { name: "Storage & Backup" }).click();
+    await page.getByRole("tab", { name: "Main" }).click();
     await expect(page.getByRole("heading", { name: "Updates" })).toBeVisible();
     await expect(
       page.getByText("Updates are available in the installed desktop app."),
@@ -103,7 +112,7 @@ test.describe("app shell", () => {
     await page.goto("/");
 
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Glossary & transcription" }).click();
+    await page.getByRole("tab", { name: "Main" }).click();
 
     await expect(page.getByRole("heading", { name: "GPU acceleration" })).toBeVisible();
     // Browser builds cannot download the pack: the section must say so instead
@@ -121,7 +130,7 @@ test.describe("app shell", () => {
     await expect(page.getByRole("heading", { name: "Add your lecture" })).toBeVisible();
 
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Editor & Export" }).click();
+    await page.getByRole("tab", { name: "Main" }).click();
     await page.getByRole("combobox", { name: "Language", exact: true }).click();
     await page.getByRole("option", { name: "ไทย" }).click();
     await page.getByRole("button", { name: "Close settings" }).click();

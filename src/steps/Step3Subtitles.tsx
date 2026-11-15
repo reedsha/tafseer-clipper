@@ -477,10 +477,10 @@ export function Step3Subtitles() {
       const settings = useSettingsStore.getState();
       if (settings.analysisMode === "cloud" && !settings.cloud.fastTextModel) {
         toast.error("The Arabic checker isn't connected yet", {
-          description: "Choose a model in Settings → AI.",
+          description: "Choose a model in Settings → 3 · Subtitles.",
           action: {
             label: "Set up",
-            onClick: () => useUiStore.getState().openSettings("providers"),
+            onClick: () => useUiStore.getState().openSettings("stage3"),
           },
         });
         return;
@@ -815,7 +815,7 @@ export function Step3Subtitles() {
                   <p className="flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
                     <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                     The Arabic and Thai lines overlap by {Math.abs(Math.round(overlap.gap))} px.
-                    Adjust the sizes in Settings → Fonts.
+                    Adjust the sizes in Settings → 3 · Subtitles.
                   </p>
                 ) : (
                   <p className="flex items-center gap-1.5 text-xs text-muted-foreground/80">

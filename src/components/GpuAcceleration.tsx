@@ -222,7 +222,7 @@ function GpuPackAction({ summary }: { summary: AccelerationSummary }) {
 
 /**
  * Full acceleration panel: status, explanation, CPU fallback and the one-click
- * GPU pack action. Used in Settings → Glossary & Whisper.
+ * GPU pack action. Used in Settings → Main.
  */
 export function GpuAccelerationPanel({ summary }: { summary: AccelerationSummary }) {
   const pack = useAccelerationPack();
@@ -296,7 +296,7 @@ export function GpuInlineHint({ summary }: { summary: AccelerationSummary }) {
       <Cpu className="mt-0.5 size-3 shrink-0" />
       <span>
         {summary.state === "cpu-only"
-          ? "CPU transcription — slower, always available. Enable GPU acceleration in Settings → Glossary & Whisper if your machine supports it."
+          ? "CPU transcription — slower, always available. Enable GPU acceleration in Settings → Main if your machine supports it."
           : "Local transcription runs on this machine. CPU transcription is always available."}
       </span>
     </p>

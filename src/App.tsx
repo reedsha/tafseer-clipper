@@ -66,10 +66,10 @@ export default function App() {
         onAvailable: (result) => {
           toast.info(`Tafseer Clipper ${result.version} is available`, {
             description:
-              "Open Settings → Storage to install it. Nothing installs automatically.",
+              "Open Settings → Main to install it. Nothing installs automatically.",
             action: {
               label: "View updates",
-              onClick: () => useUiStore.getState().openSettings("storage"),
+              onClick: () => useUiStore.getState().openSettings("main"),
             },
             duration: 12_000,
           });

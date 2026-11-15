@@ -65,7 +65,7 @@ export const IDLE_RENDER_JOB: RenderJobState = {
  * unknown, so the UI must leave the "running" state instead of hanging.
  */
 const STREAM_INTERRUPTED_MESSAGE =
-  "The render stopped before it finished. Render the batch again; if it keeps happening, copy diagnostics from Settings → Storage.";
+  "The render stopped before it finished. Render the batch again; if it keeps happening, copy diagnostics from Settings → Main.";
 const STREAM_INTERRUPTED_CLIP_DETAIL =
   "The render stream closed before this clip reported completion.";
 

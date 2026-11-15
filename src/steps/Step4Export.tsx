@@ -632,7 +632,7 @@ export function Step4Export() {
                   <p className="flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
                     <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                     The two lines overlap by {Math.abs(Math.round(overlap.gap))} px at this font
-                    size. Reduce the font size or the Harakat padding in Settings → Fonts.
+                    size. Reduce the font size or the Harakat padding in Settings → 3 · Subtitles.
                   </p>
                 ) : null}
               </CollapsibleContent>

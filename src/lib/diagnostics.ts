@@ -1,7 +1,7 @@
 /**
  * Support diagnostics bundle for the release build.
  *
- * "Copy diagnostics" in Settings → Storage needs one pasteable blob with the
+ * "Copy diagnostics" in Settings → Main needs one pasteable blob with the
  * versions, paths and health snapshot a maintainer would ask for. It is built
  * from data the app already has (the `/health` payload polled by the store) and
  * never includes API keys, prompts, transcripts or file contents.
@@ -17,7 +17,7 @@ export interface DiagnosticsInput {
   health: HealthResponse | null;
   sidecarStatus: string;
   sidecarError: string | null;
-  /** Settings → Storage → Project folder. */
+  /** Settings → Main → Project folder. */
   projectFolder: string;
   lastAutosaveError: string | null;
 }

@@ -2,19 +2,18 @@ import { useEffect } from "react";
 import { toast } from "sonner";
 import {
   Activity,
-  Bot,
   Captions,
   Cpu,
   Download,
   FilePlus2,
   FolderOpen,
   Gauge,
-  HardDrive,
   History,
-  Languages,
   Save,
+  Scissors,
   SlidersHorizontal,
   Type,
+  Upload,
 } from "lucide-react";
 
 import {
@@ -35,12 +34,12 @@ import { useUiStore, type SettingsTab } from "@/store/uiStore";
 
 const STEPS: WizardStep[] = [1, 2, 3, 4];
 
-const SETTINGS_ENTRIES: { tab: SettingsTab; label: string; icon: typeof Bot }[] = [
-  { tab: "providers", label: "AI setup & models", icon: Bot },
-  { tab: "fonts", label: "Fonts & dual-line style presets", icon: Type },
-  { tab: "glossary", label: "Glossary, transcription & GPU", icon: Languages },
-  { tab: "editor", label: "Editor & export defaults", icon: SlidersHorizontal },
-  { tab: "storage", label: "Storage, auto-save & backup", icon: HardDrive },
+const SETTINGS_ENTRIES: { tab: SettingsTab; label: string; icon: typeof SlidersHorizontal }[] = [
+  { tab: "stage1", label: "Step 1 settings — upload, transcription & glossary", icon: Upload },
+  { tab: "stage2", label: "Step 2 settings — clip discovery", icon: Scissors },
+  { tab: "stage3", label: "Step 3 settings — subtitles, fonts & style", icon: Type },
+  { tab: "stage4", label: "Step 4 settings — export defaults", icon: Download },
+  { tab: "main", label: "Main settings — connections, hardware & storage", icon: SlidersHorizontal },
 ];
 
 function describeError(error: unknown): string {
@@ -126,7 +125,7 @@ export function CommandMenu() {
     }
   }
 
-  // Settings → Editor holds the defaults; the open project holds the live
+  // Settings → 4 · Export holds the defaults; the open project holds the live
   // value. Show the effective one so the palette can never lie about the
   // export that Step 3/4 will actually run.
   const resolution: Resolution = project?.export.resolution ?? editor.resolution;
