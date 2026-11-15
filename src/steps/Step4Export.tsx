@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 
 import { encodingAvailabilityText } from "@/components/GpuAcceleration";
+import { InlineError } from "@/components/InlineError";
 import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { TimeFlow } from "@/components/TimeFlow";
 import { Badge } from "@/components/ui/badge";
@@ -44,6 +45,7 @@ import {
   resolveClipFileName,
 } from "@/lib/filenameTemplate";
 import { describeAcceleration, isGpuEncodingAvailable } from "@/lib/acceleration";
+import { openDirectory, openPathInShell } from "@/lib/media";
 import type { FramingMode, ProjectClip, Resolution } from "@/lib/projectTypes";
 import { FRAMING_LABELS } from "@/lib/projectTypes";
 import { resolveAssStyles, stylesOverlap } from "@/lib/subtitleStyles";
@@ -171,6 +173,18 @@ export function Step4Export() {
     } catch {
       toast.error("Could not copy the path");
     }
+  };
+
+  const chooseOutputFolder = async () => {
+    const folder = await openDirectory("Choose the output folder");
+    if (folder) updateExportSettings({ outputDir: folder });
+  };
+
+  const openOutputFolder = async () => {
+    const path = sidecarOutputDir ?? resolvedOutputDir;
+    if (!path) return;
+    const opened = await openPathInShell(path);
+    if (!opened) await copyOutputPath();
   };
 
   /* ------------------------------ totals ------------------------------ */
@@ -565,17 +579,27 @@ export function Step4Export() {
               <Label htmlFor="output-dir" className="text-[13px] font-medium text-foreground">
                 Output folder
               </Label>
-              <Input
-                id="output-dir"
-                value={outputDir ?? ""}
-                onChange={(event) =>
-                  updateExportSettings({ outputDir: event.target.value || null })
-                }
-                placeholder={resolvedOutputDir || "Choose a folder"}
-                spellCheck={false}
-                className="font-mono text-xs"
-              />
-              <p className="text-[10px] leading-relaxed text-muted-foreground">
+              <div className="flex items-center gap-2">
+                <Input
+                  id="output-dir"
+                  value={outputDir ?? ""}
+                  onChange={(event) =>
+                    updateExportSettings({ outputDir: event.target.value || null })
+                  }
+                  placeholder={resolvedOutputDir || "Choose a folder"}
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => void chooseOutputFolder()}
+                >
+                  Browse…
+                </Button>
+              </div>
+              <p className="text-xs leading-relaxed text-muted-foreground">
                 {outputDir?.trim()
                   ? "Files are written to this folder."
                   : "Empty — files go to the exports folder next to the lecture."}
@@ -626,10 +650,9 @@ export function Step4Export() {
             ) : null}
 
             {sidecar.status === "offline" ? (
-              <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-xs leading-relaxed text-destructive">
-                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                <div className="flex-1 space-y-1">
-                  <p>{sidecar.error ?? "The processing engine isn't responding."}</p>
+              <InlineError
+                title="The processing engine isn't responding."
+                action={
                   <Button
                     variant="ghost"
                     size="xs"
@@ -638,8 +661,10 @@ export function Step4Export() {
                   >
                     Retry
                   </Button>
-                </div>
-              </div>
+                }
+              >
+                Rendering needs the engine. Retry, or restart the app if this keeps happening.
+              </InlineError>
             ) : null}
           </div>
 
@@ -692,6 +717,14 @@ export function Step4Export() {
                     ? `Saving to: ${resolvedOutputDir}`
                     : "The output folder is chosen when rendering starts."}
               </span>
+              <Button
+                variant="ghost"
+                size="xs"
+                disabled={!sidecarOutputDir && !resolvedOutputDir}
+                onClick={() => void openOutputFolder()}
+              >
+                Open folder
+              </Button>
               <Button
                 variant="ghost"
                 size="xs"

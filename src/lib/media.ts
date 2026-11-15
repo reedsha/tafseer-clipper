@@ -180,6 +180,36 @@ export async function openDirectory(
   }
 }
 
+/**
+ * Open a file or folder in the OS default app / Explorer. Returns `false` when
+ * the shell opener is unavailable so callers can fall back to copying the path.
+ */
+export async function openPathInShell(path: string): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  try {
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    await openPath(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Open a documentation or download link in the user's browser. */
+export async function openExternalUrl(url: string): Promise<boolean> {
+  try {
+    if (!isTauriRuntime()) {
+      window.open(url, "_blank", "noopener,noreferrer");
+      return true;
+    }
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export interface NativeDropHandlers {
   onEnter?: () => void;
   onLeave?: () => void;

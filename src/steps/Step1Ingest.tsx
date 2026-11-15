@@ -24,6 +24,7 @@ import { cn } from "cn";
 
 import { PromptDrawer } from "@/components/PromptDrawer";
 import { GpuInlineHint } from "@/components/GpuAcceleration";
+import { InlineError } from "@/components/InlineError";
 import { RecentProjectsBar } from "@/components/RecentProjectsBar";
 import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { SidecarStatusDot, SIDECAR_STATUS_LABEL } from "@/components/SidecarStatusDot";
@@ -268,25 +269,21 @@ export function Step1Ingest() {
         stagePath(maybePath, file.name);
         return;
       }
-      if (useProjectStore.getState().project?.sourcePath) {
-        toast.error("Desktop shell required", {
-          description:
-            "The open lecture already has a file path. Drop the replacement from Explorer inside the desktop app.",
-        });
-        return;
-      }
-      if (useProjectStore.getState().project?.transcript) {
-        toast.error("Replace the lecture first", {
-          description:
-            "This project already has a transcript. Use Replace lecture in the desktop shell to start a new one.",
+      const projectNow = useProjectStore.getState().project;
+      if (projectNow?.sourcePath || projectNow?.transcript) {
+        toast.error("Please open the Tafseer Clipper desktop app", {
+          description: import.meta.env.DEV
+            ? "The open lecture already has a file path. Drop the replacement from Explorer inside the desktop app."
+            : "Lectures are transcribed in the desktop app.",
         });
         return;
       }
       setBrowserFile({ name: file.name, size: file.size });
       setError(null);
       toast("File selected", {
-        description:
-          "The browser cannot expose an absolute path. Launch the desktop shell to transcribe it.",
+        description: import.meta.env.DEV
+          ? "The browser preview cannot read files from disk. Launch the desktop app to transcribe it."
+          : "Please open the Tafseer Clipper desktop app to transcribe this lecture.",
       });
     },
     [stagePath],
@@ -452,8 +449,9 @@ export function Step1Ingest() {
     const current = useProjectStore.getState().project;
     if (!current?.sourcePath) {
       toast.error("Lecture path missing", {
-        description:
-          "The browser preview cannot read absolute paths. Drop the file from Explorer in the desktop shell.",
+        description: import.meta.env.DEV
+          ? "The browser preview cannot read absolute paths. Drop the file from Explorer in the desktop app."
+          : "Choose the lecture again from the desktop app.",
       });
       return;
     }
@@ -732,8 +730,9 @@ export function Step1Ingest() {
                 {browserFile ? (
                   <p className="mt-3 flex max-w-md items-start gap-1.5 text-left text-xs leading-relaxed text-status-warning">
                     <Info className="mt-0.5 size-3.5 shrink-0" />
-                    This browser preview cannot expose the file's absolute path. Launch the desktop
-                    shell and drop the same file from Explorer to transcribe it.
+                    {import.meta.env.DEV
+                      ? "Dev preview: the browser cannot read this file from disk. Drop the same file from Explorer in the desktop app to transcribe it."
+                      : "Open the Tafseer Clipper desktop app to transcribe this lecture."}
                   </p>
                 ) : null}
               </section>
@@ -821,38 +820,41 @@ export function Step1Ingest() {
                   </div>
 
                   {sidecar.status === "offline" ? (
-                    <div className="mt-2 space-y-1.5 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-xs leading-relaxed text-destructive">
-                      <p className="flex items-start gap-2">
-                        <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                        <span className="flex-1">The processing engine didn't start.</span>
-                      </p>
-                      <div className="flex flex-wrap gap-1.5 pl-5">
-                        <Button
-                          variant="ghost"
-                          size="xs"
-                          className="h-5 text-destructive"
-                          onClick={() => void refreshHealth()}
-                        >
-                          Retry
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="xs"
-                          className="h-5 text-destructive"
-                          onClick={() => void handleRestartApp()}
-                        >
-                          Restart the app
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="xs"
-                          className="h-5 text-destructive"
-                          onClick={() => void handleCopyDiagnostics()}
-                        >
-                          Copy diagnostics
-                        </Button>
-                      </div>
-                    </div>
+                    <InlineError
+                      className="mt-2"
+                      title="The processing engine didn't start."
+                      action={
+                        <>
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="h-5 text-destructive"
+                            onClick={() => void refreshHealth()}
+                          >
+                            Retry
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="h-5 text-destructive"
+                            onClick={() => void handleRestartApp()}
+                          >
+                            Restart the app
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="h-5 text-destructive"
+                            onClick={() => void handleCopyDiagnostics()}
+                          >
+                            Copy diagnostics
+                          </Button>
+                        </>
+                      }
+                    >
+                      Transcription needs the engine. Retry, or restart the app if this keeps
+                      happening.
+                    </InlineError>
                   ) : null}
 
                   <Button
@@ -873,10 +875,7 @@ export function Step1Ingest() {
               )}
 
               {error ? (
-                <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs leading-relaxed text-destructive">
-                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                  <span>{error}</span>
-                </div>
+                <InlineError title="Transcription failed">{error}</InlineError>
               ) : null}
             </div>
 
