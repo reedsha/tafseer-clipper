@@ -23,8 +23,8 @@ does not cover the product/UI audit (`AUDIT_REPORT.md`) or the CI/CD architectur
 > **Open:** Authenticode credentials (BL-3 — deliberately blocks publishing), the 61-item clean-VM
 > gate (BL-5), and the frozen-payload smoke test, which cannot be run from an agent shell (§9.5).
 >
-> State of the five green gates: **G-A ✅ · G-B ✅ · G-C ✅ on native Python, packaged pending §9.5**
-> · G-D open · G-E ✅ internal-unsigned, signed variant needs BL-3.
+> State of the five green gates: **G-A ✅ · G-B ✅ · G-C ✅ (source *and* frozen sidecar verified
+> on this GPU machine) · G-D open · G-E ✅ internal-unsigned, signed variant needs BL-3.**
 >
 > The table below is the **original** measurement and is kept as the record.
 
@@ -410,7 +410,7 @@ Applied after the report, on explicit instruction. This section supersedes the c
 | **BL-7** (flaky gate) | The in-process test HTTP server had two Windows-specific defects: an accepted socket **inherits the listener's non-blocking mode** (so read/write could return `WouldBlock`, truncating the response into `error sending request`), and a transient `accept()` error **broke the loop**, killing the listener for the rest of the test. Both fixed. | `src-tauri/src/acceleration.rs` (test server) |
 | **BL-2** (aborting harness) | The E2E suite no longer raises past a check: a non-JSON error body is reported as a `FAIL` line via `error_detail()`, and each check group runs under `guarded()` so an exception becomes a recorded failure. A red run now prints the **whole** suite. | `backend/test_phase1_e2e.py` |
 | **BL-1** (GPU fallback) | Inference-time CPU fallback: `model.transcribe()` is wrapped, and a CUDA failure at inference (missing `cublas64_12.dll`) drops the CUDA model, loads CPU `int8`, and retries — mirroring the existing model-load fallback. Every unrecoverable path raises `TranscriptionError`, so the documented **503 + JSON** contract holds. A non-`ImportError` import failure (the `av 19` class) is also converted. | `backend/services/transcriber.py` |
-| **BL-1** (root cause) | `accel._probe_cuda_runtime()` used `ctranslate2.get_supported_compute_types("cuda")`, which reports *compiled-in* support and never loads cuBLAS — hence `cuda_runtime: true` beside `pack_installed: false`. It now loads a trivial CTranslate2 model on the CUDA device, so a missing pack fails the probe cheaply. | `backend/services/accel.py` |
+| **BL-1** (root cause) | `accel._probe_cuda_runtime()` used `ctranslate2.get_supported_compute_types("cuda")`, which reports *compiled-in* support and never loads cuBLAS — hence `cuda_runtime: true` beside `pack_installed: false`. It now force-loads the CUDA compute libraries (cuBLAS/cuDNN from the pack, or by name), so a missing pack fails the probe cheaply. **See §9.7 — my first attempt at this probe was itself wrong.** | `backend/services/accel.py` |
 | — | MIT license, with an explicit note that bundled FFmpeg remains GPL v3. | `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md` |
 
 ### 9.2 Verification (executed on this machine, RTX 3050, acceleration pack NOT installed)
@@ -435,13 +435,13 @@ Applied after the report, on explicit instruction. This section supersedes the c
 | BL-5 the 61-item clean-VM gate | Open — human walkthrough (§9.5) |
 | BL-6 Dependabot queue | **CLOSED** — `#5`, `#8`, `#10`, `#14` merged; `#11` green but held by judgement; `#18` (release 0.1.1) awaiting your decision |
 
-### 9.6 Final verification on the merged `main` (564b60f)
+### 9.6 Final verification on the merged `main`
 
 Re-run after every dependency PR landed, on the merged tree rather than a branch:
 
 | Check | Result |
 |---|---|
-| `backend/test_phase1_e2e.py` | **42/42**, exit 0 |
+| `backend/test_phase1_e2e.py` | **45/45**, exit 0 (40 before the GPU-fallback and probe regressions) |
 | `cargo test --locked` (with `sha2` 0.11) | **11 passed** |
 | `pnpm build` (`tsc && vite build`) | built in 879 ms |
 | Local Python env | aligned to the merged `requirements.txt` (`numpy` 2.5.4, `pillow` 13.0.0, `av` 16.1.0) |
@@ -451,6 +451,52 @@ content: `#5` (numpy) and `#11` (TypeScript 7) both went green once their branch
 `acceleration.rs` fix — same tests, same runners, no other change. That is the clearest available
 proof that BL-7 was a test defect and not a product one.
 
+### 9.7 Correction: my first CUDA-probe fix would have disabled GPU for everyone
+
+The first version of the probe constructed a **dummy CTranslate2 model** on the CUDA device to force
+the runtime to load. It "worked" here only because it returned `False` — and it returned `False` for
+the wrong reason. Measured:
+
+```
+ctranslate2.models.Whisper(probe_dir, device="cuda") -> RuntimeError: File model.bin is incomplete…
+ctranslate2.models.Whisper(probe_dir, device="cpu")  -> RuntimeError: File model.bin is incomplete…
+```
+
+CTranslate2 validates the model file **before** touching CUDA, so a fabricated model fails on CPU too.
+On a machine that *had* the acceleration pack this probe would therefore have reported
+`cuda_runtime: false` and pushed every user permanently onto the CPU — a silent loss of the product's
+headline feature, introduced by the fix for it.
+
+**Corrected implementation:** force-load the libraries CTranslate2 actually `dlopen()`s
+(`cublas64_*.dll`, `cudnn64_*.dll`, taken from the pack directory when present, otherwise by name),
+after first requiring that `get_supported_compute_types("cuda")` is non-empty.
+
+Verified in **both** directions, which the invalid-model version could not be:
+
+| Case | Result |
+|---|---|
+| No acceleration pack on this machine | `transcription=cpu  cuda_runtime=false  pack_installed=false  reason=cuda-runtime-missing` |
+| Simulated pack (loadable `cublas64_12.dll` + `cudnn64_9.dll` placed in `TAFSEER_CUDA_DIR`) | `transcription=gpu  cuda_runtime=true  pack_installed=true  reason=null` |
+
+The positive case is simulated by copying a real system DLL under those names — legitimate here
+because the probe's only question is whether the library can be **loaded**, which is exactly what was
+broken. `backend/test_phase1_e2e.py` still reports **45/45** afterwards.
+
+**The regression test had to be split, because CI has no GPU.** The first version asserted
+`transcription == "gpu"` with the simulated pack — which is impossible on a runner without an NVIDIA
+GPU, since the report computes `transcription_gpu = gpu_detected and runtime`. CI failed exactly
+there:
+
+```
+[FAIL] accel: probe reports GPU when the compute libraries actually load
+       cuda_runtime=False transcription=cpu reason=no-nvidia-gpu
+```
+
+So the check is now two: `accel: compute libraries load when they are present` (portable — it only
+asks whether the DLLs load) and, gated on `gpu_detected`, either the positive assertion or
+`accel: probe does not claim GPU on a machine without one`. That keeps real coverage on GPU-less CI
+instead of a silent skip.
+
 ### 9.4 Rebuilt artifacts (Stream 4, 2026-11-15)
 
 `release/0.1.0/` was replaced with a fresh local build (`scripts/build-release.ps1 -SkipSigning`).
@@ -458,9 +504,9 @@ The previous contents were signed by the pre-rotation key and are now **obsolete
 
 | Check | Result |
 |---|---|
-| Installer | `Tafseer Clipper_0.1.0_x64-setup.exe` — 170,841,743 B (162.9 MiB), **unsigned** (Authenticode still absent, by design) |
+| Installer | `Tafseer Clipper_0.1.0_x64-setup.exe` — 170,832,363 B (162.9 MiB), **unsigned** (Authenticode still absent, by design) |
 | Updater signature | `.sig` names `file:Tafseer Clipper_0.1.0_x64-setup.exe` + `version:0.1.0`, produced by the `DCC8B926EA9F6F2B` key generation ✅ |
-| `SHA256SUMS.txt` | **3/3 match** — installer `DBED6DE7…`, `backend.exe` `4040F448…`, `accel/accel-manifest.json` `216D6492…` |
+| `SHA256SUMS.txt` | **3/3 match** — installer `619DF059…`, `backend.exe` `972D98EF…`, `accel/accel-manifest.json` `216D6492…` |
 | `latest.json` | carries the same signature as the `.sig`; URL points at the `v0.1.0` release asset |
 | GPU pack manifest | carried forward from the previous build — the pack is **versioned independently** of the app (`cuda12.9.79-cudnn9.28.1.4`, 18 files, 2.1 GB) per `docs/GPU_PACK.md:161` |
 
@@ -473,13 +519,32 @@ and fixed by copying the sidecar that is actually bundled
 (`src-tauri/binaries/backend-x86_64-pc-windows-gnu.exe`, built 05:36, after the 05:34 merge).
 The checksums above reflect the corrected set.
 
-**One thing this section cannot claim.** The frozen sidecar could not be *executed* from the agent
-shell used for this work: all three frozen builds (including the pre-fix ones) abort with
-`[PYI-…:ERROR] Could not create temporary directory!`, and a minimal PyInstaller onefile build from
-the same venv fails with `PermissionError` writing its spec file. That points at a restriction in
-that shell rather than at the artifact, so **no claim is made here about the frozen payload's
-runtime behaviour**. `scripts/smoke-installer.ps1` must be run from a normal terminal — it is the
-first item in §9.5.
+**The frozen payload does work — but not from a OneDrive path.** My first run of it failed and I
+attributed that to a restriction in the agent shell. That was wrong. The only variable is the
+directory: executing the same file from `C:\t2\` succeeds, while executing it from inside
+`C:\Users\muham\OneDrive\Documents\...` aborts with `[PYI-…:ERROR] Could not create temporary
+directory!`. The mechanism was not investigated further; the empirical rule is what matters.
+
+**Three-case verification of the packaged sidecar** (the artifact from §9.4, run from `C:\t2`, this
+machine, no real acceleration pack):
+
+| Case | `/health.acceleration` | Outcome |
+|---|---|---|
+| **A** — no pack | `transcription=cpu  cuda_runtime=false  pack_installed=false  reason=cuda-runtime-missing` | correct, and matches `pack_installed` |
+| **B** — simulated pack (loadable `cublas64_12.dll` + `cudnn64_9.dll` in `TAFSEER_CUDA_DIR`) | `transcription=gpu  cuda_runtime=true  reason=null` | correct — **and the case my first probe attempt would have failed**, since it built an invalid model and would have answered `false` here |
+| **C** — simulated pack, then a real `POST /extract-and-transcribe` | **`200`, `application/json`, `device=cpu`** | the probe said GPU, CUDA inference failed, and the fallback retried on CPU — inside the packaged binary |
+
+Case B is the discriminator that matters: a probe which only ever answers "no GPU" passes case A and
+looks fine, while silently demoting every user who installed the pack. Case C is the original defect
+end-to-end: the request that used to produce `500 text/plain` now yields a normal JSON transcription
+on the CPU.
+
+**Consequence for the dev environment:** run packaged binaries from a non-synced path (or from the
+installed location under `%LOCALAPPDATA%`, which is where real users run them). A frozen sidecar
+launched out of the OneDrive checkout can fail to start for reasons unrelated to the app.
+
+What remains unverified is the **installer** path (silent install → installed sidecar → uninstall)
+and the GUI walkthrough, both of which need a normal terminal (§9.5).
 
 **What this does and does not mean.** The signing *chain* is now internally consistent: a build
 produced today verifies against the key `tauri.conf.json` advertises. It is still an **unsigned
@@ -499,7 +564,7 @@ agent shell.
 |---|---|---|---|
 | 1 | Packaged payload smoke (silent install → installed sidecar `/health` with the **bundled** ffmpeg → clean shutdown → uninstall) | `powershell -ExecutionPolicy Bypass -File scripts/smoke-installer.ps1` | part of BL-5 |
 | 2 | Same, plus the real window (`-TryGui`; SKIPs if the session cannot create a webview) | `… smoke-installer.ps1 -TryGui` | part of BL-5 |
-| 3 | Full frozen-sidecar self-test | `py -3.12 backend/smoke_frozen.py` | confidence in the frozen payload |
+| 3 | Full frozen-sidecar self-test (run it with the frozen exe **outside** the OneDrive checkout, e.g. copy it to `C:\t\`) | `py -3.12 backend/smoke_frozen.py` | confidence in the frozen payload |
 | 4 | Walk `docs/RELEASE_CHECKLIST.md` §0/§1/§1b/§2–§9 on a clean Windows 11 VM | manual | **BL-5 (61 items)** |
 | 5 | Install the built installer on this machine and re-run the transcribe step once **without** the pack and once **with** it | manual | **G-C on packaged hardware** |
 | 6 | Authenticode credential, if a public release is wanted | Azure Trusted Signing / PFX / thumbprint → `production` environment | **BL-3** |
