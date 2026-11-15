@@ -5,6 +5,7 @@ import { CommandMenu } from "@/components/CommandMenu";
 import { RecentProjectsBar } from "@/components/RecentProjectsBar";
 import { RecentProjectsDrawer } from "@/components/RecentProjectsDrawer";
 import { SettingsDrawer } from "@/components/SettingsDrawer";
+import { StartupGate } from "@/components/StartupGate";
 import { StepperHeader } from "@/components/StepperHeader";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { loadImportedFonts } from "@/lib/fonts";
@@ -124,6 +125,7 @@ export default function App() {
         <SettingsDrawer />
         <CommandMenu />
         <RecentProjectsDrawer />
+        <StartupGate />
 
         <Toaster
           theme="dark"

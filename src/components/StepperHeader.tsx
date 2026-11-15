@@ -2,6 +2,7 @@ import NumberFlow from "@number-flow/react";
 import { Check, Command, History, Settings } from "lucide-react";
 import { cn } from "cn";
 
+import { BrandMark } from "@/components/BrandMark";
 import {
   SIDECAR_STATUS_LABEL,
   SidecarStatusDot,
@@ -75,9 +76,7 @@ export function StepperHeader() {
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card/30 px-4">
       <div className="flex items-center gap-2.5">
-        <div className="flex size-7 items-center justify-center rounded-md border border-border bg-secondary text-[10px] font-semibold tracking-[0.08em] text-foreground">
-          TC
-        </div>
+        <BrandMark variant="bold" className="size-7 text-brand-cream" />
         <div className="leading-tight">
           <div className="text-[13px] font-medium text-foreground">Tafseer Clipper</div>
           <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">

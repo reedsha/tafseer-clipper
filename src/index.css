@@ -41,6 +41,13 @@
   --ring: #707a82;
 
   /*
+   * Brand identity tone for the mark itself (header, splash, dialogs).
+   * Low-chroma warm cream lifted from the identity sheet — it reads as part
+   * of the neutral equipment palette, not as a content color.
+   */
+  --brand-cream: #ecdfc3;
+
+  /*
    * Status colors for app chrome (sidecar LED, warnings, destructive notices).
    * Deliberately low chroma so they read as equipment indicators, never as
    * brand color. Off-token Tailwind palette classes (emerald/amber/red) are
@@ -77,6 +84,7 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-brand-cream: var(--brand-cream);
   --color-status-online: var(--status-online);
   --color-status-warning: var(--status-warning);
   --color-status-danger: var(--status-danger);
