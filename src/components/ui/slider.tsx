@@ -24,6 +24,9 @@ function Slider({
   return (
     <SliderPrimitive.Root
       data-slot="slider"
+      // Vaul starts a drag-to-close from any pointerdown inside a right-side
+      // drawer; without this, dragging a thumb also slides the panel.
+      data-vaul-no-drag
       defaultValue={defaultValue}
       value={value}
       min={min}

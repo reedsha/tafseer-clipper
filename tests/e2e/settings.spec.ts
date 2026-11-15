@@ -1,9 +1,10 @@
 /**
- * Settings-correctness regressions.
+ * Settings regressions.
  *
- * Covers the persistence edges the drawer can hit without any provider calls:
- * importing a snapshot with out-of-range numbers, a half-typed glossary pair
- * surviving a restart, and the preset dialogs refusing empty/no-op names.
+ * Covers the persistence edges the drawer can hit without any provider calls
+ * (out-of-range imports, half-typed glossary pairs, preset-name guards), the
+ * affordances added for routing/template drift, and the pointer gestures that
+ * must not drag the Vaul sheet.
  */
 
 import { expect, test } from "@playwright/test";
@@ -156,5 +157,39 @@ test.describe("settings affordances", () => {
       (item: { id: string }) => item.id === "studio-default",
     );
     expect(studio.arabic.fontSize).toBe(persisted.state.arabic.fontSize);
+  });
+
+  test("horizontal drags inside the drawer never slide the panel", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Open settings" }).click();
+    await page.getByRole("tab", { name: "Fonts & Style" }).click();
+
+    const drawer = page.locator("[data-vaul-drawer]");
+    const startX = (await drawer.boundingBox())!.x;
+
+    // Dragging a slider thumb must move the thumb, not the sheet.
+    const thumb = page.getByRole("slider", { name: "Arabic font size" });
+    const before = await thumb.getAttribute("aria-valuenow");
+    const box = (await thumb.boundingBox())!;
+    const thumbY = box.y + box.height / 2;
+    await page.mouse.move(box.x + box.width / 2, thumbY);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 40, thumbY, { steps: 6 });
+    const duringSlider = (await drawer.boundingBox())!.x;
+    await page.mouse.up();
+
+    expect(Math.round(duringSlider)).toBe(Math.round(startX));
+    await expect(thumb).not.toHaveAttribute("aria-valuenow", before ?? "");
+
+    // The tab strip scrolls horizontally; dragging it must not move the panel.
+    const tablist = (await page.getByRole("tablist").boundingBox())!;
+    await page.mouse.move(tablist.x + 80, tablist.y + tablist.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(tablist.x - 40, tablist.y + tablist.height / 2, { steps: 6 });
+    const duringTabs = (await drawer.boundingBox())!.x;
+    await page.mouse.up();
+
+    expect(Math.round(duringTabs)).toBe(Math.round(startX));
+    await expect(drawer).toBeVisible();
   });
 });

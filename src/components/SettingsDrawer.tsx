@@ -226,7 +226,7 @@ function NumberField({
   ariaLabel: string;
 }) {
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex items-center gap-3" data-vaul-no-drag>
       <Slider
         value={[value]}
         min={min}
@@ -822,7 +822,7 @@ export function SettingsDrawer() {
             onValueChange={(value) => openSettings(value as SettingsTab)}
             className="min-h-0 flex-1 gap-0"
           >
-            <div className="overflow-x-auto border-b border-border px-3">
+            <div className="overflow-x-auto border-b border-border px-3" data-vaul-no-drag>
               <TabsList variant="line" className="h-10 w-max justify-start gap-1 px-0">
                 {TABS.map(({ value, label, icon: Icon }) => (
                   <TabsTrigger key={value} value={value} className="gap-1.5 px-2.5 text-xs">
@@ -1586,19 +1586,21 @@ export function SettingsDrawer() {
                   ) : null}
                   <div className="flex flex-wrap gap-1">
                     {TEMPLATE_TOKEN_HINTS.map((hint) => (
-                      <button
+                      <Button
                         key={hint.token}
                         type="button"
+                        variant="outline"
+                        size="xs"
                         title={hint.description}
                         onClick={() => {
                           const next = `${editor.filenameTemplate}${hint.token}`;
                           updateEditor({ filenameTemplate: next });
                           applyExportDefaults({ filenameTemplate: next });
                         }}
-                        className="rounded border border-border bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-foreground/80 transition-colors hover:border-ring/50 hover:text-foreground"
+                        className="h-5 rounded px-1.5 font-mono text-[10px] font-normal text-foreground/80"
                       >
                         {hint.token}
-                      </button>
+                      </Button>
                     ))}
                   </div>
                   <p className="text-[11px] leading-relaxed text-muted-foreground">

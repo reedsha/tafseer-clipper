@@ -400,5 +400,10 @@ const ACCELERATION_REASON_COPY: Record<string, string> = {
 
 export function humanizeAccelerationReason(reason: string | null): string | null {
   if (!reason) return null;
-  return ACCELERATION_REASON_COPY[reason] ?? reason;
+  // A code this build does not know yet still reads as a sentence, never as
+  // the raw token; the diagnostics bundle keeps the untranslated value.
+  return (
+    ACCELERATION_REASON_COPY[reason] ??
+    "Acceleration is unavailable; transcription and encoding run on the CPU."
+  );
 }
