@@ -421,6 +421,9 @@ def _run_once(job: RenderJob, encoder: str, ffmpeg: str) -> Iterator[dict]:
     last_ratio = -1.0
     last_emit = 0.0
     returncode = -1
+    # True only when FFmpeg exited 0 with a complete output file; anything else
+    # (cancel, watchdog kill, failure) leaves a truncated MP4 that must go.
+    completed = False
 
     try:
         assert process.stdout is not None
@@ -464,6 +467,15 @@ def _run_once(job: RenderJob, encoder: str, ffmpeg: str) -> Iterator[dict]:
         returncode = process.wait()
         watchdog.join(timeout=5)
         reader.join(timeout=5)
+        if returncode == 0 and job.output.is_file():
+            completed = True
+        else:
+            # A killed or failed FFmpeg leaves a partial, unplayable MP4 in the
+            # exports folder; remove it (a fallback attempt rewrites the path).
+            try:
+                job.output.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Could not remove partial output %s: %s", job.output, exc)
 
     if state.timed_out:
         detail = " | ".join(list(stderr_tail)[-3:]) or "no FFmpeg output"

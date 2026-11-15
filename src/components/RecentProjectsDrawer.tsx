@@ -5,19 +5,11 @@ import { Clock3, FileVideo2, FolderOpen, Plus, Trash2, X } from "lucide-react";
 import { cn } from "cn";
 
 import { Button } from "@/components/ui/button";
+import { formatLectureDuration, relativeTime } from "@/lib/format";
 import { openProjectFile } from "@/lib/projectFile";
 import { STEP_LABELS } from "@/lib/projectTypes";
 import { useProjectStore } from "@/store/projectStore";
 import { useUiStore } from "@/store/uiStore";
-
-function relativeTime(timestamp: number): string {
-  const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60_000));
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} h ago`;
-  return `${Math.floor(hours / 24)} d ago`;
-}
 
 export function RecentProjectsDrawer() {
   const recentOpen = useUiStore((state) => state.recentOpen);
@@ -121,8 +113,8 @@ export function RecentProjectsDrawer() {
                       {typeof item.duration === "number" && item.duration > 0 ? (
                         <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
                           <NumberFlow
-                            value={Math.round(item.duration / 60)}
-                            suffix=" min"
+                            value={formatLectureDuration(item.duration).value}
+                            suffix={formatLectureDuration(item.duration).suffix}
                             format={{ maximumFractionDigits: 0 }}
                           />
                         </span>

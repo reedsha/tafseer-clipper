@@ -155,6 +155,11 @@ async function request<T>(
   } catch (error) {
     if (error instanceof ApiError) throw error;
     if (error instanceof DOMException && error.name === "AbortError") {
+      // The internal withTimeout signal aborts for BOTH an external caller
+      // abort and a genuine timeout; tell them apart by the caller's signal.
+      if (signal?.aborted) {
+        throw new ApiError("The request was cancelled.", 0, "cancelled");
+      }
       throw new ApiError(
         `The sidecar did not answer within ${Math.round(timeoutMs / 1000)}s.`,
         0,
@@ -286,6 +291,9 @@ export function extractAndTranscribe(
   body: TranscribeRequest,
   options?: RequestOptions,
 ): Promise<TranscribeResponse> {
+  // Flagged: 30 min can be short for multi-hour lectures transcribed on the
+  // CPU; monitor before raising (it is also the user-facing ceiling for
+  // "stuck" requests when the sidecar never answers).
   return request<TranscribeResponse>("/extract-and-transcribe", jsonBody(body), {
     timeoutMs: 30 * 60_000,
     ...options,
@@ -334,12 +342,35 @@ export interface DiscoverResponse {
   excluded_ranges_applied: number;
 }
 
+/**
+ * Mirrors `analyzer.MAX_DISCOVERY_WINDOWS` (`backend/services/analyzer.py`):
+ * the sidecar runs at most this many sequential LLM windows, each bounded by
+ * the provider timeout, so the client budget must cover the whole pass.
+ */
+const MAX_DISCOVERY_WINDOWS = 8;
+/** Matches the sidecar's default provider timeout (`settings.cloud.timeout`). */
+const DEFAULT_PROVIDER_TIMEOUT_SEC = 120;
+
+/** Worst-case wall clock for `/discover-clips`, clamped to [5 min, 30 min]. */
+export function discoveryTimeoutMs(providerTimeoutSec?: number | null): number {
+  const timeout =
+    providerTimeoutSec && providerTimeoutSec > 0
+      ? providerTimeoutSec
+      : DEFAULT_PROVIDER_TIMEOUT_SEC;
+  return Math.min(
+    Math.max(timeout * 1000 * MAX_DISCOVERY_WINDOWS + 60_000, 5 * 60_000),
+    30 * 60_000,
+  );
+}
+
 export function discoverClips(
   body: DiscoverRequest,
   options?: RequestOptions,
 ): Promise<DiscoverResponse> {
+  // The client budget derives from the real worst case (windows × provider
+  // timeout) instead of a flat 5 min that false-times out long lectures.
   return request<DiscoverResponse>("/discover-clips", jsonBody(body), {
-    timeoutMs: 5 * 60_000,
+    timeoutMs: discoveryTimeoutMs(body.provider?.timeout),
     ...options,
   });
 }

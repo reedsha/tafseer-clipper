@@ -159,6 +159,27 @@ export async function openLectureFile(): Promise<LecturePick> {
   return { path, name: file.name, file, cancelled: false };
 }
 
+/**
+ * Native folder picker for Settings → project folder. Returns `null` in a plain
+ * browser (no absolute path exists to persist), so the caller keeps its text
+ * field usable instead of showing a dead button.
+ */
+export async function openDirectory(
+  title = "Choose the project folder",
+): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  const options: TauriDialogOptions = { directory: true, multiple: false, title };
+  try {
+    const globalOpen = tauriWindow()?.__TAURI__?.dialog?.open;
+    if (typeof globalOpen === "function") return firstPath(await globalOpen(options));
+    const result = await openDialog(options);
+    if (Array.isArray(result)) return result[0] ?? null;
+    return result ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export interface NativeDropHandlers {
   onEnter?: () => void;
   onLeave?: () => void;

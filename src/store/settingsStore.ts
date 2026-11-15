@@ -2,6 +2,11 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import { getHealth, type FontInfo, type HealthResponse } from "@/lib/api";
+import {
+  coerceToRange,
+  NUMERIC_LIMITS,
+  type NumericLimitKey,
+} from "@/lib/settingsLimits";
 
 /* -------------------------------------------------------------------------- */
 /* Types                                                                       */
@@ -148,6 +153,8 @@ export interface SettingsState extends SettingsData {
   renamePreset: (id: string, name: string) => void;
   deletePreset: (id: string) => void;
   applyPreset: (id: string) => void;
+  /** Overwrite a preset with the current Arabic/Thai typography. */
+  updatePreset: (id: string) => void;
 
   addPromptPreset: (preset: Omit<PromptPreset, "id">) => string;
   updatePromptPreset: (id: string, patch: Partial<Omit<PromptPreset, "id">>) => void;
@@ -351,6 +358,14 @@ function asNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+/**
+ * Snap a persisted number to the range its control supports, so an imported
+ * or older snapshot can never desync a slider from the value it shows.
+ */
+function asRangedNumber(value: unknown, fallback: number, key: NumericLimitKey): number {
+  return coerceToRange(asNumber(value, fallback), fallback, NUMERIC_LIMITS[key]);
+}
+
 function asBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
@@ -375,12 +390,12 @@ function coerceArabic(value: unknown, fallback: ArabicStyle): ArabicStyle {
   if (!isRecord(value)) return { ...fallback };
   return {
     fontFamily: asString(value.fontFamily, fallback.fontFamily),
-    fontSize: asNumber(value.fontSize, fallback.fontSize),
+    fontSize: asRangedNumber(value.fontSize, fallback.fontSize, "arabicFontSize"),
     color: asString(value.color, fallback.color),
-    outlineWidth: asNumber(value.outlineWidth, fallback.outlineWidth),
+    outlineWidth: asRangedNumber(value.outlineWidth, fallback.outlineWidth, "arabicOutlineWidth"),
     outlineColor: asString(value.outlineColor, fallback.outlineColor),
-    boxOpacity: asNumber(value.boxOpacity, fallback.boxOpacity),
-    lineHeightPad: asNumber(value.lineHeightPad, fallback.lineHeightPad),
+    boxOpacity: asRangedNumber(value.boxOpacity, fallback.boxOpacity, "boxOpacity"),
+    lineHeightPad: asRangedNumber(value.lineHeightPad, fallback.lineHeightPad, "arabicLineHeightPad"),
     bold: asBoolean(value.bold, fallback.bold),
   };
 }
@@ -389,11 +404,11 @@ function coerceThai(value: unknown, fallback: ThaiStyle): ThaiStyle {
   if (!isRecord(value)) return { ...fallback };
   return {
     fontFamily: asString(value.fontFamily, fallback.fontFamily),
-    fontSize: asNumber(value.fontSize, fallback.fontSize),
+    fontSize: asRangedNumber(value.fontSize, fallback.fontSize, "thaiFontSize"),
     color: asString(value.color, fallback.color),
-    outlineWidth: asNumber(value.outlineWidth, fallback.outlineWidth),
+    outlineWidth: asRangedNumber(value.outlineWidth, fallback.outlineWidth, "thaiOutlineWidth"),
     outlineColor: asString(value.outlineColor, fallback.outlineColor),
-    boxOpacity: asNumber(value.boxOpacity, fallback.boxOpacity),
+    boxOpacity: asRangedNumber(value.boxOpacity, fallback.boxOpacity, "boxOpacity"),
     bold: asBoolean(value.bold, fallback.bold),
   };
 }
@@ -424,11 +439,14 @@ function coerceGlossary(value: unknown, fallback: GlossaryEntry[]): GlossaryEntr
   for (const item of value) {
     if (!isRecord(item)) continue;
     const find = asString(item.find, "");
-    if (!find.trim()) continue;
+    const replace = asString(item.replace, "");
+    // A row that is still being typed (only one side filled) must survive a
+    // restart; only a fully blank row carries no user content and is dropped.
+    if (!find.trim() && !replace.trim()) continue;
     entries.push({
       id: asString(item.id, crypto.randomUUID()),
       find,
-      replace: asString(item.replace, ""),
+      replace,
       enabled: asBoolean(item.enabled, true),
     });
   }
@@ -519,10 +537,18 @@ function coerceSettingsData(raw: unknown): SettingsData {
     promptPresets: coercePromptPresets(raw.promptPresets, DEFAULT_DATA.promptPresets),
     glossary: coerceGlossary(raw.glossary, DEFAULT_DATA.glossary),
     editor: {
-      cutBufferSeconds: asNumber(editor.cutBufferSeconds, DEFAULT_DATA.editor.cutBufferSeconds),
+      cutBufferSeconds: asRangedNumber(
+        editor.cutBufferSeconds,
+        DEFAULT_DATA.editor.cutBufferSeconds,
+        "cutBufferSeconds",
+      ),
       autoPad: asBoolean(editor.autoPad, DEFAULT_DATA.editor.autoPad),
       filenameTemplate: asString(editor.filenameTemplate, DEFAULT_DATA.editor.filenameTemplate),
-      maxCharsPerLine: asNumber(editor.maxCharsPerLine, DEFAULT_DATA.editor.maxCharsPerLine),
+      maxCharsPerLine: asRangedNumber(
+        editor.maxCharsPerLine,
+        DEFAULT_DATA.editor.maxCharsPerLine,
+        "maxCharsPerLine",
+      ),
       resolution: asResolution(editor.resolution, DEFAULT_DATA.editor.resolution),
       framing: asFraming(editor.framing, DEFAULT_DATA.editor.framing),
       useNvenc: asBoolean(editor.useNvenc, DEFAULT_DATA.editor.useNvenc),
@@ -530,9 +556,10 @@ function coerceSettingsData(raw: unknown): SettingsData {
       language: asString(editor.language, DEFAULT_DATA.editor.language),
     },
     storage: {
-      autosaveIntervalMs: asNumber(
+      autosaveIntervalMs: asRangedNumber(
         storage.autosaveIntervalMs,
         DEFAULT_DATA.storage.autosaveIntervalMs,
+        "autosaveIntervalMs",
       ),
       projectFolder: asString(storage.projectFolder, DEFAULT_DATA.storage.projectFolder),
     },
@@ -627,6 +654,18 @@ export const useSettingsStore = create<SettingsState>()(
           return {
             arabic: { ...found.arabic },
             thai: { ...found.thai },
+            activePresetId: id,
+          };
+        }),
+      updatePreset: (id) =>
+        set((state) => {
+          if (!state.presets.some((item) => item.id === id)) return {};
+          return {
+            presets: state.presets.map((item) =>
+              item.id === id
+                ? { ...item, arabic: { ...state.arabic }, thai: { ...state.thai } }
+                : item,
+            ),
             activePresetId: id,
           };
         }),

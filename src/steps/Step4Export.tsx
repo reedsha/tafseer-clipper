@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import NumberFlow from "@number-flow/react";
+import { toast } from "sonner";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -9,9 +10,9 @@ import {
   FolderOpen,
   Gauge,
   HardDrive,
-  Loader2,
   MonitorPlay,
   Play,
+  RotateCw,
   Square,
   Subtitles,
   Type,
@@ -38,6 +39,7 @@ import {
 } from "@/lib/filenameTemplate";
 import { describeAcceleration, isGpuEncodingAvailable } from "@/lib/acceleration";
 import type { FramingMode, ProjectClip, Resolution } from "@/lib/projectTypes";
+import { FRAMING_LABELS } from "@/lib/projectTypes";
 import { resolveAssStyles, stylesOverlap } from "@/lib/subtitleStyles";
 import { useProjectStore } from "@/store/projectStore";
 import { IDLE_RENDER_JOB, useRenderStore, type ClipStatus } from "@/store/renderStore";
@@ -58,6 +60,7 @@ function statusLabel(status: ClipStatus): string {
   if (status === "done") return "Rendered";
   if (status === "error") return "Failed";
   if (status === "rendering") return "Encoding";
+  if (status === "cancelled") return "Cancelled";
   return "Queued";
 }
 
@@ -150,6 +153,19 @@ export function Step4Export() {
   }, [approvedClips, template, lectureName, resolution]);
 
   const resolvedOutputDir = outputDir?.trim() || defaultOutputDirectory(sourcePath);
+  /** Sidecar-truth folder from the SSE `start`/`done` frames, when known. */
+  const sidecarOutputDir = job.outputDir?.trim() ? job.outputDir : null;
+
+  const copyOutputPath = async () => {
+    const path = sidecarOutputDir ?? resolvedOutputDir;
+    if (!path) return;
+    try {
+      await navigator.clipboard.writeText(path);
+      toast.success("Output path copied");
+    } catch {
+      toast.error("Could not copy the path");
+    }
+  };
 
   /* ------------------------------ totals ------------------------------ */
   const totalDuration = useMemo(
@@ -198,7 +214,18 @@ export function Step4Export() {
 
   const running = job.status === "running";
   const resolutionLabel = resolution === "1080x1920" ? "9:16 Vertical" : "16:9 Widescreen";
-  const framingLabel = framing === "blur-fill" ? "Blur fill" : "Center crop";
+  const framingLabel = FRAMING_LABELS[framing];
+  // Framing only changes the 9:16 canvas; a 16:9 export never letterboxes.
+  const framingApplies = resolution === "1080x1920";
+  /**
+   * Vendor-neutral encoder label (AGENTS.md §3: hardware/encoder names stay in
+   * diagnostics; the raw string remains in `renderStore` state for them).
+   */
+  const encoderLabel = (encoder: string | null): string | null => {
+    if (!encoder) return null;
+    return encoder.includes("nvenc") ? "GPU encoding" : "CPU encoding";
+  };
+  const jobEncoderLabel = encoderLabel(job.encoder);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -238,10 +265,10 @@ export function Step4Export() {
                 {approvedClips.length}
               </Badge>
             </div>
-            {job.encoder ? (
+            {jobEncoderLabel ? (
               <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                 <Cpu className="size-3.5" />
-                {job.encoder}
+                {jobEncoderLabel}
               </span>
             ) : null}
           </div>
@@ -336,7 +363,7 @@ export function Step4Export() {
                           </span>
                           <span className="flex items-center gap-1">
                             <Crop className="size-3" />
-                            {framingLabel}
+                            {framingApplies ? framingLabel : "—"}
                           </span>
                           {state?.srtPath ? (
                             <span className="flex items-center gap-1">
@@ -344,7 +371,7 @@ export function Step4Export() {
                               .SRT
                             </span>
                           ) : null}
-                          {state?.encoder ? <span>{state.encoder}</span> : null}
+                          {state?.encoder ? <span>{encoderLabel(state.encoder)}</span> : null}
                         </div>
 
                         {status === "rendering" ? (
@@ -389,9 +416,9 @@ export function Step4Export() {
         <section className="flex min-h-0 flex-col overflow-y-auto">
           <div className="space-y-4 px-4 py-4">
             <div className="space-y-1.5">
-              <Label className="text-[13px] font-medium text-foreground">Output format</Label>
+              <Label className="text-[13px] font-medium text-foreground">Aspect ratio</Label>
               <SegmentedToggle<Resolution>
-                label="Output resolution"
+                label="Aspect ratio"
                 value={resolution}
                 options={[
                   { value: "1080x1920", label: "9:16 Vertical", hint: "1080x1920" },
@@ -406,16 +433,26 @@ export function Step4Export() {
               <SegmentedToggle<FramingMode>
                 label="Framing mode"
                 value={framing}
+                disabled={!framingApplies}
                 options={[
                   {
                     value: "blur-fill",
-                    label: "Blurred fill",
+                    label: FRAMING_LABELS["blur-fill"],
                     hint: "Keeps the slide visible inside blurred bars",
                   },
-                  { value: "center-crop", label: "Center crop", hint: "Crops to fill the frame" },
+                  {
+                    value: "center-crop",
+                    label: FRAMING_LABELS["center-crop"],
+                    hint: "Crops to fill the frame",
+                  },
                 ]}
                 onChange={(value) => updateExportSettings({ framing: value })}
               />
+              {!framingApplies ? (
+                <p className="text-[10px] leading-relaxed text-muted-foreground">
+                  16:9 output uses the whole frame, so 9:16 framing does not apply.
+                </p>
+              ) : null}
             </div>
 
             <Separator />
@@ -535,7 +572,7 @@ export function Step4Export() {
               <p className="text-[10px] leading-relaxed text-muted-foreground">
                 {outputDir?.trim()
                   ? "Files are written to this folder."
-                  : `Empty — the sidecar writes to ${resolvedOutputDir || "the source folder"}.`}
+                  : "Empty — files go to the exports folder next to the lecture."}
               </p>
             </div>
 
@@ -618,23 +655,39 @@ export function Step4Export() {
       </div>
 
       <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border bg-card/20 px-4 py-2.5">
-        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+        <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
           {job.status === "done" ? (
             <>
-              <CheckCircle2 className="size-3.5" />
+              <CheckCircle2 className="size-3.5 shrink-0" />
               <NumberFlow value={job.rendered} format={{ maximumFractionDigits: 0 }} /> clip
               {job.rendered === 1 ? "" : "s"} rendered
             </>
           ) : job.status === "error" ? (
             <>
-              <XCircle className="size-3.5" />
+              <XCircle className="size-3.5 shrink-0" />
               <NumberFlow value={job.failed} format={{ maximumFractionDigits: 0 }} /> clip
               {job.failed === 1 ? "" : "s"} failed
             </>
           ) : (
             <>
-              <FolderOpen className="size-3.5" />
-              {resolvedOutputDir || "Output folder not set"}
+              <FolderOpen className="size-3.5 shrink-0" />
+              {/* The sidecar's `output_dir` (SSE `start`/`done`) is the truth;
+                  the local default is labelled as a fallback. */}
+              <span className="min-w-0 flex-1 truncate">
+                {sidecarOutputDir
+                  ? `${sidecarOutputDir} (from the sidecar)`
+                  : resolvedOutputDir
+                    ? `${resolvedOutputDir} (defaults to)`
+                    : "Output folder decided by the sidecar at render time"}
+              </span>
+              <Button
+                variant="ghost"
+                size="xs"
+                disabled={!sidecarOutputDir && !resolvedOutputDir}
+                onClick={() => void copyOutputPath()}
+              >
+                Copy path
+              </Button>
             </>
           )}
         </div>
@@ -644,7 +697,7 @@ export function Step4Export() {
           </Button>
           {job.status === "done" ? (
             <Button variant="secondary" size="sm" className="gap-1.5" onClick={startRender}>
-              <Loader2 className="size-3.5" />
+              <RotateCw className="size-3.5" />
               Render again
             </Button>
           ) : null}

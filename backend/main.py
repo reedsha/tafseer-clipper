@@ -16,6 +16,8 @@ overrides mirror the Settings drawer.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -27,12 +29,12 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,6 +45,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 
 import config
 from services import accel
+from services.cancel import JobCancelled
 
 # Register the optional GPU acceleration pack (TAFSEER_CUDA_DIR) before any
 # module can import ctranslate2/faster-whisper, which load the CUDA DLLs.
@@ -856,6 +859,63 @@ async def health() -> HealthResponse:
 # --------------------------------------------------------------------------- #
 # 2. POST /extract-and-transcribe
 # --------------------------------------------------------------------------- #
+_T = TypeVar("_T")
+
+#: How often the disconnect watcher polls an in-flight long job.
+DISCONNECT_POLL_SECONDS = 1.0
+
+
+async def _run_until_disconnected(
+    request: Request,
+    factory: Callable[[threading.Event], Awaitable[_T]],
+) -> _T:
+    """Run ``factory(cancel_event)`` and abort it when the client disconnects.
+
+    The fixed REST surface has no cancel route (AGENTS.md §3), so cancellation
+    rides on the HTTP disconnect: a watcher races the work and, on
+    disconnection, sets the shared ``threading.Event`` (the services check it
+    at their natural boundaries) and cancels the asyncio task (aborting
+    in-flight provider HTTP calls).
+    """
+    cancel_event = threading.Event()
+
+    async def work() -> _T:
+        return await factory(cancel_event)
+
+    async def watch() -> None:
+        while True:
+            if await request.is_disconnected():
+                cancel_event.set()
+                work_task.cancel()
+                return
+            if work_task.done():
+                return
+            await asyncio.sleep(DISCONNECT_POLL_SECONDS)
+
+    work_task = asyncio.create_task(work())
+    watcher = asyncio.create_task(watch())
+    try:
+        return await work_task
+    except JobCancelled:
+        logger.info("Client disconnected; %s cancelled at a service boundary.", request.url.path)
+        raise HTTPException(status_code=499, detail="Client disconnected; job cancelled.")
+    except asyncio.CancelledError:
+        if cancel_event.is_set():
+            # Our own watcher cancelled the work because the client left; no
+            # response can be delivered either way.
+            logger.info("Client disconnected; %s cancelled.", request.url.path)
+            raise HTTPException(status_code=499, detail="Client disconnected; job cancelled.")
+        raise  # server shutdown: propagate the real cancellation
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
+        if not work_task.done():
+            work_task.cancel()
+            with contextlib.suppress(BaseException):
+                await work_task
+
+
 def _engine_for(body: TranscribeRequest) -> transcriber.WhisperTranscriber:
     """Return the warm singleton, replacing it only when the config differs."""
     return transcriber.get_transcriber(body.model, body.device, body.compute_type)
@@ -866,50 +926,64 @@ def _engine_for(body: TranscribeRequest) -> transcriber.WhisperTranscriber:
     response_model=TranscribeResponse,
     summary="Extract 16kHz WAV, transcribe (local int8 CUDA / cloud), apply glossary",
 )
-async def extract_and_transcribe(body: TranscribeRequest) -> TranscribeResponse:
+async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> TranscribeResponse:
     source = Path(body.file_path)
     if not source.is_file():
         raise HTTPException(status_code=400, detail=f"File not found: {source}")
 
     wav_path = config.work_dir() / "audio" / f"{uuid.uuid4().hex}.wav"
-    await run_in_threadpool(transcriber.extract_audio, source, wav_path)
-    # Optional UI sugar: a downsampled envelope for the Step-2 wavesurfer bar.
-    waveform_peaks = await run_in_threadpool(
-        transcriber.compute_waveform_peaks, wav_path
-    )
-
     auto_unload = (
         config.whisper_auto_unload_default()
         if body.auto_unload is None
         else body.auto_unload
     )
 
-    if body.use_local_whisper:
-        engine = _engine_for(body)
-        result = await run_in_threadpool(
-            engine.transcribe,
-            wav_path,
-            initial_prompt=body.initial_prompt,
-            language=body.language,
-            vad_filter=body.vad_filter,
-            glossary=body.glossary,
-            auto_unload=auto_unload,
+    async def run(cancel_event: threading.Event) -> tuple[transcriber.TranscriptionResult, list[float]]:
+        await run_in_threadpool(transcriber.extract_audio, source, wav_path)
+        # Optional UI sugar: a downsampled envelope for the Step-2 wavesurfer bar.
+        waveform_peaks = await run_in_threadpool(
+            transcriber.compute_waveform_peaks, wav_path
         )
-    else:
-        if body.cloud is None:
-            raise HTTPException(
-                status_code=400,
-                detail="'cloud' configuration is required when use_local_whisper is false.",
+
+        if body.use_local_whisper:
+            engine = _engine_for(body)
+            result = await run_in_threadpool(
+                engine.transcribe,
+                wav_path,
+                initial_prompt=body.initial_prompt,
+                language=body.language,
+                vad_filter=body.vad_filter,
+                glossary=body.glossary,
+                auto_unload=auto_unload,
+                cancel_event=cancel_event,
             )
-        result = await transcriber.transcribe_cloud(
-            wav_path,
-            base_url=body.cloud.base_url,
-            api_key=body.cloud.api_key,
-            model=body.cloud.model,
-            language=body.cloud.language or body.language,
-            prompt=body.initial_prompt or None,
-            glossary=body.glossary,
-        )
+        else:
+            if body.cloud is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="'cloud' configuration is required when use_local_whisper is false.",
+                )
+            result = await transcriber.transcribe_cloud(
+                wav_path,
+                base_url=body.cloud.base_url,
+                api_key=body.cloud.api_key,
+                model=body.cloud.model,
+                language=body.cloud.language or body.language,
+                prompt=body.initial_prompt or None,
+                glossary=body.glossary,
+                cancel_event=cancel_event,
+            )
+        return result, waveform_peaks
+
+    try:
+        result, waveform_peaks = await _run_until_disconnected(request, run)
+    except HTTPException as exc:
+        if exc.status_code == 499:
+            # Client left mid-transcription: no transcript record was stored,
+            # so only the extracted WAV needs reclaiming.
+            with contextlib.suppress(OSError):
+                wav_path.unlink(missing_ok=True)
+        raise
 
     transcript_id = uuid.uuid4().hex
     _store_transcript(
@@ -956,7 +1030,7 @@ async def extract_and_transcribe(body: TranscribeRequest) -> TranscribeResponse:
     response_model=DiscoverResponse,
     summary="Keep & Re-roll: propose clips, honouring approved exclusions",
 )
-async def discover_clips(body: DiscoverRequest) -> DiscoverResponse:
+async def discover_clips(body: DiscoverRequest, request: Request) -> DiscoverResponse:
     record = _get_transcript(body.transcript_id)
     provider = analyzer.merge_provider(
         "reasoning", body.provider.to_service() if body.provider else None
@@ -970,19 +1044,23 @@ async def discover_clips(body: DiscoverRequest) -> DiscoverResponse:
         max((segment.end for segment in record.segments), default=0.0)
     )
 
-    clips = await analyzer.discover_clips(
-        segments=segments,
-        duration=duration,
-        base_prompt=body.base_prompt,
-        session_guide=body.session_guide,
-        refinement_note=body.refinement_note,
-        excluded_ranges=excluded,
-        provider=provider,
-        min_duration=body.min_duration,
-        max_duration=body.max_duration,
-        max_clips=body.max_clips,
-        language=body.language,
-    )
+    async def run(cancel_event: threading.Event) -> list[dict[str, Any]]:
+        return await analyzer.discover_clips(
+            segments=segments,
+            duration=duration,
+            base_prompt=body.base_prompt,
+            session_guide=body.session_guide,
+            refinement_note=body.refinement_note,
+            excluded_ranges=excluded,
+            provider=provider,
+            min_duration=body.min_duration,
+            max_duration=body.max_duration,
+            max_clips=body.max_clips,
+            language=body.language,
+            cancel_event=cancel_event,
+        )
+
+    clips = await _run_until_disconnected(request, run)
 
     return DiscoverResponse(
         clips=[ClipProposal(**clip) for clip in clips],

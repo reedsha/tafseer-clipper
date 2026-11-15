@@ -41,7 +41,7 @@ const STEPS: WizardStep[] = [1, 2, 3, 4];
 const SETTINGS_ENTRIES: { tab: SettingsTab; label: string; icon: typeof Bot }[] = [
   { tab: "providers", label: "AI providers & models", icon: Bot },
   { tab: "fonts", label: "Fonts & dual-line style presets", icon: Type },
-  { tab: "glossary", label: "Thai–Arabic glossary & Whisper", icon: Languages },
+  { tab: "glossary", label: "Thai–Arabic glossary, Whisper & GPU", icon: Languages },
   { tab: "editor", label: "Editor & export defaults", icon: SlidersHorizontal },
   { tab: "storage", label: "Storage, auto-save & backup", icon: HardDrive },
 ];

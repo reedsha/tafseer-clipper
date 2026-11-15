@@ -286,8 +286,18 @@ export function WaveformBar({
       </div>
 
       <div className="flex items-center justify-between text-[10px] tabular-nums text-muted-foreground">
-        <span>0:00</span>
-        <span>{formatClock(duration)}</span>
+        {focus ? (
+          /* In focus mode the visible window is the clip, not the lecture. */
+          <>
+            <span>{formatClock(clipStart)}</span>
+            <span>{formatClock(clipEnd)}</span>
+          </>
+        ) : (
+          <>
+            <span>0:00</span>
+            <span>{formatClock(duration)}</span>
+          </>
+        )}
       </div>
     </div>
   );

@@ -36,6 +36,7 @@ export default function App() {
   const refreshHealth = useSettingsStore((state) => state.refreshHealth);
   const project = useProjectStore((state) => state.project);
   const recentProjects = useProjectStore((state) => state.recentProjects);
+  const lastProjectId = useProjectStore((state) => state.lastProjectId);
   const setRecentOpen = useUiStore((state) => state.setRecentOpen);
 
   useEffect(() => {
@@ -109,6 +110,7 @@ export default function App() {
           <RecentProjectsBar
             compact
             recentProjects={recentProjects}
+            lastProjectId={lastProjectId}
             onResume={(id) => void handleResume(id)}
             onOpenFile={() => void handleOpenFile()}
             onViewAll={() => setRecentOpen(true)}

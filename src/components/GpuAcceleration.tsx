@@ -17,10 +17,12 @@ import {
   canEnableGpu,
   downloadAccelerationPack,
   ensureAccelerationStatusLoaded,
+  humanizeAccelerationReason,
   isGpuEncodingAvailable,
   useAccelerationPack,
   type AccelerationSummary,
 } from "@/lib/acceleration";
+import { isTauriRuntime } from "@/lib/media";
 import { relaunchApp } from "@/lib/updater";
 
 /**
@@ -76,10 +78,13 @@ function GpuPackAction({ summary }: { summary: AccelerationSummary }) {
   const pack = useAccelerationPack();
   const [busy, setBusy] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  // The pack lives in the desktop shell; a browser tab can never install it, so
+  // the action is hidden rather than offered and then failing on click.
+  const desktopRuntime = isTauriRuntime();
 
   useEffect(() => {
-    void ensureAccelerationStatusLoaded();
-  }, []);
+    if (desktopRuntime) void ensureAccelerationStatusLoaded();
+  }, [desktopRuntime]);
 
   const downloading = busy || pack.phase === "downloading";
   const installed = pack.status?.installed === true || pack.phase === "installed";
@@ -113,6 +118,8 @@ function GpuPackAction({ summary }: { summary: AccelerationSummary }) {
       setRestarting(false);
     }
   }
+
+  if (!desktopRuntime) return null;
 
   if (needsRestart) {
     return (
@@ -219,6 +226,7 @@ function GpuPackAction({ summary }: { summary: AccelerationSummary }) {
  */
 export function GpuAccelerationPanel({ summary }: { summary: AccelerationSummary }) {
   const pack = useAccelerationPack();
+  const reason = humanizeAccelerationReason(summary.reason);
 
   return (
     <div className="space-y-2.5">
@@ -233,13 +241,13 @@ export function GpuAccelerationPanel({ summary }: { summary: AccelerationSummary
       </div>
 
       <p className="text-[11px] leading-relaxed text-muted-foreground">{summary.description}</p>
-      {summary.reason ? (
-        <p className="text-[11px] leading-relaxed text-muted-foreground/80">{summary.reason}</p>
+      {reason ? (
+        <p className="text-[11px] leading-relaxed text-muted-foreground/80">{reason}</p>
       ) : null}
 
       <GpuPackAction summary={summary} />
 
-      {pack.phase === "unsupported" && !canEnableGpu(summary) ? (
+      {!isTauriRuntime() || pack.phase === "unsupported" ? (
         <p className="text-[11px] text-muted-foreground">Available in the installed desktop app</p>
       ) : null}
     </div>
