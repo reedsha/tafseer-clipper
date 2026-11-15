@@ -205,8 +205,9 @@ before the first release.
 
 ## 7. Post-release
 
-- Run [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) on a **clean Windows 11 VM**
-  (no Python, Node, Rust, or system FFmpeg) against the *installed* app.
+- Run [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) on **both** a clean Windows 11 VM
+  and a clean Windows 10 (21H2+) VM (no Python, Node, Rust, or system FFmpeg) against
+  the *installed* app. Windows 10 is the supported floor; Windows 7/8.1 are not.
 - Smoke-test the updater: install the previous version, publish a newer
   `latest.json`, confirm the in-app update downloads, installs and relaunches.
 - Keep the updater private key backed up offline. Losing it (or its password)
@@ -262,9 +263,25 @@ sidecar; in headless/restricted sessions WebView2 window creation is denied, so
 that part reports **SKIP** instead of failing. The full window + wizard flow is
 covered by `docs/RELEASE_CHECKLIST.md` on a desktop VM.
 
-Remaining before a *public* release: Authenticode credentials (or Azure Trusted
-Signing), a real updater hosting URL + rotated production key, and the clean-VM
-checklist run on GPU hardware with real lecture material.
+Pass `-Sandbox <dir>` to put the throwaway install somewhere other than
+`<repo>/.smoke`. Use it whenever the checkout lives in a cloud-synced folder
+(OneDrive, Dropbox): the installed `backend.exe` is a PyInstaller onefile that
+extracts to `%TEMP%`, which the script redirects into the sandbox, and that
+extraction fails inside OneDrive with `Could not create temporary directory!`
+for reasons unrelated to the app. Example:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/smoke-installer.ps1 -Sandbox C:\smoke-test
+```
+
+The script must also be run from an **interactive session**: a silent `/S`
+install can stall on a prompt that a non-interactive agent session cannot answer.
+
+Remaining before a *public* release: a real updater hosting URL, and the two
+clean-VM checklist runs on GPU hardware with real lecture material. Authenticode
+signing is **deliberately out of scope** (`docs/RELEASE_READINESS.md` BL-3), so
+builds stay internal-unsigned; `release.yml` keeps failing closed on tags, which
+means the public-release path stays shut rather than shipping unsigned.
 
 
 

@@ -1,13 +1,25 @@
 # Release Checklist — v0.1.0 (packaged end-to-end gate)
 
-Run this against the **installed** application on a clean Windows 11 VM with no
-Python, Node, Rust or system FFmpeg installed. Attach the completed checklist to
-the release PR/issue.
+Run this against the **installed** application on a clean VM with no Python, Node,
+Rust or system FFmpeg installed. The product targets **Windows 10 and Windows 11**
+(64-bit), per `tafseer_clipper_master_plan.md:5,14` — so the gate is **two runs**:
+
+1. a clean **Windows 11** VM, and
+2. a clean **Windows 10 21H2 or later** VM.
+
+Attach both completed checklists to the release PR/issue. Windows 10 is the lower
+bound: the bundled FFmpeg 9.0.2 build requires Windows 10+ (UCRT64), Python 3.12
+supports 8.1+, and WebView2 is installed by the NSIS bootstrapper when missing
+(Windows 11 ships it). Windows 7/8.1 are **not** supported.
 
 ## 0. Artifact integrity
 
 - [ ] Installer installs per-user without an administrator prompt.
-- [ ] `signtool verify /pa /v "<installer>.exe"` reports a valid Authenticode signature and timestamp.
+- [ ] Signature state is as intended. **This project ships unsigned** (no
+      Authenticode credential by decision — `docs/RELEASE_READINESS.md` BL-3), so
+      record `signtool verify /pa /v "<installer>.exe"` reporting *no signature*
+      and confirm the build is internal-only. If a credential is ever added,
+      require a valid signature and timestamp here instead.
 - [ ] Installer file name matches the tag (`Tafseer Clipper_0.1.0_x64-setup.exe`).
 - [ ] App version shows `0.1.0` in Settings → Storage (Updates) and `GET /health`.
 - [ ] `THIRD_PARTY_NOTICES.md` is present in the install directory (`resources/`).

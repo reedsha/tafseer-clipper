@@ -329,9 +329,9 @@ Two of the checklist's own sections — `1b. GPU acceleration pack (NVIDIA)` and
 
 | # | Blocker | Note |
 |---|---|---|
-| **BL-3** | No Authenticode credential → `REQUIRE_CODE_SIGNING=1` fails every tag build. **You have stated you will not sign soon** — so the release path stays closed by design. Unsigned local builds remain available via `scripts/build-release.ps1 -SkipSigning`. | Yours |
+| **BL-3** | No Authenticode credential → `REQUIRE_CODE_SIGNING=1` fails every tag build. **Signing is out of scope by decision — BL-3 closed, no public release planned** — so the release path stays closed by design. Unsigned local builds remain available via `scripts/build-release.ps1 -SkipSigning`. | Yours |
 | **BL-4** | `release/0.1.0` signed with the pre-rotation key (§3) | Rebuild after BL-1 |
-| **BL-5** | 61/61 packaged-gate boxes unchecked (§5) | Needs a clean Windows 11 VM + desktop |
+| **BL-5** | 61/61 packaged-gate boxes unchecked (§5) | Needs a clean **Windows 10 (21H2+)** and a clean **Windows 11** VM + desktop (both are supported targets) |
 | **BL-6** | 5 Dependabot PRs awaiting review | **All 5 pass their own checks** — 2 show red only because of §1.6's flake | Yours |
 | **BL-7** | **Two** of the 11 required Rust tests are unstable (`acceleration.rs:955` and `:990`) → a merge gate that randomly red-lines; seen on 3 of 4 recent runs (§1.6) | Application/test code — needs an instructed phase |
 
@@ -430,7 +430,7 @@ Applied after the report, on explicit instruction. This section supersedes the c
 
 | Blocker | State |
 |---|---|
-| BL-3 Authenticode credential | Open — publishing stays blocked by design |
+| BL-3 Authenticode credential | **CLOSED — accepted**: the app will not be signed and no public release is planned; internal builds only, and `release.yml` keeps failing closed on tags |
 | BL-4 artifacts signed with the pre-rotation key | **FIXED (Stream 4)** — see §9.4 |
 | BL-5 the 61-item clean-VM gate | Open — human walkthrough (§9.5) |
 | BL-6 Dependabot queue | **CLOSED** — `#5`, `#8`, `#10`, `#14` merged; `#11` green but held by judgement; `#18` (release 0.1.1) awaiting your decision |
@@ -565,7 +565,7 @@ agent shell.
 | 1 | Packaged payload smoke (silent install → installed sidecar `/health` with the **bundled** ffmpeg → clean shutdown → uninstall) | `powershell -ExecutionPolicy Bypass -File scripts/smoke-installer.ps1` | part of BL-5 |
 | 2 | Same, plus the real window (`-TryGui`; SKIPs if the session cannot create a webview) | `… smoke-installer.ps1 -TryGui` | part of BL-5 |
 | 3 | Full frozen-sidecar self-test (run it with the frozen exe **outside** the OneDrive checkout, e.g. copy it to `C:\t\`) | `py -3.12 backend/smoke_frozen.py` | confidence in the frozen payload |
-| 4 | Walk `docs/RELEASE_CHECKLIST.md` §0/§1/§1b/§2–§9 on a clean Windows 11 VM | manual | **BL-5 (61 items)** |
+| 4 | Walk `docs/RELEASE_CHECKLIST.md` §0/§1/§1b/§2–§9 on a clean **Windows 11** VM **and** a clean **Windows 10 21H2+** VM | manual | **BL-5 (61 items × 2)** |
 | 5 | Install the built installer on this machine and re-run the transcribe step once **without** the pack and once **with** it | manual | **G-C on packaged hardware** |
 | 6 | Authenticode credential, if a public release is wanted | Azure Trusted Signing / PFX / thumbprint → `production` environment | **BL-3** |
 

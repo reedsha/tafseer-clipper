@@ -14,6 +14,20 @@ Arabic) into short bilingual clips.
 - `docs/RELEASING.md` — release runbook (build, signing, updater, secrets).
 - `docs/RELEASE_CHECKLIST.md` — packaged end-to-end release gate.
 
+## Requirements
+
+- **Windows 10 (21H2 or later) or Windows 11**, 64-bit. Windows 7/8.1 are **not**
+  supported: the bundled FFmpeg 9.0.2 build targets the UCRT toolchain and needs
+  Windows 10+.
+- **WebView2 runtime.** Present on Windows 11; the installer fetches it on
+  Windows 10 when it is missing (needs an internet connection on first install).
+- **Disk:** ~450 MB for the installed app (163 MB installer, including the bundled
+  `backend.exe`, `ffmpeg.exe` and `ffprobe.exe`). Optional extras are much
+  larger: the GPU acceleration pack is ~2.1 GB, and Whisper models are 0.5–3 GB
+  depending on the model chosen.
+- **GPU: optional.** An NVIDIA GPU only enables the one-click acceleration pack;
+  transcription and rendering always work on the CPU.
+
 ## Development
 
 ```powershell
