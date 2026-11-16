@@ -2,16 +2,16 @@ import { cn } from "cn";
 
 /**
  * The Tafseer Clipper brand mark: an eight-point (rub el hizb) frame with
- * diamond nodes, pointed arches, an open book and an eight-point star.
+ * diamond nodes, a pair of scissors resting on an open book.
  *
  * Drawn with `currentColor` so chrome controls the tone — never hardcode a
  * colour here (AGENTS.md §2: chrome colours come from the token system).
  *
- * Two variants mirror the identity sheet:
- * - `bold`  — heavy strokes, simplified motif (two arches) for small chrome:
- *   header, dialogs, tray-scale UI. Thin detail turns to mud below ~48 px.
- * - `fine`  — full editorial detail (three arches) for large, calm surfaces:
- *   the startup splash and empty states.
+ * Two variants mirror the identity sheet (same geometry, optical weight):
+ * - `bold`  — heavy strokes for small chrome: header, dialogs, tray-scale UI.
+ *   Thin detail turns to mud below ~48 px.
+ * - `fine`  — lighter editorial strokes for large, calm surfaces: the startup
+ *   splash and empty states.
  *
  * Geometry twin: `public/brand-mark.svg` (fine, hardcoded cream) and
  * `src-tauri/icons/icon-source.svg` (bold, on the cream tile). Keep all
@@ -26,14 +26,12 @@ interface BrandMarkProps {
 const FRAME =
   "M48 6 58.5 22.6 77.7 18.3 73.4 37.5 90 48 73.4 58.5 77.7 77.7 58.5 73.4 48 90 37.5 73.4 18.3 77.7 22.6 58.5 6 48 22.6 37.5 18.3 18.3 37.5 22.6Z";
 
-const STAR =
-  "M48 16 49.4 21.1 54 18.5 51.4 23.1 56.5 24.5 51.4 25.9 54 30.5 49.4 27.9 48 33 46.6 27.9 42 30.5 44.6 25.9 39.5 24.5 44.6 23.1 42 18.5 46.6 21.1Z";
-
-/* Arches rise from the book's top edge — the book is the visual floor. */
-const ARCH_LEFT = "M30 58 30 44Q30 34 36 30Q42 34 42 44L42 58";
-const ARCH_RIGHT = "M54 58 54 44Q54 34 60 30Q66 34 66 44L66 58";
-/** Center arch: shorter, sits between the tall pair — fine variant only. */
-const ARCH_CENTER = "M44 60 44 48Q44 43 48 40.5Q52 43 52 48L52 60";
+/* Scissors cross just above the book and their rings rest on its top edge. */
+const BLADE_A = "M43.7 22.7 54.9 47.7";
+const BLADE_B = "M52.3 22.7 41.1 47.7";
+const RING_LEFT = { cx: 39.2, cy: 50.2, r: 5.5 };
+const RING_RIGHT = { cx: 56.8, cy: 50.2, r: 5.5 };
+const PIVOT = { cx: 48, cy: 32.3, r: 2.75 };
 
 const BOOK =
   "M26 57C33 54 42 55.5 48 60.5C54 55.5 63 54 70 57L70 70C63 67.5 54 68.5 48 74C42 68.5 33 67.5 26 70Z";
@@ -62,14 +60,13 @@ export function BrandMark({ variant = "bold", className }: BrandMarkProps) {
       {NODES.map((d) => (
         <path key={d} d={d} fill="currentColor" stroke="none" />
       ))}
-      <path d={ARCH_LEFT} stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" />
-      <path d={ARCH_RIGHT} stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" />
-      {variant === "fine" ? (
-        <path d={ARCH_CENTER} stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" />
-      ) : null}
+      <path d={BLADE_A} stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" />
+      <path d={BLADE_B} stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" />
+      <circle {...RING_LEFT} stroke="currentColor" strokeWidth={strokeWidth} />
+      <circle {...RING_RIGHT} stroke="currentColor" strokeWidth={strokeWidth} />
       <path d={BOOK} stroke="currentColor" strokeWidth={strokeWidth} strokeLinejoin="round" />
       <path d={BOOK_SPINE} stroke="currentColor" strokeWidth={spineWidth} strokeLinecap="round" />
-      <path d={STAR} fill="currentColor" stroke="none" />
+      <circle {...PIVOT} fill="currentColor" stroke="none" />
     </svg>
   );
 }
