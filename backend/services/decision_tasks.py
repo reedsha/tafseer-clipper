@@ -72,12 +72,7 @@ def recitation_request(
             instructions=(
                 f"Classify segment #{segment_id}. Choose exactly one of: {classes}."
             ),
-            criteria=(
-                "Choose quran/hadith/quote when the Thai characters spell Arabic "
-                "speech (phonetic Arabic), even when the segment has no Arabic "
-                "letters. Choose none for Thai explanation, translations, or "
-                "Thai words that merely mention Arabic."
-            ),
+            criteria=dict(RECITATION_LEGEND),
         )
     return state, questions
 
@@ -198,11 +193,15 @@ def verify_triage_request(
                 f"Is a spelling, Uthmani-orthography, or Harakat correction likely "
                 f"needed for line #{index}?"
             ),
-            criteria=(
-                "true when the Arabic may be mis-transcribed, missing diacritics, "
-                "or otherwise differs from authentic scripture; false when it is "
-                "already an exact, fully vocalized quotation."
-            ),
+            criteria={
+                "true": (
+                    "The Arabic may be mis-transcribed, missing diacritics, or "
+                    "otherwise differ from authentic scripture."
+                ),
+                "false": (
+                    "It is already an exact, fully vocalized quotation."
+                ),
+            },
         )
     return state, questions
 
@@ -290,21 +289,25 @@ def clip_scoring_request(
                 f"How well does candidate #{candidate.id} work as a standalone "
                 "social-media clip for this brief?"
             ),
-            criteria=(
-                "1.0 = an ideal self-contained moment; 0.0 = unusable. Reward a "
-                "complete thought, a clear hook, and relevance to the brief. "
-                "Penalize filler, admin talk, and mid-verse cuts."
-            ),
+            criteria=[
+                "Unusable: filler, admin talk, or a mid-verse cut.",
+                "Weak: on topic but needs heavy trimming or more context.",
+                "Good: a coherent moment that mostly stands on its own.",
+                "Excellent: a complete, self-contained moment that fits the brief.",
+            ],
         )
         questions[f"complete_{candidate.id}"] = Question(
             type="noul",
             instructions=(
                 f"Does candidate #{candidate.id} start and end on a complete thought?"
             ),
-            criteria=(
-                "true when the window opens at a sentence start and closes at a "
-                "sentence end without cutting a verse or a hadith."
-            ),
+            criteria={
+                "true": (
+                    "The window opens at a sentence start and closes at a "
+                    "sentence end without cutting a verse or a hadith."
+                ),
+                "false": "It starts or ends mid-thought.",
+            },
         )
     return state, questions
 
@@ -381,10 +384,12 @@ def sentence_break_request(
             instructions=(
                 f"Does a complete sentence end immediately after segment #{segment_id}?"
             ),
-            criteria=(
-                "true when the next segment starts a new thought; false when the "
-                "next segment continues the same sentence or is filler."
-            ),
+            criteria={
+                "true": "The next segment starts a new thought.",
+                "false": (
+                    "The next segment continues the same sentence or is filler."
+                ),
+            },
         )
     return state, questions
 

@@ -1650,35 +1650,139 @@ def run_decision_checks(work: Path, source: Path) -> None:
                         "type": "choice",
                         "choice": "quran",
                         "probabilities": {"quran": 0.82, "none": 0.18},
+                        "confidence": 0.82,
                     },
-                    "needs_fix": {"type": "noul", "noul": True, "confidence": 0.91},
-                    "fit": {"type": "score", "score": 0.72},
+                    "needs_fix": {"type": "noul", "noul": 0.91},
+                    "fit": {
+                        "type": "score",
+                        "score": 2.16,
+                        "legend": {
+                            "0": "Unusable",
+                            "1": "Weak",
+                            "2": "Good",
+                            "3": "Excellent",
+                        },
+                        "probabilities": {"0": 0.02, "1": 0.1, "2": 0.6, "3": 0.28},
+                        "confidence": 0.6,
+                    },
                 },
             },
         )
 
     questions = {
-        "kind": decision.Question(type="choice", instructions="Classify.", criteria="c"),
-        "needs_fix": decision.Question(type="noul", instructions="Fix?"),
-        "fit": decision.Question(type="score", instructions="Score."),
+        "kind": decision.Question(
+            type="choice",
+            instructions="Classify.",
+            criteria={"quran": "Recitation.", "none": "Other."},
+        ),
+        "needs_fix": decision.Question(
+            type="noul",
+            instructions="Fix?",
+            criteria={"true": "Needs a fix.", "false": "Already correct."},
+        ),
+        "fit": decision.Question(
+            type="score",
+            instructions="Score.",
+            criteria=["Unusable", "Weak", "Good", "Excellent"],
+        ),
     }
     transport = httpx.MockTransport(_reply)
     answers = asyncio.run(
         decision.decide(provider, {"segments": [1, 2]}, questions, transport=transport)
     )
     sent = captured.get("payload") or {}
+    sent_questions = sent.get("questions", {})
     check(
         "decision.decide: one POST with model/state/questions and parsed typed answers",
         captured.get("url") == "http://127.0.0.1:11434/v1/systemone"
         and sent.get("model") == "mock-decision"
         and sent.get("state") == {"segments": [1, 2]}
-        and sent.get("questions", {}).get("kind", {}).get("type") == "choice"
+        and sent_questions.get("kind", {}).get("type") == "choice"
         and answers["kind"].value == "quran"
         and abs(answers["kind"].confidence - 0.82) < 1e-9
         and answers["needs_fix"].value is True
         and answers["needs_fix"].confidence == 0.91
         and abs(answers["fit"].value - 0.72) < 1e-9,
         json.dumps(sent, ensure_ascii=False)[:140],
+    )
+    check(
+        "decision.decide: the payload matches the System One criteria contract",
+        isinstance(sent_questions.get("kind", {}).get("criteria"), dict)
+        and isinstance(sent_questions.get("fit", {}).get("criteria"), list)
+        and len(sent_questions["fit"]["criteria"]) == 4
+        and sent_questions.get("needs_fix", {}).get("criteria")
+        == {"true": "Needs a fix.", "false": "Already correct."},
+        json.dumps(sent_questions, ensure_ascii=False)[:200],
+    )
+    check(
+        "decision.decide: a noul probability becomes a boolean plus its confidence",
+        abs(answers["needs_fix"].probability("true") - 0.91) < 1e-9
+        and abs(answers["fit"].level - 2.16) < 1e-9
+        and answers["fit"].legend.get("2") == "Good",
+        f"p_true={answers['needs_fix'].probability('true')} "
+        f"level={answers['fit'].level}",
+    )
+
+    low_transport = httpx.MockTransport(
+        lambda _r: httpx.Response(
+            200,
+            json={
+                "answers": {
+                    "kind": {"type": "choice", "choice": "none",
+                             "probabilities": {"quran": 0.1, "none": 0.9}},
+                    "needs_fix": {"type": "noul", "noul": 0.2},
+                    "fit": {"type": "score", "score": 9.0},
+                }
+            },
+        )
+    )
+    low = asyncio.run(
+        decision.decide(provider, "state", questions, transport=low_transport)
+    )
+    check(
+        "decision.decide: a low noul probability reads false and the score clamps",
+        low["needs_fix"].value is False
+        and abs(low["needs_fix"].confidence - 0.8) < 1e-9
+        and low["fit"].level == 9.0
+        and low["fit"].value == 1.0,
+        f"noul={low['needs_fix'].value} conf={low['needs_fix'].confidence} "
+        f"score={low['fit'].value}",
+    )
+
+    bad_questions: list[tuple[str, decision.Question]] = [
+        (
+            "choice with string criteria",
+            decision.Question(type="choice", instructions="x", criteria="labels"),
+        ),
+        (
+            "score with one level",
+            decision.Question(type="score", instructions="x", criteria=["only"]),
+        ),
+        (
+            "noul with string criteria",
+            decision.Question(type="noul", instructions="x", criteria="yes/no"),
+        ),
+    ]
+    rejected: list[str] = []
+    for label, bad in bad_questions:
+        try:
+            asyncio.run(
+                decision.decide(
+                    provider,
+                    "state",
+                    {"bad": bad},
+                    transport=httpx.MockTransport(
+                        lambda _r: httpx.Response(200, json={"answers": {}})
+                    ),
+                )
+            )
+        except decision.DecisionError:
+            continue
+        rejected.append(label)
+    check(
+        "decision.decide: a criteria shape the provider would reject fails locally",
+        not rejected,
+        f"accepted={rejected}",
     )
 
     malformed_cases: list[tuple[str, httpx.Response]] = [
