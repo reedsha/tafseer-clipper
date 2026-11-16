@@ -14,9 +14,6 @@ import {
 
 export type EngineMode = "local" | "cloud";
 
-/** Step 1 presentation: automatic hides every engine/model control. */
-export type EngineUiMode = "automatic" | "advanced";
-
 /** Interface language; Thai entries may fall back to English until reviewed. */
 export type UiLanguage = "en" | "th";
 export type ComputeType = "int8" | "float16" | "float32";
@@ -26,8 +23,8 @@ export type Resolution = "1920x1080" | "1080x1920";
 export interface CloudProviderSettings {
   baseUrl: string;
   apiKey: string;
-  reasoningModel: string;
-  fastTextModel: string;
+  /** One cloud AI model for clip finding and Arabic verification. */
+  model: string;
   timeout: number;
 }
 
@@ -36,10 +33,21 @@ export interface OllamaSettings {
   model: string;
 }
 
+/**
+ * Cloud speech-to-text settings.
+ *
+ * `baseUrl`/`apiKey` are an *optional* dedicated speech service. Empty means
+ * "use the AI connection" — correct for providers that host both chat and
+ * audio endpoints (OpenAI, Groq). Providers that only offer chat (the Vercel
+ * AI Gateway's OpenAI-compat route, DeepSeek, …) require their own entry, or
+ * every upload fails with a 404.
+ */
 export interface CloudSttSettings {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** Optional cloud model used only for the isolated Arabic recitation pass. */
+  arabicModel: string;
 }
 
 export interface WhisperSettings {
@@ -48,6 +56,23 @@ export interface WhisperSettings {
   autoUnload: boolean;
   initialPrompt: string;
 }
+
+/** The three System One slots from docs/DECISION_MODELS_PLAN.md. */
+export type DecisionSlotId = "analysis" | "clip_scoring" | "verify_triage";
+export type DecisionSlotMode = "local" | "cloud";
+
+/**
+ * One fast-judgment slot. `enabled: false` (or an empty model) means the step
+ * keeps today's path; the connection address and key are never duplicated here
+ * — they are reused from `ollama` / `cloud`.
+ */
+export interface DecisionSlotSettings {
+  enabled: boolean;
+  mode: DecisionSlotMode;
+  model: string;
+}
+
+export type DecisionSlots = Record<DecisionSlotId, DecisionSlotSettings>;
 
 export interface ArabicStyle {
   fontFamily: string;
@@ -90,6 +115,8 @@ export interface EditorDefaults {
   autoPad: boolean;
   filenameTemplate: string;
   maxCharsPerLine: number;
+  /** Physical lines per subtitle cue: 1 or 2 (default 2). */
+  subtitleMaxLines: 1 | 2;
   resolution: Resolution;
   framing: FramingMode;
   useNvenc: boolean;
@@ -123,12 +150,12 @@ export interface SidecarState {
 export interface SettingsData {
   transcriptionMode: EngineMode;
   analysisMode: EngineMode;
-  engineUiMode: EngineUiMode;
   uiLanguage: UiLanguage;
   cloud: CloudProviderSettings;
   ollama: OllamaSettings;
   cloudStt: CloudSttSettings;
   whisper: WhisperSettings;
+  decisionSlots: DecisionSlots;
   arabic: ArabicStyle;
   thai: ThaiStyle;
   presets: StylePreset[];
@@ -146,12 +173,12 @@ export interface SettingsState extends SettingsData {
 
   setTranscriptionMode: (mode: EngineMode) => void;
   setAnalysisMode: (mode: EngineMode) => void;
-  setEngineUiMode: (mode: EngineUiMode) => void;
   setUiLanguage: (language: UiLanguage) => void;
   updateCloud: (patch: Partial<CloudProviderSettings>) => void;
   updateOllama: (patch: Partial<OllamaSettings>) => void;
   updateCloudStt: (patch: Partial<CloudSttSettings>) => void;
   updateWhisper: (patch: Partial<WhisperSettings>) => void;
+  updateDecisionSlot: (slot: DecisionSlotId, patch: Partial<DecisionSlotSettings>) => void;
   updateArabic: (patch: Partial<ArabicStyle>) => void;
   updateThai: (patch: Partial<ThaiStyle>) => void;
   updateEditor: (patch: Partial<EditorDefaults>) => void;
@@ -178,7 +205,7 @@ export interface SettingsState extends SettingsData {
   importSettings: (text: string) => { ok: true } | { ok: false; error: string };
   resetSettings: () => void;
 
-  refreshHealth: (options?: { background?: boolean }) => Promise<void>;
+  refreshHealth: (options?: { background?: boolean; force?: boolean }) => Promise<void>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -291,16 +318,24 @@ const DEFAULT_GLOSSARY: GlossaryEntry[] = [
   { id: "glossary-2", find: "ซอฮาบะห์", replace: "เศาะฮาบะฮฺ", enabled: true },
 ];
 
+/**
+ * Fast-judgment slots start empty: a blank model keeps the deterministic and
+ * generative paths exactly as they are until the editor picks a model.
+ */
+const DEFAULT_DECISION_SLOTS: DecisionSlots = {
+  analysis: { enabled: false, mode: "local", model: "" },
+  clip_scoring: { enabled: false, mode: "cloud", model: "" },
+  verify_triage: { enabled: false, mode: "cloud", model: "" },
+};
+
 const DEFAULT_DATA: SettingsData = {
   transcriptionMode: "local",
   analysisMode: "cloud",
-  engineUiMode: "automatic",
   uiLanguage: "en",
   cloud: {
     baseUrl: "https://api.openai.com/v1",
     apiKey: "",
-    reasoningModel: "",
-    fastTextModel: "",
+    model: "",
     timeout: 120,
   },
   ollama: {
@@ -310,7 +345,8 @@ const DEFAULT_DATA: SettingsData = {
   cloudStt: {
     baseUrl: "",
     apiKey: "",
-    model: "whisper-1",
+    model: "",
+    arabicModel: "",
   },
   whisper: {
     model: "large-v3-turbo",
@@ -318,6 +354,7 @@ const DEFAULT_DATA: SettingsData = {
     autoUnload: true,
     initialPrompt: DEFAULT_WHISPER_PROMPT,
   },
+  decisionSlots: structuredClone(DEFAULT_DECISION_SLOTS),
   arabic: { ...DEFAULT_ARABIC },
   thai: { ...DEFAULT_THAI },
   presets: DEFAULT_PRESETS.map((item) => ({
@@ -333,6 +370,7 @@ const DEFAULT_DATA: SettingsData = {
     autoPad: true,
     filenameTemplate: "{LectureName}_Clip{01}_{Title}.mp4",
     maxCharsPerLine: 40,
+    subtitleMaxLines: 2,
     resolution: "1080x1920",
     framing: "blur-fill",
     useNvenc: true,
@@ -490,6 +528,21 @@ function coercePromptPresets(value: unknown, fallback: PromptPreset[]): PromptPr
   return presets;
 }
 
+function coerceDecisionSlots(value: unknown): DecisionSlots {
+  const slots = structuredClone(DEFAULT_DECISION_SLOTS);
+  if (!isRecord(value)) return slots;
+  for (const id of Object.keys(slots) as DecisionSlotId[]) {
+    const raw = value[id];
+    if (!isRecord(raw)) continue;
+    slots[id] = {
+      enabled: asBoolean(raw.enabled, slots[id].enabled),
+      mode: raw.mode === "local" || raw.mode === "cloud" ? raw.mode : slots[id].mode,
+      model: asString(raw.model, slots[id].model).trim(),
+    };
+  }
+  return slots;
+}
+
 function coerceFonts(value: unknown): FontInfo[] {
   if (!Array.isArray(value)) return [];
   const fonts: FontInfo[] = [];
@@ -520,23 +573,30 @@ function coerceSettingsData(raw: unknown): SettingsData {
   return {
     transcriptionMode: asMode(raw.transcriptionMode, DEFAULT_DATA.transcriptionMode),
     analysisMode: asMode(raw.analysisMode, DEFAULT_DATA.analysisMode),
-    engineUiMode: raw.engineUiMode === "advanced" ? "advanced" : "automatic",
     uiLanguage: raw.uiLanguage === "th" ? "th" : "en",
     cloud: {
       baseUrl: asString(cloud.baseUrl, DEFAULT_DATA.cloud.baseUrl),
       apiKey: asString(cloud.apiKey, DEFAULT_DATA.cloud.apiKey),
-      reasoningModel: asString(cloud.reasoningModel, DEFAULT_DATA.cloud.reasoningModel),
-      fastTextModel: asString(cloud.fastTextModel, DEFAULT_DATA.cloud.fastTextModel),
+      // v2 snapshots stored two purpose-specific models; both collapse into
+      // the single shared cloud model.
+      model: asString(
+        cloud.model,
+        asString(cloud.reasoningModel, asString(cloud.fastTextModel, DEFAULT_DATA.cloud.model)),
+      ),
       timeout: asNumber(cloud.timeout, DEFAULT_DATA.cloud.timeout),
     },
     ollama: {
       baseUrl: asString(ollama.baseUrl, DEFAULT_DATA.ollama.baseUrl),
       model: asString(ollama.model, DEFAULT_DATA.ollama.model),
     },
+    // Optional dedicated speech service. Old snapshots either have no fields
+    // (empty = "use the AI connection") or still carry a pre-2026-11 STT
+    // connection, which is restored here rather than silently discarded.
     cloudStt: {
       baseUrl: asString(cloudStt.baseUrl, DEFAULT_DATA.cloudStt.baseUrl),
       apiKey: asString(cloudStt.apiKey, DEFAULT_DATA.cloudStt.apiKey),
       model: asString(cloudStt.model, DEFAULT_DATA.cloudStt.model),
+      arabicModel: asString(cloudStt.arabicModel, DEFAULT_DATA.cloudStt.arabicModel),
     },
     whisper: {
       model: asString(whisper.model, DEFAULT_DATA.whisper.model),
@@ -544,6 +604,7 @@ function coerceSettingsData(raw: unknown): SettingsData {
       autoUnload: asBoolean(whisper.autoUnload, DEFAULT_DATA.whisper.autoUnload),
       initialPrompt: asString(whisper.initialPrompt, DEFAULT_DATA.whisper.initialPrompt),
     },
+    decisionSlots: coerceDecisionSlots(raw.decisionSlots),
     arabic: coerceArabic(raw.arabic, DEFAULT_DATA.arabic),
     thai: coerceThai(raw.thai, DEFAULT_DATA.thai),
     presets: coercePresets(raw.presets, DEFAULT_DATA.presets),
@@ -563,6 +624,7 @@ function coerceSettingsData(raw: unknown): SettingsData {
         DEFAULT_DATA.editor.maxCharsPerLine,
         "maxCharsPerLine",
       ),
+      subtitleMaxLines: editor.subtitleMaxLines === 1 ? 1 : 2,
       resolution: asResolution(editor.resolution, DEFAULT_DATA.editor.resolution),
       framing: asFraming(editor.framing, DEFAULT_DATA.editor.framing),
       useNvenc: asBoolean(editor.useNvenc, DEFAULT_DATA.editor.useNvenc),
@@ -586,12 +648,12 @@ function pickSettingsData(state: SettingsState): SettingsData {
   return {
     transcriptionMode: state.transcriptionMode,
     analysisMode: state.analysisMode,
-    engineUiMode: state.engineUiMode,
     uiLanguage: state.uiLanguage,
     cloud: state.cloud,
     ollama: state.ollama,
     cloudStt: state.cloudStt,
     whisper: state.whisper,
+    decisionSlots: state.decisionSlots,
     arabic: state.arabic,
     thai: state.thai,
     presets: state.presets,
@@ -619,13 +681,19 @@ export const useSettingsStore = create<SettingsState>()(
 
       setTranscriptionMode: (mode) => set({ transcriptionMode: mode }),
       setAnalysisMode: (mode) => set({ analysisMode: mode }),
-      setEngineUiMode: (mode) => set({ engineUiMode: mode }),
       setUiLanguage: (language) => set({ uiLanguage: language }),
 
       updateCloud: (patch) => set((state) => ({ cloud: { ...state.cloud, ...patch } })),
       updateOllama: (patch) => set((state) => ({ ollama: { ...state.ollama, ...patch } })),
       updateCloudStt: (patch) => set((state) => ({ cloudStt: { ...state.cloudStt, ...patch } })),
       updateWhisper: (patch) => set((state) => ({ whisper: { ...state.whisper, ...patch } })),
+      updateDecisionSlot: (slot, patch) =>
+        set((state) => ({
+          decisionSlots: {
+            ...state.decisionSlots,
+            [slot]: { ...state.decisionSlots[slot], ...patch },
+          },
+        })),
       updateArabic: (patch) => set((state) => ({ arabic: { ...state.arabic, ...patch } })),
       updateThai: (patch) => set((state) => ({ thai: { ...state.thai, ...patch } })),
       updateEditor: (patch) => set((state) => ({ editor: { ...state.editor, ...patch } })),
@@ -761,7 +829,13 @@ export const useSettingsStore = create<SettingsState>()(
           set((state) => ({ sidecar: { ...state.sidecar, status: "checking" } }));
         }
         try {
-          const health = await getHealth();
+          // "Check again" must actually bypass the sidecar's provider cache, and
+          // the probe must use the Ollama address saved in Settings — otherwise
+          // a non-default port is reported as "not found".
+          const health = await getHealth(undefined, {
+            refresh: options?.force === true,
+            ollamaBaseUrl: get().ollama.baseUrl,
+          });
           set({
             sidecar: {
               status: "online",

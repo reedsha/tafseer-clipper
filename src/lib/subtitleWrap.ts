@@ -38,8 +38,8 @@ function getThaiSegmenter(): WordSegmenter | null {
  * verbatim preserves the original spacing (and never inserts spaces between
  * Thai words). The space-split fallback joins with a single space.
  */
-function wrapLine(line: string, maxChars: number): string {
-  if (line.length <= maxChars) return line;
+function splitLine(line: string, maxChars: number): string[] {
+  if (line.length <= maxChars) return line ? [line] : [];
   const segmenter = getThaiSegmenter();
   const chunks = segmenter
     ? [...segmenter.segment(line)].map((part) => part.segment)
@@ -60,7 +60,42 @@ function wrapLine(line: string, maxChars: number): string {
     }
   }
   if (current.trim()) out.push(current.trim());
-  return out.join("\n");
+  return out.filter(Boolean);
+}
+
+function wrapLine(line: string, maxChars: number): string {
+  return splitLine(line, maxChars).join("\n");
+}
+
+/**
+ * Split text into lines no longer than `maxChars`, without the `\n` join.
+ * Used by the transcript→cue builder to cut an over-long segment into
+ * proportional subtitle lines.
+ */
+export function splitSubtitleText(text: string, maxChars: number): string[] {
+  if (!text.trim()) return [];
+  if (maxChars <= 0) return [text];
+  return text
+    .split("\n")
+    .flatMap((line) => splitLine(line.trim(), maxChars))
+    .filter(Boolean);
+}
+
+/**
+ * Word chunks for proportional cue splitting. Thai uses the dictionary-backed
+ * segmenter (no inter-word spaces); other scripts split on whitespace.
+ */
+export function splitTextWords(text: string, kind: "thai" | "space"): string[] {
+  if (!text.trim()) return [];
+  if (kind === "thai") {
+    const segmenter = getThaiSegmenter();
+    if (segmenter) {
+      return [...segmenter.segment(text)]
+        .map((part) => part.segment)
+        .filter((part) => part.trim().length > 0);
+    }
+  }
+  return text.split(/\s+/).filter(Boolean);
 }
 
 /**

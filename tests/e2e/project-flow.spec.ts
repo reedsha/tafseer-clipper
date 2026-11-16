@@ -25,10 +25,10 @@ test.describe("project flow", () => {
     await page.goto("/");
 
     /* ------------------------------ resume ------------------------------ */
-    // The app opens on the Recent Lectures bar above the stepper.
-    const recentBar = page.getByRole("region", { name: "Recent lectures" }).first();
-    await expect(recentBar).toBeVisible();
-    await recentBar.getByRole("button", { name: new RegExp(PROJECT_NAME) }).first().click();
+    // The app opens with the sessions sidebar on the left.
+    const sidebar = page.getByRole("complementary", { name: "Sessions" });
+    await expect(sidebar).toBeVisible();
+    await sidebar.getByRole("button", { name: new RegExp(PROJECT_NAME) }).first().click();
 
     await expect(page.getByRole("heading", { name: "Find clips" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Approved", exact: true })).toHaveCount(0);
@@ -57,15 +57,19 @@ test.describe("project flow", () => {
     }, Math.floor(full.length / 2));
     await page.keyboard.press("Control+Enter");
 
-    await expect(thaiFields).toHaveCount(2);
-    const halves = await thaiFields.evaluateAll((nodes) =>
-      nodes.map((node) => (node as HTMLTextAreaElement).value),
-    );
-    expect(halves).toHaveLength(2);
-    // The two halves must join back to the original text: split, not duplicated.
-    expect(halves[0] + halves[1]).toBe(full);
-    expect(halves[0].length).toBeGreaterThan(0);
-    expect(halves[1].length).toBeGreaterThan(0);
+    // The deck shows one line at a time: two rows exist, and the halves are
+    // read by opening each row in turn.
+    const cueRows = page.locator("[data-cue-row]");
+    await expect(cueRows).toHaveCount(2);
+    await expect(thaiFields).toHaveCount(1);
+
+    await cueRows.nth(0).getByRole("button", { name: "Subtitle line 1" }).click();
+    const firstHalf = await page.locator('textarea[lang="th"]').inputValue();
+    await cueRows.nth(1).getByRole("button", { name: "Subtitle line 2" }).click();
+    const secondHalf = await page.locator('textarea[lang="th"]').inputValue();
+    expect(firstHalf + secondHalf).toBe(full);
+    expect(firstHalf.length).toBeGreaterThan(0);
+    expect(secondHalf.length).toBeGreaterThan(0);
 
     /* ---------------------- Step 4: queue metadata ----------------------- */
     await page.getByRole("button", { name: "Continue to export" }).click();

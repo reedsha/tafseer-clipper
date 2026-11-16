@@ -22,10 +22,10 @@ import {
 } from "lucide-react";
 import { cn } from "cn";
 
+import { AiActivityLine } from "@/components/AiActivityLine";
 import { PromptDrawer } from "@/components/PromptDrawer";
 import { GpuInlineHint } from "@/components/GpuAcceleration";
 import { InlineError } from "@/components/InlineError";
-import { RecentProjectsBar } from "@/components/RecentProjectsBar";
 import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { SidecarStatusDot, SIDECAR_STATUS_LABEL } from "@/components/SidecarStatusDot";
 import { Badge } from "@/components/ui/badge";
@@ -50,6 +50,7 @@ import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { extractAndTranscribe } from "@/lib/api";
 import { describeAcceleration } from "@/lib/acceleration";
+import { aiRouteFor } from "@/lib/aiActivity";
 import { buildDiagnostics, copyText } from "@/lib/diagnostics";
 import { formatBytes, formatClock, stripExtension } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
@@ -62,10 +63,16 @@ import {
   subscribeNativeDrops,
 } from "@/lib/media";
 import { DEFAULT_DISCOVERY_SETTINGS, type ProjectData, type TranscriptData } from "@/lib/projectTypes";
-import { openProjectFile } from "@/lib/projectFile";
-import { describeProviderGap, whisperModelLabel } from "@/lib/providers";
+import {
+  buildDecisionProviderFor,
+  buildProviderFor,
+  describeProviderGap,
+  describeSttGap,
+  resolveSttConnection,
+} from "@/lib/providers";
+import { useAiActivityStore } from "@/store/aiActivityStore";
 import { useProjectStore } from "@/store/projectStore";
-import { useSettingsStore, type EngineMode, type EngineUiMode } from "@/store/settingsStore";
+import { useSettingsStore, type EngineMode } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
 
 /* -------------------------------------------------------------------------- */
@@ -84,27 +91,29 @@ function analysisGapMessage(gap: string): string {
 
 export function Step1Ingest() {
   const project = useProjectStore((state) => state.project);
-  const recentProjects = useProjectStore((state) => state.recentProjects);
-  const lastProjectId = useProjectStore((state) => state.lastProjectId);
-  const resumeRecent = useProjectStore((state) => state.resumeRecent);
   const setStep = useProjectStore((state) => state.setStep);
 
   const transcriptionMode = useSettingsStore((state) => state.transcriptionMode);
   const analysisMode = useSettingsStore((state) => state.analysisMode);
-  const engineUiMode = useSettingsStore((state) => state.engineUiMode);
-  const setEngineUiMode = useSettingsStore((state) => state.setEngineUiMode);
   const cloud = useSettingsStore((state) => state.cloud);
   const cloudStt = useSettingsStore((state) => state.cloudStt);
   const ollama = useSettingsStore((state) => state.ollama);
   const whisper = useSettingsStore((state) => state.whisper);
   const promptPresets = useSettingsStore((state) => state.promptPresets);
   const sidecar = useSettingsStore((state) => state.sidecar);
+  const aiEntries = useAiActivityStore((state) => state.entries);
+  const activeTranscription =
+    aiEntries.find((entry) => entry.task === "transcription" && entry.status === "running") ??
+    aiEntries.find((entry) => entry.task === "transcription");
   const setTranscriptionMode = useSettingsStore((state) => state.setTranscriptionMode);
   const setAnalysisMode = useSettingsStore((state) => state.setAnalysisMode);
   const refreshHealth = useSettingsStore((state) => state.refreshHealth);
 
+  /** Where Cloud STT will actually upload: a dedicated speech service, or the
+      shared AI connection when no separate one is configured. */
+  const sttConnection = resolveSttConnection({ transcriptionMode, cloud, cloudStt });
+
   const openSettings = useUiStore((state) => state.openSettings);
-  const setRecentOpen = useUiStore((state) => state.setRecentOpen);
 
   const [dragging, setDragging] = useState(false);
   const { t } = useI18n();
@@ -175,19 +184,22 @@ export function Step1Ingest() {
   /** Vendor-neutral acceleration state derived from GET /health. */
   const acceleration = describeAcceleration(sidecar.health);
 
+  /** Copy label for whichever connection Cloud STT uploads to. */
+  const sttServiceLabel = sttConnection.dedicated ? "Speech service" : "Your AI account";
+
   const transcriptionDetail =
     transcriptionMode === "local"
       ? `On this computer${
           sidecar.health ? ` · ${acceleration.transcription === "gpu" ? "GPU" : "CPU"}` : ""
-        } · ${whisperModelLabel(whisper.model)}`
-      : cloudStt.baseUrl
-        ? `Your AI account · ${cloudStt.model || "model not set"}`
-        : "Your AI account — not set up";
+        } · ${whisper.model || "model not chosen"}`
+      : sttConnection.baseUrl && (sttConnection.apiKey || sttConnection.dedicated)
+        ? `${sttServiceLabel} · ${cloudStt.model || "model not set"}`
+        : `${sttServiceLabel} — not set up`;
 
   const analysisDetail =
     analysisMode === "cloud"
-      ? cloud.reasoningModel && cloud.apiKey
-        ? `Your AI account · ${cloud.reasoningModel}`
+      ? cloud.model && cloud.apiKey
+        ? `Your AI account · ${cloud.model}`
         : "Your AI account — not set up"
       : ollama.model
         ? `This computer · ${ollama.model}`
@@ -196,25 +208,8 @@ export function Step1Ingest() {
   /** Missing provider field that would block Step 2 discovery, if any. */
   const analysisGap =
     analysisMode === "cloud"
-      ? describeProviderGap({ analysisMode, ollama, cloud }, "reasoning")
+      ? describeProviderGap({ analysisMode, ollama, cloud })
       : null;
-
-  /** One-line, vendor-neutral description for Automatic mode. */
-  const transcriptionSummary =
-    transcriptionMode === "local"
-      ? `Transcribing on this computer${
-          sidecar.health ? ` (${acceleration.transcription === "gpu" ? "GPU" : "CPU"})` : ""
-        }`
-      : "Transcribing with your AI account";
-  const analysisSummary =
-    analysisMode === "local"
-      ? ollama.model
-        ? "clip finding on this computer"
-        : "clip finding on this computer — no model chosen"
-      : cloud.reasoningModel && cloud.apiKey
-        ? "clip finding with your AI account"
-        : "clip finding needs an AI connection";
-  const automaticSummary = `${transcriptionSummary} · ${analysisSummary}`;
 
   const ensureProject = useCallback((): ProjectData => {
     const current = useProjectStore.getState().project;
@@ -257,7 +252,7 @@ export function Step1Ingest() {
     }
     setBrowserFile(null);
     setError(null);
-    toast.success("Lecture ready", { description: sourceFileName });
+    toast.success("Session ready", { description: sourceFileName });
   }, []);
 
   const handleBrowserFile = useCallback(
@@ -398,33 +393,6 @@ export function Step1Ingest() {
     useProjectStore.getState().setSessionGuide(value);
   }
 
-  async function handleResume(projectId: string) {
-    const resumed = await resumeRecent(projectId);
-    if (!resumed) {
-      toast.error("Auto-save not found", {
-        description: "No saved copy of this lecture was found on disk or in local storage.",
-      });
-      return;
-    }
-    const resumedProject = useProjectStore.getState().project;
-    toast.success("Lecture resumed", {
-      description: `${resumedProject?.name ?? "Project"} · Step ${resumedProject?.step ?? 1}`,
-    });
-  }
-
-  async function handleOpenProject() {
-    try {
-      const opened = await openProjectFile();
-      if (!opened) return;
-      useProjectStore.getState().openProject(opened);
-      toast.success("Project opened", { description: opened.name });
-    } catch (caught) {
-      toast.error("Could not open project", {
-        description: caught instanceof Error ? caught.message : String(caught),
-      });
-    }
-  }
-
   function handleReplaceConfirm() {
     const pending = pendingReplace;
     setPendingReplace(null);
@@ -445,7 +413,7 @@ export function Step1Ingest() {
     }
     setBrowserFile(null);
     setError(null);
-    toast.success("New lecture ready", { description: pending.name });
+    toast.success("New session ready", { description: pending.name });
   }
 
   async function handleTranscribe() {
@@ -460,29 +428,54 @@ export function Step1Ingest() {
     }
 
     const settings = useSettingsStore.getState();
-    if (settings.transcriptionMode === "cloud" && !settings.cloudStt.baseUrl.trim()) {
-      toast.error("Cloud transcription isn't set up", {
-        description: "Set the service, model and API key in Settings → 1 · Upload & Transcribe.",
-      });
-      useUiStore.getState().openSettings("stage1");
-      return;
+    if (settings.transcriptionMode === "cloud") {
+      const sttGap = describeSttGap(settings);
+      if (sttGap) {
+        // The model lives in the Upload configuration; the connection lives in
+        // Settings. Send the user to whichever screen owns the missing piece.
+        const missingModel = sttGap.includes("model");
+        toast.error("Cloud transcription isn't set up", {
+          description: missingModel
+            ? "Choose a speech-to-text model in the Upload configuration."
+            : `Add ${sttGap} in Settings, or switch the engine to “This computer”.`,
+        });
+        if (missingModel) {
+          useUiStore.getState().openConfig(1);
+        } else {
+          useUiStore.getState().openSettings("connection");
+        }
+        return;
+      }
     }
 
     // Pre-flight the Step 2 reasoning provider too: without a key/model the
     // discovery call can only fail after the whole lecture has been
     // transcribed, so catch it before Whisper starts.
-    const analysisGap = describeProviderGap(settings, "reasoning");
+    const analysisGap = describeProviderGap(settings);
     if (settings.analysisMode === "cloud" && analysisGap) {
       toast.error("Clip finding isn't set up yet", {
         description: analysisGapMessage(analysisGap),
       });
-      // The missing field picks the tab: the clip-finding model lives in the
-      // step 2 settings, keys/endpoints/Ollama model in Main.
-      useUiStore
-        .getState()
-        .openSettings(analysisGap.includes("clip-finding model") ? "stage2" : "main");
+      // The missing field picks the screen: the AI model lives in the Find
+      // Clips configuration, the connection (key / address) in Settings.
+      if (analysisGap.includes("AI model")) {
+        useUiStore.getState().openConfig(2);
+      } else {
+        useUiStore.getState().openSettings("connection");
+      }
       return;
     }
+
+    const route = aiRouteFor(settings, "transcription");
+    const activityId = useAiActivityStore.getState().start({
+      ...route,
+      detail:
+        route.backend === "local" && sidecar.health
+          ? acceleration.transcription === "gpu"
+            ? "GPU"
+            : "CPU"
+          : undefined,
+    });
 
     const controller = new AbortController();
     abortRef.current?.abort();
@@ -512,16 +505,22 @@ export function Step1Ingest() {
           cloud:
             settings.transcriptionMode === "cloud"
               ? {
-                  base_url: settings.cloudStt.baseUrl,
-                  api_key: settings.cloudStt.apiKey || null,
+                  base_url: sttConnection.baseUrl,
+                  api_key: sttConnection.apiKey || null,
                   model: settings.cloudStt.model || "whisper-1",
                   language: settings.editor.language || null,
                 }
               : null,
+          analysis_provider: buildProviderFor(settings),
+          decision_provider: buildDecisionProviderFor(settings, "analysis"),
+          arabic_model: settings.cloudStt.arabicModel.trim() || null,
+          detect_arabic: true,
+          group_sentences: true,
         },
         { signal: controller.signal },
       );
 
+      useAiActivityStore.getState().finish(activityId, "done", result.model || undefined);
       if (!mountedRef.current || abortRef.current !== controller) return;
 
       const store = useProjectStore.getState();
@@ -545,6 +544,9 @@ export function Step1Ingest() {
         description: `${formatClock(result.duration)} of speech transcribed`,
       });
     } catch (caught) {
+      useAiActivityStore
+        .getState()
+        .finish(activityId, controller.signal.aborted ? "cancelled" : "failed");
       if (!mountedRef.current || abortRef.current !== controller) return;
       if (controller.signal.aborted) {
         toast("Transcription cancelled");
@@ -635,14 +637,6 @@ export function Step1Ingest() {
               </Badge>
             ) : null}
           </header>
-
-          <RecentProjectsBar
-            recentProjects={recentProjects}
-            lastProjectId={lastProjectId}
-            onResume={handleResume}
-            onOpenFile={() => void handleOpenProject()}
-            onViewAll={() => setRecentOpen(true)}
-          />
 
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1.25fr)_minmax(330px,0.75fr)]">
             <div className="space-y-4">
@@ -785,6 +779,12 @@ export function Step1Ingest() {
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                     {t("step1.busy.description")}
                   </p>
+                  <div className="mt-2 space-y-1">
+                    {activeTranscription ? <AiActivityLine entry={activeTranscription} /> : null}
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      AI analysis · {analysisDetail}
+                    </p>
+                  </div>
                   <div className="mt-3 flex items-center justify-between gap-3">
                     <span className="text-xs tabular-nums text-muted-foreground">
                       <NumberFlow
@@ -966,40 +966,39 @@ export function Step1Ingest() {
                       {t("step1.ai.title")}
                     </h2>
                     <p className="text-xs leading-relaxed text-muted-foreground">
-                      {engineUiMode === "automatic"
-                        ? t("step1.ai.automaticDescription")
-                        : t("step1.ai.advancedDescription")}
+                      {t("step1.ai.description")}
                     </p>
                   </div>
                   <div className="flex items-center gap-1.5">
-                    <SegmentedToggle<EngineUiMode>
-                      label="AI setup mode"
-                      value={engineUiMode}
-                      options={[
-                        { value: "automatic", label: "Automatic" },
-                        { value: "advanced", label: "Advanced" },
-                      ]}
-                      onChange={setEngineUiMode}
-                      disabled={busy}
-                    />
                     <Button
                       variant="ghost"
                       size="icon-xs"
                       aria-label="Open AI connection settings"
-                      onClick={() => openSettings("main")}
+                      onClick={() => openSettings("connection")}
                     >
                       <Settings2 className="size-3.5" />
                     </Button>
                   </div>
                 </div>
 
-                {engineUiMode === "automatic" ? (
-                  <div className="mt-3 space-y-2">
-                    <p className="flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
-                      <SidecarStatusDot status={sidecar.status} className="mt-1.5" />
-                      <span className="flex-1">{automaticSummary}</span>
-                    </p>
-
+                <div className="mt-3 space-y-3">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-[11px] text-muted-foreground">Transcription</Label>
+                      <span className="min-w-0 truncate text-[11px] text-muted-foreground/80">
+                        {transcriptionDetail}
+                      </span>
+                    </div>
+                    <SegmentedToggle<EngineMode>
+                      label="Transcription engine"
+                      value={transcriptionMode}
+                      options={[
+                        { value: "local", label: "This computer" },
+                        { value: "cloud", label: "Your AI account" },
+                      ]}
+                      onChange={setTranscriptionMode}
+                      disabled={busy}
+                    />
                     {transcriptionMode === "local" ? (
                       <div className="space-y-1.5">
                         <p className="text-xs leading-relaxed text-muted-foreground/80">
@@ -1008,101 +1007,59 @@ export function Step1Ingest() {
                         <GpuInlineHint summary={acceleration} />
                       </div>
                     ) : null}
+                  </div>
 
-                    {analysisMode === "cloud" && analysisGap ? (
-                      <p className="flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
-                        <AlertTriangle className="mt-0.5 size-3 shrink-0" />
-                        <span className="flex-1">{analysisGapMessage(analysisGap)}</span>
-                      </p>
-                    ) : null}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-[11px] text-muted-foreground">Topic analysis</Label>
+                      <span className="min-w-0 truncate text-[11px] text-muted-foreground/80">
+                        {analysisDetail}
+                      </span>
+                    </div>
+                    <SegmentedToggle<EngineMode>
+                      label="Topic analysis engine"
+                      value={analysisMode}
+                      options={[
+                        { value: "local", label: "This computer" },
+                        { value: "cloud", label: "Your AI account" },
+                      ]}
+                      onChange={setAnalysisMode}
+                      disabled={busy}
+                    />
+                  </div>
+                </div>
 
+                {analysisMode === "cloud" && analysisGap ? (
+                  <p className="mt-3 flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
+                    <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+                    <span className="flex-1">{analysisGapMessage(analysisGap)}</span>
                     <Button
                       variant="ghost"
                       size="xs"
-                      className="gap-1 text-muted-foreground"
+                      className="h-5 shrink-0 text-status-warning"
                       onClick={() =>
-                        openSettings(
-                          analysisGap?.includes("clip-finding model") ? "stage2" : "main",
-                        )
+                        openSettings(analysisGap.includes("AI model") ? "connection" : undefined)
                       }
                     >
-                      {t("step1.ai.change")}
+                      Fix
                     </Button>
-                  </div>
-                ) : (
-                  <>
-                    <div className="mt-3 space-y-3">
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <Label className="text-[11px] text-muted-foreground">Transcription</Label>
-                          <span className="min-w-0 truncate text-[11px] text-muted-foreground/80">
-                            {transcriptionDetail}
-                          </span>
-                        </div>
-                        <SegmentedToggle<EngineMode>
-                          label="Transcription engine"
-                          value={transcriptionMode}
-                          options={[
-                            { value: "local", label: "This computer" },
-                            { value: "cloud", label: "Your AI account" },
-                          ]}
-                          onChange={setTranscriptionMode}
-                          disabled={busy}
-                        />
-                        {transcriptionMode === "local" ? (
-                          <div className="space-y-1.5">
-                            <p className="text-xs leading-relaxed text-muted-foreground/80">
-                              {t("step1.ai.downloadNote")}
-                            </p>
-                            <GpuInlineHint summary={acceleration} />
-                          </div>
-                        ) : null}
-                      </div>
+                  </p>
+                ) : null}
 
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <Label className="text-[11px] text-muted-foreground">Topic analysis</Label>
-                          <span className="min-w-0 truncate text-[11px] text-muted-foreground/80">
-                            {analysisDetail}
-                          </span>
-                        </div>
-                        <SegmentedToggle<EngineMode>
-                          label="Topic analysis engine"
-                          value={analysisMode}
-                          options={[
-                            { value: "local", label: "This computer" },
-                            { value: "cloud", label: "Your AI account" },
-                          ]}
-                          onChange={setAnalysisMode}
-                          disabled={busy}
-                        />
-                      </div>
-                    </div>
-
-                    {analysisMode === "cloud" && analysisGap ? (
-                      <p className="mt-3 flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
-                        <AlertTriangle className="mt-0.5 size-3 shrink-0" />
-                        <span className="flex-1">{analysisGapMessage(analysisGap)}</span>
-                        <Button
-                          variant="ghost"
-                          size="xs"
-                          className="h-5 shrink-0 text-status-warning"
-                          onClick={() =>
-                            openSettings(
-                              analysisGap.includes("clip-finding model") ? "stage2" : "main",
-                            )
-                          }
-                        >
-                          Fix
-                        </Button>
-                      </p>
-                    ) : null}
-                  </>
-                )}
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="mt-3 gap-1 text-muted-foreground"
+                  onClick={() =>
+                    openSettings(analysisGap?.includes("AI model") ? "connection" : undefined)
+                  }
+                >
+                  {t("step1.ai.change")}
+                </Button>
 
                 <p className="mt-3 text-xs leading-relaxed text-muted-foreground/80">
-                  API keys and connections live in Settings → Main; models, the transcription
-                  prompt and the glossary live in each step&rsquo;s settings.
+                  The API key and server address live in Settings; models, the transcription
+                  prompt and the glossary live in each step&rsquo;s configuration.
                 </p>
               </section>
             </aside>
@@ -1128,7 +1085,7 @@ export function Step1Ingest() {
             <DialogDescription>
               {project?.name ?? "The current project"} already has a transcript or clips. Loading{" "}
               {pendingReplace?.name ?? "the new lecture"} starts a fresh project; the current
-              auto-save stays in Recent lectures.
+              auto-save stays in Sessions.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -11,6 +11,8 @@ import { getAccelerationPackState } from "@/lib/acceleration";
 import { getHealth, SIDECAR_URL, type HealthResponse } from "@/lib/api";
 import { isTauriRuntime } from "@/lib/media";
 import { getUpdaterStatus } from "@/lib/updater";
+import { useAiActivityStore } from "@/store/aiActivityStore";
+import type { AiActivityEntry } from "@/lib/aiActivity";
 
 export interface DiagnosticsInput {
   /** Last successful `/health` payload from the settings store, if any. */
@@ -50,6 +52,8 @@ export interface DiagnosticsBundle {
   /** Optional GPU acceleration pack state (hardware names stay in this bundle). */
   acceleration: ReturnType<typeof getAccelerationPackState>;
   updater: ReturnType<typeof getUpdaterStatus>;
+  /** Recent AI task provenance: task, model and connection — never keys or prompts. */
+  ai_activity: AiActivityEntry[];
 }
 
 function describeError(error: unknown): string {
@@ -97,6 +101,7 @@ export async function buildDiagnostics(input: DiagnosticsInput): Promise<string>
     },
     acceleration: getAccelerationPackState(),
     updater: getUpdaterStatus(),
+    ai_activity: useAiActivityStore.getState().entries,
   };
 
   return JSON.stringify(bundle, null, 2);

@@ -6,94 +6,14 @@
  * `POST /verify-arabic` forward to the sidecar. Shared by Step 3 (Arabic
  * verification), the Settings provider probe and the Step 1 pre-flight guard
  * so those three cannot drift.
+ *
+ * There are no hard-coded services or model lists here: the connection is a
+ * plain OpenAI-compatible base URL + key (Main settings), and model choices
+ * are fetched live (`POST /list-models`) or scanned locally (`GET /health`).
  */
 
-import type { HardwareTier, ProviderOverride } from "@/lib/api";
-
-/** A named AI service the editor can connect with one click. */
-export interface CloudPreset {
-  id: string;
-  label: string;
-  baseUrl: string | null;
-}
-
-export const CLOUD_PRESETS: CloudPreset[] = [
-  { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1" },
-  { id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
-  { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1" },
-  { id: "custom", label: "Custom connection", baseUrl: null },
-];
-
-/** Which preset a stored base URL corresponds to (falls back to custom). */
-export function matchCloudPreset(baseUrl: string): string {
-  const trimmed = baseUrl.trim().replace(/\/+$/, "");
-  const match = CLOUD_PRESETS.find(
-    (preset) => preset.baseUrl !== null && preset.baseUrl.replace(/\/+$/, "") === trimmed,
-  );
-  return match?.id ?? "custom";
-}
-
-/** Curated model choices; the codename stays visible in the label. */
-export const CLOUD_MODEL_OPTIONS: { value: string; label: string }[] = [
-  { value: "gpt-4.1", label: "Best quality — gpt-4.1" },
-  { value: "gpt-4.1-mini", label: "Balanced — gpt-4.1-mini" },
-  { value: "gpt-4.1-nano", label: "Fastest — gpt-4.1-nano" },
-  { value: "deepseek-chat", label: "DeepSeek — deepseek-chat" },
-];
-
-/** Local-model recommendations, keyed by capability tier (never by hardware). */
-export interface LocalModelRecommendation {
-  model: string;
-  label: string;
-  tier: HardwareTier;
-}
-
-export const OLLAMA_RECOMMENDATIONS: LocalModelRecommendation[] = [
-  { model: "qwen3:14b", label: "Best quality", tier: "high" },
-  { model: "qwen3:8b", label: "Balanced", tier: "medium" },
-  { model: "qwen3:4b", label: "Fastest", tier: "low" },
-];
-
-export function recommendLocalModel(tier: HardwareTier | undefined): LocalModelRecommendation {
-  if (tier === "high") return OLLAMA_RECOMMENDATIONS[0];
-  if (tier === "medium") return OLLAMA_RECOMMENDATIONS[1];
-  return OLLAMA_RECOMMENDATIONS[2];
-}
-
-/** Human label for the honest fit verdict shown next to local models. */
-export function fitLabel(tier: HardwareTier | undefined): string {
-  if (tier === "high") return "Great fit";
-  if (tier === "medium") return "Workable";
-  return "Too heavy";
-}
-
-export function fitSentence(tier: HardwareTier | undefined): string {
-  if (tier === "high") return "The best local model runs comfortably here.";
-  if (tier === "medium") {
-    return "The best local model will be slow here — Balanced is the best fit.";
-  }
-  return "Local AI will be painfully slow here — use Fastest, or connect an AI account.";
-}
-
-/** Tier label for a Whisper model name, with the codename kept for reference. */
-export function whisperModelLabel(model: string): string {
-  switch (model) {
-    case "large-v3-turbo":
-      return "Best quality — large-v3-turbo";
-    case "large-v3":
-      return "Most accurate — large-v3";
-    case "medium":
-      return "Balanced — medium";
-    case "small":
-      return "Light — small";
-    case "base":
-      return "Lighter — base";
-    case "tiny":
-      return "Fastest — tiny";
-    default:
-      return model;
-  }
-}
+import type { DecisionProviderOverride, ProviderOverride } from "@/lib/api";
+import type { DecisionSlotId, DecisionSlots } from "@/store/settingsStore";
 
 /** The subset of `settingsStore` needed to route a provider call. */
 export interface ProviderSettingsSlice {
@@ -102,29 +22,13 @@ export interface ProviderSettingsSlice {
   cloud: {
     baseUrl: string;
     apiKey: string;
-    reasoningModel: string;
-    fastTextModel: string;
+    model: string;
     timeout: number;
   };
 }
 
-/**
- * Which model the sidecar should use: the reasoning model for clip discovery
- * (Step 2) or the fast text model for Arabic verification (Step 3).
- */
-export type ProviderPurpose = "reasoning" | "fast";
-
-function modelFor(settings: ProviderSettingsSlice, purpose: ProviderPurpose): string {
-  const model =
-    purpose === "reasoning" ? settings.cloud.reasoningModel : settings.cloud.fastTextModel;
-  return model.trim();
-}
-
 /** The `provider` override forwarded to `/discover-clips` or `/verify-arabic`. */
-export function buildProviderFor(
-  settings: ProviderSettingsSlice,
-  purpose: ProviderPurpose,
-): ProviderOverride {
+export function buildProviderFor(settings: ProviderSettingsSlice): ProviderOverride {
   if (settings.analysisMode === "local") {
     return {
       base_url: settings.ollama.baseUrl || null,
@@ -136,7 +40,7 @@ export function buildProviderFor(
   return {
     base_url: settings.cloud.baseUrl || null,
     api_key: settings.cloud.apiKey || null,
-    model: modelFor(settings, purpose) || null,
+    model: settings.cloud.model.trim() || null,
     timeout: settings.cloud.timeout || null,
   };
 }
@@ -146,19 +50,147 @@ export function buildProviderFor(
  * when the configured engine can run. Used for local pre-flight guards so the
  * user sees "API key missing" instead of the provider's raw 401 body.
  */
-export function describeProviderGap(
-  settings: ProviderSettingsSlice,
-  purpose: ProviderPurpose,
-): string | null {
+export function describeProviderGap(settings: ProviderSettingsSlice): string | null {
   if (settings.analysisMode === "local") {
-    return settings.ollama.model.trim() ? null : "the Ollama model name";
+    return settings.ollama.model.trim() ? null : "the AI model";
   }
   if (!settings.cloud.baseUrl.trim()) return "the AI service address";
   if (!settings.cloud.apiKey.trim()) return "the API key";
-  if (!modelFor(settings, purpose)) {
-    return purpose === "reasoning"
-      ? "the clip-finding model"
-      : "the Arabic-check model";
-  }
+  if (!settings.cloud.model.trim()) return "the AI model";
   return null;
+}
+
+/** The settings slice needed to route one fast-judgment slot. */
+export interface DecisionSettingsSlice {
+  decisionSlots: DecisionSlots;
+  ollama: { baseUrl: string };
+  cloud: { baseUrl: string; apiKey: string; timeout: number };
+}
+
+/**
+ * The `decision_provider` override for one slot, or `null` when the slot is
+ * off. The address and key are reused from the saved connections — the
+ * decision layer never gets a second set of credentials (AGENTS.md §3).
+ */
+export function buildDecisionProviderFor(
+  settings: DecisionSettingsSlice,
+  slot: DecisionSlotId,
+): DecisionProviderOverride | null {
+  const config = settings.decisionSlots[slot];
+  const model = config.model.trim();
+  if (!config.enabled || !model) return null;
+  const timeout = settings.cloud.timeout || null;
+  if (config.mode === "local") {
+    return {
+      mode: "local",
+      base_url: settings.ollama.baseUrl || null,
+      api_key: "",
+      model,
+      endpoint_style: "ollama",
+      timeout,
+    };
+  }
+  return {
+    mode: "cloud",
+    base_url: settings.cloud.baseUrl || null,
+    api_key: settings.cloud.apiKey || null,
+    model,
+    endpoint_style: "auto",
+    timeout,
+  };
+}
+
+/** First reason a fast-judgment slot cannot run, or `null` when it can. */
+export function describeDecisionSlotGap(
+  settings: DecisionSettingsSlice,
+  slot: DecisionSlotId,
+): string | null {
+  const config = settings.decisionSlots[slot];
+  if (!config.enabled) return null;
+  if (!config.model.trim()) return "the fast-judgment model";
+  if (config.mode === "local") {
+    return settings.ollama.baseUrl.trim() ? null : "the local AI address";
+  }
+  if (!settings.cloud.baseUrl.trim()) return "the AI service address";
+  if (!settings.cloud.apiKey.trim()) return "the API key";
+  return null;
+}
+
+/**
+ * The connection the Cloud STT engine will actually upload audio to.
+ *
+ * A dedicated speech service wins when configured; otherwise the shared AI
+ * connection is used (OpenAI/Groq host chat and audio on one account). The
+ * split exists because "OpenAI-compatible" only guarantees chat: gateways such
+ * as Vercel AI Gateway and DeepSeek expose no `/audio/transcriptions` route, so
+ * reusing their address made every cloud transcription fail with 404.
+ */
+export interface SttConnectionSettingsSlice {
+  transcriptionMode: "local" | "cloud";
+  cloud: { baseUrl: string; apiKey: string };
+  cloudStt: { baseUrl: string; apiKey: string; model: string };
+}
+
+export interface ResolvedSttConnection {
+  baseUrl: string;
+  apiKey: string;
+  /** True when a dedicated speech service is configured. */
+  dedicated: boolean;
+}
+
+export function resolveSttConnection(
+  settings: SttConnectionSettingsSlice,
+): ResolvedSttConnection {
+  const dedicated =
+    settings.cloudStt.baseUrl.trim() !== "" || settings.cloudStt.apiKey.trim() !== "";
+  if (dedicated) {
+    return {
+      baseUrl: settings.cloudStt.baseUrl.trim(),
+      apiKey: settings.cloudStt.apiKey.trim(),
+      dedicated: true,
+    };
+  }
+  return {
+    baseUrl: settings.cloud.baseUrl.trim(),
+    apiKey: settings.cloud.apiKey.trim(),
+    dedicated: false,
+  };
+}
+
+/**
+ * First missing piece of the Cloud STT setup, or `null` when it can run.
+ * A dedicated speech service may be keyless (a local OpenAI-compatible
+ * server), so the key is only required when the AI connection is reused.
+ */
+export function describeSttGap(settings: SttConnectionSettingsSlice): string | null {
+  const connection = resolveSttConnection(settings);
+  if (!connection.baseUrl) {
+    return connection.dedicated ? "the speech service address" : "the AI service address";
+  }
+  if (!connection.apiKey && !connection.dedicated) return "the API key";
+  if (!settings.cloudStt.model.trim()) return "the speech-to-text model";
+  return null;
+}
+
+/** Human label for the honest fit verdict shown next to local models. */export function fitLabel(tier: "high" | "medium" | "low" | undefined): string {
+  if (tier === "high") return "Great fit";
+  if (tier === "medium") return "Workable";
+  return "Too heavy";
+}
+
+export function fitSentence(tier: "high" | "medium" | "low" | undefined): string {
+  if (tier === "high") return "The best local model runs comfortably here.";
+  if (tier === "medium") {
+    return "The best local model will be slow here — pick a mid-size one.";
+  }
+  return "Local AI will be painfully slow here — use a small model, or connect an AI account.";
+}
+
+/** Honest speed hint for the local speech-to-text model on this machine. */
+export function whisperFitSentence(tier: "high" | "medium" | "low" | undefined): string {
+  if (tier === "high") return "The best-quality model runs comfortably on this computer.";
+  if (tier === "medium") {
+    return "The best-quality model will be slower here — a mid-size model is a good fit.";
+  }
+  return "Use a small model here; the bigger ones will be slow.";
 }

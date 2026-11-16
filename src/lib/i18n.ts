@@ -43,7 +43,7 @@ const EN = {
 
   "step1.busy.title": "Extracting audio and transcribing…",
   "step1.busy.description":
-    "Transcription runs in the background. Long lectures can take a few minutes — the app stays responsive.",
+    "Arabic recitation is checked automatically. Transcription runs in the background. Long lectures can take a few minutes - the app stays responsive.",
 
   "step1.transcribe.title": "Transcribe the lecture",
   "step1.transcribe.description":
@@ -53,18 +53,17 @@ const EN = {
   "step1.transcribe.downloadNote":
     "The first transcription on this computer downloads about 1.5 GB of AI files.",
 
-  "step1.brief.title": "Clip brief",
-  "step1.brief.description": "Tell the AI what kind of moments to look for.",
-  "step1.brief.edit": "Edit clip brief",
+  "step1.brief.title": "Initial prompt (clip finding)",
+  "step1.brief.description": "The standing instructions the AI follows when finding clips. Save your own as presets and switch between them.",
+  "step1.brief.edit": "Edit initial prompt",
 
-  "step1.guide.title": "Session topic guide",
-  "step1.guide.description": "Optional notes for this lecture only.",
+  "step1.guide.title": "Additional prompt (optional)",
+  "step1.guide.description": "Extra instructions for this uploaded lecture only — ignored when empty.",
   "step1.guide.placeholder":
     "Focus on stories of the Prophets and practical rulings; ignore the first 10 minutes of audio checks.",
 
   "step1.ai.title": "AI setup",
-  "step1.ai.automaticDescription": "We pick the best available option for you.",
-  "step1.ai.advancedDescription": "Choose where each step runs.",
+  "step1.ai.description": "Choose where each step runs.",
   "step1.ai.change": "Change AI settings",
   "step1.ai.downloadNote":
     "The first transcription on this computer downloads about 1.5 GB of AI files.",
@@ -123,18 +122,17 @@ const TH: Partial<Record<MessageKey, string>> = {
   "step1.transcribe.downloadNote":
     "การถอดเสียงครั้งแรกในเครื่องนี้จะดาวน์โหลดไฟล์ AI ประมาณ 1.5 GB",
 
-  "step1.brief.title": "โจทย์การตัดคลิป",
-  "step1.brief.description": "บอก AI ว่าต้องการช่วงแบบไหน",
-  "step1.brief.edit": "แก้โจทย์การตัดคลิป",
+  "step1.brief.title": "พรอมป์หลัก (สำหรับค้นหาคลิป)",
+  "step1.brief.description": "คำสั่งหลักที่ AI ใช้เลือกคลิป บันทึกเป็นพรีเซ็ตแล้วสลับใช้ได้ตามต้องการ",
+  "step1.brief.edit": "แก้พรอมป์หลัก",
 
-  "step1.guide.title": "หัวข้อของบรรยายครั้งนี้",
-  "step1.guide.description": "บันทึกเพิ่มเติมสำหรับบรรยายครั้งนี้เท่านั้น",
+  "step1.guide.title": "พรอมป์เพิ่มเติม (ไม่บังคับ)",
+  "step1.guide.description": "คำสั่งเฉพาะสำหรับไฟล์บรรยายที่เปิดอยู่นี้เท่านั้น — เว้นว่างไว้ได้",
   "step1.guide.placeholder":
     "เน้นเรื่องราวของบรรดานบีและข้อปฏิบัติ ละเว้น 10 นาทีแรกที่เป็นการทดสอบเสียง",
 
   "step1.ai.title": "ตั้งค่า AI",
-  "step1.ai.automaticDescription": "เราจะเลือกตัวเลือกที่ดีที่สุดให้อัตโนมัติ",
-  "step1.ai.advancedDescription": "เลือกเองว่าขั้นตอนใดทำงานที่ไหน",
+  "step1.ai.description": "เลือกเองว่าขั้นตอนใดทำงานที่ไหน",
   "step1.ai.change": "เปลี่ยนการตั้งค่า AI",
   "step1.ai.downloadNote":
     "การถอดเสียงครั้งแรกในเครื่องนี้จะดาวน์โหลดไฟล์ AI ประมาณ 1.5 GB",

@@ -23,7 +23,7 @@ import {
 } from "@/lib/projectFile";
 import { useSettingsStore, type EditorDefaults } from "./settingsStore";
 
-const MAX_RECENT_PROJECTS = 8;
+const MAX_RECENT_SESSIONS = 30;
 
 export interface CreateProjectInput {
   name?: string;
@@ -70,6 +70,8 @@ export interface ProjectState {
   autosave: () => boolean;
   resumeRecent: (projectId: string) => Promise<boolean>;
   removeRecent: (projectId: string) => void;
+  /** Inline-rename a session (the open one or a listed recent). */
+  renameSession: (projectId: string, name: string) => void;
   markSaved: () => void;
 }
 
@@ -79,7 +81,7 @@ function stripExtension(fileName: string): string {
 
 function upsertRecent(list: RecentProject[], entry: RecentProject): RecentProject[] {
   const next = [entry, ...list.filter((item) => item.id !== entry.id)];
-  return next.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_RECENT_PROJECTS);
+  return next.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_RECENT_SESSIONS);
 }
 
 /**
@@ -111,9 +113,10 @@ function normalizeRecentProject(value: unknown): RecentProject | null {
   if (!id) return null;
   const step =
     record.step === 2 || record.step === 3 || record.step === 4 ? record.step : 1;
+  const updatedAt = finiteNumber(record.updatedAt, Date.now());
   return {
     id,
-    name: typeof record.name === "string" ? record.name : "Untitled lecture",
+    name: typeof record.name === "string" ? record.name : "Untitled session",
     sourceFileName:
       typeof record.sourceFileName === "string" ? record.sourceFileName : null,
     step,
@@ -122,7 +125,8 @@ function normalizeRecentProject(value: unknown): RecentProject | null {
         ? record.duration
         : null,
     clipCount: Math.max(0, Math.round(finiteNumber(record.clipCount, 0))),
-    updatedAt: finiteNumber(record.updatedAt, Date.now()),
+    updatedAt,
+    lastActivityAt: finiteNumber(record.lastActivityAt, updatedAt),
   };
 }
 
@@ -137,11 +141,29 @@ function normalizeRecentProjects(value: unknown): RecentProject[] {
     seen.add(entry.id);
     entries.push(entry);
   }
-  return entries.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_RECENT_PROJECTS);
+  return entries.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_RECENT_SESSIONS);
 }
 
 function touch(project: ProjectData, patch: Partial<ProjectData>): ProjectData {
-  return { ...project, ...patch, updatedAt: Date.now() };
+  // A no-op patch (an effect writing back the values it just read) must not
+  // advance the activity clock — only a real change counts as work.
+  let changed = false;
+  for (const key of Object.keys(patch) as (keyof ProjectData)[]) {
+    if (project[key] !== patch[key]) {
+      changed = true;
+      break;
+    }
+  }
+  const now = Date.now();
+  return {
+    ...project,
+    ...patch,
+    updatedAt: now,
+    // Workflow-activity clock for the sidebar's Today/Yesterday groups:
+    // opening or auto-saving a session never advances it, only real edits
+    // and step changes do.
+    lastActivityAt: changed ? now : project.lastActivityAt,
+  };
 }
 
 /**
@@ -243,7 +265,7 @@ export const useProjectStore = create<ProjectState>()(
         if (get().project && get().dirty) get().autosave();
         const now = Date.now();
         const sourceFileName = input.sourceFileName ?? null;
-        const name = input.name ?? (sourceFileName ? stripExtension(sourceFileName) : "Untitled lecture");
+        const name = input.name ?? (sourceFileName ? stripExtension(sourceFileName) : "Untitled session");
         const editor = useSettingsStore.getState().editor;
         const project: ProjectData = {
           schemaVersion: 1,
@@ -275,6 +297,7 @@ export const useProjectStore = create<ProjectState>()(
           },
           createdAt: now,
           updatedAt: now,
+          lastActivityAt: now,
         };
         const previousRecent = get().recentProjects;
         const recentProjects = upsertRecent(previousRecent, toRecentProject(project));
@@ -331,8 +354,15 @@ export const useProjectStore = create<ProjectState>()(
       setTranscript: (transcriptId, transcript, duration) =>
         set((state) => {
           if (!state.project) return {};
+          // A new transcript invalidates the old cue timing/text (including
+          // Arabic recovery); Step 3 reseeds from the new one.
           return {
-            project: touch(state.project, { transcriptId, transcript, duration }),
+            project: touch(state.project, {
+              transcriptId,
+              transcript,
+              duration,
+              subtitles: {},
+            }),
             dirty: true,
           };
         }),
@@ -484,7 +514,7 @@ export const useProjectStore = create<ProjectState>()(
         }),
 
       autosave: () => {
-        const { project } = get();
+        const { project, dirty } = get();
         if (!project) return false;
         const saved = writeAutosave(project);
         // The durable disk copy is the safety net for exactly the case where
@@ -496,6 +526,14 @@ export const useProjectStore = create<ProjectState>()(
           return false;
         }
         const savedAt = Date.now();
+        // A redundant save (nothing changed since the last one — e.g. the
+        // debounced timer firing right after a session was opened) must not
+        // refresh the recent entry's save time: an untouched session reopened
+        // from yesterday would otherwise read "just now" in the sidebar.
+        if (!dirty) {
+          set({ autosavedAt: savedAt, lastAutosaveError: null });
+          return true;
+        }
         const previousRecent = get().recentProjects;
         const recentProjects = upsertRecent(
           previousRecent,
@@ -558,6 +596,23 @@ export const useProjectStore = create<ProjectState>()(
       },
 
       markSaved: () => set({ dirty: false, autosavedAt: Date.now() }),
+
+      renameSession: (projectId, name) => {
+        const trimmed = name.trim();
+        if (!trimmed) return;
+        const state = get();
+        // The open session renames through the normal (autosaving) path…
+        if (state.project?.id === projectId) {
+          state.updateProject({ name: trimmed });
+        }
+        // …and the sidebar list is updated immediately either way (the debounced
+        // auto-save would otherwise leave the row stale for up to an interval).
+        set((s) => ({
+          recentProjects: s.recentProjects.map((item) =>
+            item.id === projectId ? { ...item, name: trimmed } : item,
+          ),
+        }));
+      },
     }),
     {
       name: "tafseer.projects.v1",

@@ -234,10 +234,24 @@ export interface OllamaProviderStatus {
   detected: boolean;
   url: string | null;
   models: string[];
+  /** Decision-capable model ids found on the server (additive). */
+  decision_models?: string[];
+}
+
+/** Whisper models already downloaded on this machine; absent on older sidecars. */
+export interface WhisperLocalProviderStatus {
+  models: string[];
 }
 
 export interface ProvidersStatus {
   ollama: OllamaProviderStatus;
+  /** Locally downloaded faster-whisper models; absent on older sidecars. */
+  whisper_local?: WhisperLocalProviderStatus;
+  /**
+   * System One endpoint on the detected local server. Present only when the
+   * server is new enough to serve it (additive).
+   */
+  decision_endpoint?: string | null;
 }
 
 export type HardwareTier = "high" | "medium" | "low";
@@ -246,11 +260,63 @@ export interface HardwareStatus {
   tier: HardwareTier;
 }
 
-export function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
+export function getHealth(
+  signal?: AbortSignal,
+  options: { ollamaBaseUrl?: string | null; refresh?: boolean } = {},
+): Promise<HealthResponse> {
   // The first /health call runs the hardware-encoder probe (a one-frame null
   // encode), which can exceed 4 s on a cold driver; 8 s avoids a false
   // "sidecar offline".
-  return request<HealthResponse>("/health", { method: "GET" }, { timeoutMs: 8_000, signal });
+  const params = new URLSearchParams();
+  if (options.refresh) params.set("refresh", "1");
+  const ollamaBaseUrl = (options.ollamaBaseUrl ?? "").trim();
+  if (ollamaBaseUrl) params.set("ollama_base_url", ollamaBaseUrl);
+  const query = params.toString();
+  return request<HealthResponse>(`/health${query ? `?${query}` : ""}`, { method: "GET" }, {
+    timeoutMs: 8_000,
+    signal,
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* 7. POST /list-models                                                        */
+/* -------------------------------------------------------------------------- */
+
+export interface ListModelsRequest {
+  base_url: string;
+  api_key?: string | null;
+  timeout?: number | null;
+  /** Additive: keep only decision-capable ids (the System One tier). */
+  filter?: "decision" | null;
+  /** Additive: run one live decision probe of this model (Settings "Test"). */
+  probe_model?: string | null;
+  /** Additive: adapter hint for the probe; `auto` infers from the host. */
+  endpoint_style?: DecisionEndpointStyle | null;
+}
+
+export interface ModelProbeResult {
+  ok: boolean;
+  model: string;
+  detail: string;
+  confidence?: number | null;
+}
+
+export interface ListModelsResponse {
+  models: string[];
+  /** Additive: present only when the request asked for a live probe. */
+  probe?: ModelProbeResult | null;
+}
+
+/**
+ * Model discovery for the Settings selectors. Runs through the sidecar — the
+ * renderer never contacts the AI service itself (AGENTS.md §3).
+ */
+export function listModels(body: ListModelsRequest, signal?: AbortSignal): Promise<ListModelsResponse> {
+  return request<ListModelsResponse>(
+    "/list-models",
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+    { timeoutMs: 20_000, signal },
+  );
 }
 
 /* -------------------------------------------------------------------------- */
@@ -276,6 +342,14 @@ export interface TranscribeRequest {
   auto_unload?: boolean | null;
   vad_filter?: boolean;
   cloud?: CloudSttConfig | null;
+  /** Same provider override as Step 2; enables the Step-1 AI enrichment. */
+  analysis_provider?: ProviderOverride | null;
+  /** Optional fast-judgment slot for recitation + sentence boundaries (additive). */
+  decision_provider?: DecisionProviderOverride | null;
+  /** Optional cloud model for the isolated Arabic recovery pass. */
+  arabic_model?: string | null;
+  detect_arabic?: boolean;
+  group_sentences?: boolean;
 }
 
 export interface TranscribeResponse {
@@ -304,6 +378,12 @@ export interface TranscriptSegment {
   end: number;
   text: string;
   language: string | null;
+  sentence_id?: number | null;
+  source?: string | null;
+  reference?: string | null;
+  confidence?: number | null;
+  original_text?: string | null;
+  translation?: string | null;
 }
 
 export function extractAndTranscribe(
@@ -335,6 +415,36 @@ export interface ProviderOverride {
   timeout?: number | null;
 }
 
+export type DecisionEndpointStyle =
+  | "auto"
+  | "ollama"
+  | "openrouter"
+  | "perplexity"
+  | "runware"
+  | "typesafe";
+
+/**
+ * Optional System One slot sent with a request (additive). Absence means the
+ * sidecar keeps today's heuristics + generative model exactly as before.
+ */
+export interface DecisionProviderOverride {
+  mode?: "local" | "cloud" | null;
+  base_url?: string | null;
+  api_key?: string | null;
+  model?: string | null;
+  endpoint_style?: DecisionEndpointStyle | null;
+  timeout?: number | null;
+}
+
+/** One kept or passed-on clip used as re-roll feedback (additive). */
+export interface ClipExemplar {
+  start: number;
+  end: number;
+  title?: string;
+  /** Transcript excerpt, optional. */
+  text?: string;
+}
+
 export interface DiscoverRequest {
   transcript_id: string;
   base_prompt?: string;
@@ -346,6 +456,12 @@ export interface DiscoverRequest {
   max_duration?: number;
   language?: string;
   provider?: ProviderOverride | null;
+  /** Optional fast-judgment slot for candidate scoring (additive). */
+  decision_provider?: DecisionProviderOverride | null;
+  /** Kept clips the next re-roll should imitate (additive). */
+  approved_exemplars?: ClipExemplar[];
+  /** Passed-on clips the next re-roll should avoid (additive). */
+  rejected_exemplars?: ClipExemplar[];
 }
 
 export interface ClipProposal {
@@ -402,6 +518,22 @@ export interface VerifyArabicRequest {
   arabic_text: string;
   context_thai?: string;
   provider?: ProviderOverride | null;
+  /** Optional fast-judgment triage slot (ignored by the single-line path). */
+  decision_provider?: DecisionProviderOverride | null;
+}
+
+/** One line of the additive batched verification shape (<= 64). */
+export interface VerifyArabicLine {
+  arabic_text: string;
+  context_thai?: string;
+  /** Opaque renderer id, echoed back unchanged. */
+  cue_id?: string | null;
+}
+
+export interface VerifyArabicBatchRequest {
+  lines: VerifyArabicLine[];
+  provider?: ProviderOverride | null;
+  decision_provider?: DecisionProviderOverride | null;
 }
 
 export interface VerifyArabicResponse {
@@ -409,6 +541,27 @@ export interface VerifyArabicResponse {
   correction_applied: boolean;
   notes: string;
   model: string;
+  /** `quran` (corpus exact), `triage` (fast check passed), `proofread`. */
+  source?: string;
+  reference?: string | null;
+}
+
+export interface VerifyArabicLineResult {
+  cue_id?: string | null;
+  verified_text: string;
+  correction_applied: boolean;
+  notes: string;
+  source: string;
+  reference?: string | null;
+  confidence?: number | null;
+}
+
+export interface VerifyArabicBatchResponse {
+  verified_text: string;
+  correction_applied: boolean;
+  notes: string;
+  model: string;
+  lines: VerifyArabicLineResult[];
 }
 
 export function verifyArabic(
@@ -419,6 +572,21 @@ export function verifyArabic(
   // real error wins the race instead of a generic client-side timeout.
   return request<VerifyArabicResponse>("/verify-arabic", jsonBody(body), {
     timeoutMs: 180_000,
+    ...options,
+  });
+}
+
+/**
+ * One batched request per clip (<= 64 lines). The sidecar gates corpus-exact
+ * lines, triages the rest, and proofreads only what the fast check flags, so
+ * the budget must cover a worst-case sequential proofread.
+ */
+export function verifyArabicBatch(
+  body: VerifyArabicBatchRequest,
+  options?: RequestOptions,
+): Promise<VerifyArabicBatchResponse> {
+  return request<VerifyArabicBatchResponse>("/verify-arabic", jsonBody(body), {
+    timeoutMs: 30 * 60_000,
     ...options,
   });
 }

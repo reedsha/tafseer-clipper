@@ -2,15 +2,15 @@ import { useEffect } from "react";
 import { Toaster, toast } from "sonner";
 
 import { CommandMenu } from "@/components/CommandMenu";
-import { RecentProjectsBar } from "@/components/RecentProjectsBar";
-import { RecentProjectsDrawer } from "@/components/RecentProjectsDrawer";
-import { SettingsDrawer } from "@/components/SettingsDrawer";
+import { SettingsScreen } from "@/components/config/SettingsScreen";
+import { StageConfig } from "@/components/config/StageConfig";
+import { SessionsSidebar } from "@/components/SessionsSidebar";
 import { StartupGate } from "@/components/StartupGate";
 import { StepperHeader } from "@/components/StepperHeader";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { loadImportedFonts } from "@/lib/fonts";
-import { openProjectFile } from "@/lib/projectFile";
 import { startStartupUpdateCheck } from "@/lib/updater";
+import { cn } from "cn";
 import { Step1Ingest } from "@/steps/Step1Ingest";
 import { Step2Discovery } from "@/steps/Step2Discovery";
 import { Step3Subtitles } from "@/steps/Step3Subtitles";
@@ -35,10 +35,8 @@ function Workspace() {
 
 export default function App() {
   const refreshHealth = useSettingsStore((state) => state.refreshHealth);
-  const project = useProjectStore((state) => state.project);
-  const recentProjects = useProjectStore((state) => state.recentProjects);
-  const lastProjectId = useProjectStore((state) => state.lastProjectId);
-  const setRecentOpen = useUiStore((state) => state.setRecentOpen);
+  const settingsOpen = useUiStore((state) => state.settingsOpen);
+  const configStep = useUiStore((state) => state.configStep);
 
   useEffect(() => {
     void refreshHealth();
@@ -66,10 +64,10 @@ export default function App() {
         onAvailable: (result) => {
           toast.info(`Tafseer Clipper ${result.version} is available`, {
             description:
-              "Open Settings → Main to install it. Nothing installs automatically.",
+              "Open Settings → Updates to install it. Nothing installs automatically.",
             action: {
               label: "View updates",
-              onClick: () => useUiStore.getState().openSettings("main"),
+              onClick: () => useUiStore.getState().openSettings("updates"),
             },
             duration: 12_000,
           });
@@ -78,53 +76,27 @@ export default function App() {
     [],
   );
 
-  async function handleResume(projectId: string) {
-    const resumed = await useProjectStore.getState().resumeRecent(projectId);
-    if (!resumed) {
-      toast.error("Auto-save not found", {
-        description:
-          "No .tafseer snapshot was found for this lecture on disk or in local storage.",
-      });
-      return;
-    }
-    toast.success("Lecture resumed");
-  }
-
-  async function handleOpenFile() {
-    try {
-      const opened = await openProjectFile();
-      if (!opened) return;
-      useProjectStore.getState().openProject(opened);
-      toast.success("Project opened", { description: opened.name });
-    } catch (error) {
-      toast.error("Could not open project", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
   return (
     <TooltipProvider delayDuration={250}>
-      <div className="flex h-dvh flex-col overflow-hidden bg-background text-foreground">
-        {/* The app opens to the Recent Lectures bar above the stepper. */}
-        {project === null && recentProjects.length > 0 ? (
-          <RecentProjectsBar
-            compact
-            recentProjects={recentProjects}
-            lastProjectId={lastProjectId}
-            onResume={(id) => void handleResume(id)}
-            onOpenFile={() => void handleOpenFile()}
-            onViewAll={() => setRecentOpen(true)}
-          />
-        ) : null}
-        <StepperHeader />
-        <main className="min-h-0 flex-1 overflow-hidden">
-          <Workspace />
-        </main>
+      <div className="flex h-dvh overflow-hidden bg-background text-foreground">
+        <SessionsSidebar />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <StepperHeader />
+          <main className="min-h-0 flex-1 overflow-hidden">
+            {/* A stage configuration replaces only the content area: the recent
+                bar and stepper stay in place and the stages stay clickable. The
+                step stays mounted underneath (hidden) so anything running — a
+                transcription, a render — is never interrupted. */}
+            <div className={cn("h-full", configStep !== null && "hidden")}>
+              <Workspace />
+            </div>
+            {configStep !== null ? <StageConfig step={configStep} /> : null}
+          </main>
+        </div>
 
-        <SettingsDrawer />
+        {/* Settings is the one screen that takes over the whole window. */}
+        {settingsOpen ? <SettingsScreen /> : null}
         <CommandMenu />
-        <RecentProjectsDrawer />
         <StartupGate />
 
         <Toaster

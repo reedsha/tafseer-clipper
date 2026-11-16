@@ -116,6 +116,12 @@ function normalizeCues(value: unknown): SubtitleCue[] {
       end,
       arabic: str(raw.arabic),
       thai: str(raw.thai),
+      ...(raw.reviewed === true ? { reviewed: true } : {}),
+      ...(raw.source ? { source: str(raw.source) } : {}),
+      ...(raw.reference ? { reference: str(raw.reference) } : {}),
+      ...(typeof raw.confidence === "number" ? { confidence: raw.confidence } : {}),
+      ...(raw.originalText ? { originalText: str(raw.originalText) } : {}),
+      ...(raw.translation ? { translation: str(raw.translation) } : {}),
     });
   });
   return cues;
@@ -162,6 +168,20 @@ function normalizeTranscript(value: unknown): TranscriptData | null {
       end: num(segment.end, 0),
       text: str(segment.text),
       language: strOrNull(segment.language),
+      ...(typeof segment.sentence_id === "number"
+        ? { sentence_id: segment.sentence_id }
+        : {}),
+      ...(typeof segment.source === "string" ? { source: segment.source } : {}),
+      ...(typeof segment.reference === "string" ? { reference: segment.reference } : {}),
+      ...(typeof segment.confidence === "number"
+        ? { confidence: segment.confidence }
+        : {}),
+      ...(typeof segment.original_text === "string"
+        ? { original_text: segment.original_text }
+        : {}),
+      ...(typeof segment.translation === "string"
+        ? { translation: segment.translation }
+        : {}),
     })),
     // Keep the precomputed waveform envelope so a resumed project does not have
     // to decode the 16 kHz WAV again; drop non-finite samples.
@@ -189,7 +209,7 @@ function normalizeProject(raw: unknown): ProjectData {
   return {
     schemaVersion: 1,
     id: str(project.id) || crypto.randomUUID(),
-    name: str(project.name, "Untitled lecture"),
+    name: str(project.name, "Untitled session"),
     sourcePath: strOrNull(project.sourcePath),
     sourceFileName: strOrNull(project.sourceFileName),
     duration:
@@ -221,6 +241,9 @@ function normalizeProject(raw: unknown): ProjectData {
     },
     createdAt: num(project.createdAt, Date.now()),
     updatedAt: num(project.updatedAt, Date.now()),
+    // Sessions saved before this field existed inherit updatedAt so their
+    // Today/Yesterday grouping keeps working.
+    lastActivityAt: num(project.lastActivityAt, num(project.updatedAt, Date.now())),
   };
 }
 
@@ -251,6 +274,7 @@ export function toRecentProject(project: ProjectData): RecentProject {
     duration: project.duration,
     clipCount: project.clips.length,
     updatedAt: project.updatedAt,
+    lastActivityAt: project.lastActivityAt,
   };
 }
 

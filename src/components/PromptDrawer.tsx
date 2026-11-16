@@ -50,18 +50,18 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
     if (!trimmed) {
       setPromptPreset(null);
       toast("Using the built-in defaults", {
-        description: "You can add a clip brief any time from Step 1.",
+        description: "You can add an initial prompt any time from Step 1.",
       });
       onOpenChange(false);
       return;
     }
     if (activePreset && trimmed !== activePreset.prompt.trim()) {
       setPromptPreset(null);
-      toast.success("Clip brief updated", {
-        description: "Edited away from the preset — this project now uses a custom brief.",
+      toast.success("Initial prompt updated", {
+        description: "Edited away from the preset — this project now uses a custom prompt.",
       });
     } else {
-      toast.success("Clip brief updated");
+      toast.success("Initial prompt updated");
     }
     onOpenChange(false);
   }
@@ -76,15 +76,15 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
       return;
     }
     if (!prompt) {
-      toast.error("The brief is empty", {
-        description: "Write the clip brief before saving a preset.",
+      toast.error("The prompt is empty", {
+        description: "Write the initial prompt before saving a preset.",
       });
       return;
     }
     const discovery = project?.discovery ?? DEFAULT_DISCOVERY_SETTINGS;
     const id = addPromptPreset({
       name,
-      description: "Saved from the clip brief drawer.",
+      description: "Saved from the initial-prompt drawer.",
       prompt,
       minDuration: discovery.minDuration,
       maxDuration: discovery.maxDuration,
@@ -122,15 +122,15 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
           <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
             <div className="space-y-0.5">
               <Drawer.Title className="text-sm font-medium text-foreground">
-                Clip brief
+                Initial prompt — clip finding
               </Drawer.Title>
               <Drawer.Description className="text-xs text-muted-foreground">
-                Tell the AI what kind of clips to find. We add the timing and formatting rules
-                automatically.
+                The standing instructions the AI follows when finding clips. Timing and formatting
+                rules are added automatically.
               </Drawer.Description>
             </div>
             <Drawer.Close asChild>
-              <Button variant="ghost" size="icon-sm" aria-label="Close clip brief">
+              <Button variant="ghost" size="icon-sm" aria-label="Close initial prompt">
                 <X className="size-4" />
               </Button>
             </Drawer.Close>

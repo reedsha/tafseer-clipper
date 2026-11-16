@@ -24,6 +24,17 @@ export interface TranscriptSegment {
   end: number;
   text: string;
   language?: string | null;
+  /** Stage-1 enrichment: sentence group for Thai lines. */
+  sentence_id?: number | null;
+  /** Arabic passage provenance: quran | hadith | quote | stt. */
+  source?: string | null;
+  /** Qur'an/hadith reference hint, e.g. "2:153". */
+  reference?: string | null;
+  confidence?: number | null;
+  /** The original Thai transliteration, kept for Restore. */
+  original_text?: string | null;
+  /** Qur'an translation used as a review reference (never burned in). */
+  translation?: string | null;
 }
 
 export interface TranscriptData {
@@ -71,6 +82,15 @@ export interface SubtitleCue {
   end: number;
   arabic: string;
   thai: string;
+  /** The editor has proof-read this line. Cleared when the text is edited. */
+  reviewed?: boolean;
+  /** Arabic-only cue provenance (Quran verification / AI suggestion). */
+  source?: string;
+  reference?: string;
+  confidence?: number;
+  originalText?: string;
+  /** Review-only translation; not rendered in the burn-in. */
+  translation?: string;
 }
 
 export interface ProjectExportSettings {
@@ -107,6 +127,12 @@ export interface ProjectData {
   export: ProjectExportSettings;
   createdAt: number;
   updatedAt: number;
+  /**
+   * Clock of real workflow activity (edits, step changes). Deliberately not
+   * the auto-save clock: opening or re-saving a session never advances it, so
+   * the sidebar's Today/Yesterday groups reflect actual work.
+   */
+  lastActivityAt: number;
 }
 
 export interface RecentProject {
@@ -117,6 +143,8 @@ export interface RecentProject {
   duration: number | null;
   clipCount: number;
   updatedAt: number;
+  /** Mirrors `ProjectData.lastActivityAt`; falls back to `updatedAt`. */
+  lastActivityAt: number;
 }
 
 export const DEFAULT_EXPORT_SETTINGS: ProjectExportSettings = {

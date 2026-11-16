@@ -24,8 +24,15 @@ import type { AccelerationStatus, HealthResponse } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
 import { isTauriRuntime } from "@/lib/media";
 
-/** Default manifest; the release channel can override it at build time. */
-const DEFAULT_MANIFEST_URL = "https://updates.tafseer-clipper.app/accel/manifest.json";
+/**
+ * Default manifest. The release workflow overrides this at build time via
+ * `VITE_ACCEL_PACK_MANIFEST_URL`; a local/dev build must point at the real
+ * published asset too, not a placeholder host. The repository has no custom
+ * CDN, so the signed GitHub release is the source of truth (docs/GPU_PACK.md):
+ * the manifest and its DLLs are uploaded to the same release as the installer.
+ */
+const DEFAULT_MANIFEST_URL =
+  "https://github.com/reedsha/tafseer-clipper/releases/latest/download/accel-manifest.json";
 
 function resolveManifestUrl(): string {
   const fromEnv = import.meta.env.VITE_ACCEL_PACK_MANIFEST_URL;

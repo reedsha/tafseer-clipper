@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import { cn } from "cn";
 
+import { AiActivityLine } from "@/components/AiActivityLine";
 import { TimeFlow } from "@/components/TimeFlow";
 import { InlineError } from "@/components/InlineError";
 import { VideoPlayer, type VideoPlayerHandle } from "@/components/VideoPlayer";
@@ -41,7 +42,8 @@ import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { discoverClips, type ClipProposal, type ProviderOverride } from "@/lib/api";
+import { discoverClips, type ClipExemplar, type ClipProposal } from "@/lib/api";
+import { aiRouteFor, decisionActivityFor } from "@/lib/aiActivity";
 import {
   applyCutBuffer,
   MIN_RENDERABLE_CLIP_SECONDS,
@@ -51,9 +53,11 @@ import {
 } from "@/lib/clipMath";
 import { toMediaSrc } from "@/lib/media";
 import { formatClock } from "@/lib/format";
-import type { ProjectClip } from "@/lib/projectTypes";
+import type { ProjectClip, ProjectData } from "@/lib/projectTypes";
+import { buildDecisionProviderFor, buildProviderFor } from "@/lib/providers";
+import { useAiActivityStore } from "@/store/aiActivityStore";
 import { useProjectStore } from "@/store/projectStore";
-import { useSettingsStore, type SettingsState } from "@/store/settingsStore";
+import { useSettingsStore } from "@/store/settingsStore";
 
 type DiscoveryMode = "initial" | "reroll";
 type CutEdge = "start" | "end";
@@ -65,21 +69,28 @@ const SHUTTLE_RATES = [0.25, 0.5, 1, 1.5, 2, 3, 4] as const;
 /* Pure helpers                                                                */
 /* -------------------------------------------------------------------------- */
 
-function buildProvider(settings: SettingsState): ProviderOverride | null {
-  if (settings.analysisMode === "local") {
-    return {
-      base_url: settings.ollama.baseUrl || null,
-      api_key: "",
-      model: settings.ollama.model || null,
-      timeout: settings.cloud.timeout || null,
-    };
-  }
-  return {
-    base_url: settings.cloud.baseUrl || null,
-    api_key: settings.cloud.apiKey || null,
-    model: settings.cloud.reasoningModel || null,
-    timeout: settings.cloud.timeout || null,
-  };
+function excerptFor(project: ProjectData, clip: ProjectClip): string {
+  const segments = project.transcript?.segments ?? [];
+  const text = segments
+    .filter((segment) => segment.start >= clip.start - 0.05 && segment.end <= clip.end + 0.05)
+    .map((segment) => segment.text.trim())
+    .filter(Boolean)
+    .join(" ");
+  return text.slice(0, 600);
+}
+
+function exemplarsFor(
+  project: ProjectData,
+  keep: boolean,
+): ClipExemplar[] {
+  return project.clips
+    .filter((clip) => clip.approved === keep)
+    .map((clip) => ({
+      start: clip.start,
+      end: clip.end,
+      title: clip.title,
+      text: excerptFor(project, clip),
+    }));
 }
 
 function proposalToClip(
@@ -300,6 +311,10 @@ export function Step2Discovery() {
 
   const editor = useSettingsStore((state) => state.editor);
   const updateEditor = useSettingsStore((state) => state.updateEditor);
+  const aiEntries = useAiActivityStore((state) => state.entries);
+  const activeDiscovery =
+    aiEntries.find((entry) => entry.task === "clip-finding" && entry.status === "running") ??
+    aiEntries.find((entry) => entry.task === "clip-finding");
 
   const [status, setStatus] = useState<"idle" | "running" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
@@ -412,6 +427,12 @@ export function Step2Discovery() {
       return;
     }
     const settings = useSettingsStore.getState();
+    const decisionRoute = decisionActivityFor(settings, "clip_scoring");
+    const activityId = useAiActivityStore.getState().start(
+      decisionRoute
+        ? { task: "clip-finding", ...decisionRoute }
+        : aiRouteFor(settings, "clip-finding"),
+    );
     const controller = new AbortController();
     requestRef.current?.abort();
     requestRef.current = controller;
@@ -434,11 +455,19 @@ export function Step2Discovery() {
           min_duration: current.discovery.minDuration,
           max_duration: current.discovery.maxDuration,
           language: settings.editor.language || "th",
-          provider: buildProvider(settings),
+          provider: buildProviderFor(settings),
+          decision_provider: buildDecisionProviderFor(settings, "clip_scoring"),
+          approved_exemplars: exemplarsFor(current, true),
+          rejected_exemplars: exemplarsFor(current, false),
         },
         { signal: controller.signal },
       );
 
+      // With a fast-judgment slot the first pass is the ranking model, so the
+      // report's writing model would mislabel the run.
+      useAiActivityStore
+        .getState()
+        .finish(activityId, "done", decisionRoute ? undefined : result.model || undefined);
       if (!mountedRef.current || requestRef.current !== controller) return;
 
       const latest = useProjectStore.getState().project;
@@ -483,6 +512,9 @@ export function Step2Discovery() {
       }
       setStatus("idle");
     } catch (caught) {
+      useAiActivityStore
+        .getState()
+        .finish(activityId, controller.signal.aborted ? "cancelled" : "failed");
       if (!mountedRef.current || requestRef.current !== controller) return;
       if (controller.signal.aborted) {
         // The editor aborted the request (Cancel button / new run); the old
@@ -781,10 +813,13 @@ export function Step2Discovery() {
             ) : null}
 
             {status === "running" && clips.length > 0 ? (
-              <p className="mb-2 flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                <Loader2 className="size-3 animate-spin" />
-                Looking for more moments…
-              </p>
+              <div className="mb-2 space-y-1">
+                <p className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                  <Loader2 className="size-3 animate-spin" />
+                  Looking for more moments…
+                </p>
+                {activeDiscovery ? <AiActivityLine entry={activeDiscovery} /> : null}
+              </div>
             ) : null}
 
             {status === "running" && clips.length === 0 ? (
@@ -798,6 +833,9 @@ export function Step2Discovery() {
                 <p className="pt-1 text-center text-[11px] text-muted-foreground">
                   Reading the transcript for self-contained moments…
                 </p>
+                {activeDiscovery ? (
+                  <AiActivityLine entry={activeDiscovery} className="justify-center" />
+                ) : null}
               </div>
             ) : clips.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">

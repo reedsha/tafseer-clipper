@@ -50,7 +50,9 @@ const PROJECT = {
       {
         id: 1,
         start: 10.5,
-        end: 38.5,
+        // A short segment keeps this flow at one seeded cue; the fragmented
+        // transcript case is covered by tests/e2e/subtitles.spec.ts.
+        end: 16.5,
         text: "ความอดทนเป็นครึ่งหนึ่งของความศรัทธา",
         language: "th",
       },
@@ -104,6 +106,7 @@ const PROJECT = {
   },
   createdAt: NOW,
   updatedAt: NOW,
+  lastActivityAt: NOW,
 };
 
 const AUTOSAVE = {
@@ -132,6 +135,49 @@ export async function seedResumableProject(page: Page): Promise<void> {
       );
     },
     { projectId: PROJECT_ID, recent: RECENT, autosave: AUTOSAVE },
+  );
+}
+
+/**
+ * Seed any project payload at boot. Used by focused specs (for example the
+ * fragmented-transcript subtitle seeding) that do not need the full flow.
+ */
+export async function seedProjectFile(
+  page: Page,
+  project: Record<string, unknown>,
+): Promise<void> {
+  const now = Date.now();
+  const clips = Array.isArray(project.clips) ? project.clips : [];
+  const recent = {
+    id: String(project.id),
+    name: String(project.name),
+    sourceFileName: (project.sourceFileName as string | null) ?? null,
+    step: (project.step as number | undefined) ?? 1,
+    duration: (project.duration as number | null) ?? null,
+    clipCount: clips.length,
+    updatedAt: now,
+  };
+  const autosave = {
+    format: "tafseer-project",
+    schemaVersion: 1,
+    app: "Tafseer Clipper",
+    savedAt: new Date(now).toISOString(),
+    project,
+  };
+
+  await page.addInitScript(
+    (seed) => {
+      if (window.location.protocol !== "http:") return;
+      window.localStorage.setItem(
+        "tafseer.projects.v1",
+        JSON.stringify({ state: { recentProjects: [seed.recent] }, version: 2 }),
+      );
+      window.localStorage.setItem(
+        `tafseer.autosave.v1.${seed.projectId}`,
+        JSON.stringify(seed.autosave),
+      );
+    },
+    { recent, autosave, projectId: recent.id },
   );
 }
 

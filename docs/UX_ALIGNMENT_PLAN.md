@@ -278,6 +278,11 @@ translation content, channel watermark, intro/outro stitching, light theme, any 
 `SettingsDrawer.tsx` (read-only), `Step3Subtitles.tsx`/`Step4Export.tsx` (style-details expander),
 type-scale pass across steps/components.
 
+> **Superseded 2026-11-17:** the user asked to remove the Automatic/Advanced toggle. Tasks 4.1
+> and 4.2 below no longer apply: `engineUiMode` and `setEngineUiMode` were removed from the store
+> and Step 1 now always shows the transcription and topic-analysis engine choices so users pick
+> themselves. The remaining PR-2 tasks (density, style-details expander, type scale) are unchanged.
+
 ### Tasks
 
 - **4.1 `[A]`** `src/store/settingsStore.ts`: add `engineUiMode: "automatic" | "advanced"`
@@ -311,7 +316,8 @@ type-scale pass across steps/components.
   names if the engines toggle labels moved), one per assertion.
 
 ### Acceptance
-- With `engineUiMode: "automatic"` a fresh user sees zero model/endpoint vocabulary on Step 1.
+- ~~With `engineUiMode: "automatic"` a fresh user sees zero model/endpoint vocabulary on Step 1.~~
+  Superseded: users always choose the engines themselves on Step 1.
 - `pnpm lint && pnpm test && pnpm build` green. No new dependency except the shadcn Collapsible
   source file (Radix primitive already in the dependency tree — verify before adding; if
   `@radix-ui/react-collapsible` is NOT already installed and adding it is disallowed, implement the
@@ -502,7 +508,7 @@ pnpm build
 | Item | State | Evidence |
 |---|---|---|
 | PR-1 copy pass (`ux/pr-1-copy-pass`) | ✅ implemented | 15/15 Playwright, 49/49 backend |
-| PR-2 Automatic/Advanced (`ux/pr-2-automatic-mode`) | ✅ implemented | typecheck + 15/15 Playwright + build |
+| PR-2 Automatic/Advanced (`ux/pr-2-automatic-mode`) | ✅ implemented, then amended 2026-11-17 | toggle + `engineUiMode` removed at user request; Step 1 always shows the engine choices |
 | PR-3 errors & dead-ends (`ux/pr-3-errors`) | ✅ implemented | typecheck + 15/15 Playwright + build |
 | PR-4 AI presets + Ollama detect (`ux/pr-4-ai-presets`) | ✅ implemented | 49/49 backend (2 new checks), 15/15 Playwright, build |
 | PR-5 string extraction | ✅ implemented as groundwork | typed `src/lib/i18n.ts` + persisted UI language + Thai Step 1; new Playwright check |
@@ -518,3 +524,117 @@ pnpm build
   `/health`, which may not re-probe until the TTL expires.
 - Model *pull* (v2) remains out of scope: the install action copies `ollama pull <model>` and
   links out, it never shell-executes anything.
+
+---
+
+## 12. Step 3 redesign — Review Deck (2026-11-16, user-requested)
+
+**Status:** implemented. Direction chosen by the user: *video-first review deck with a cue ribbon*,
+balanced between clipper throughput and first-time clarity. This supersedes the Step 3 layout in
+§2.3.3 while keeping its copy rules where they still apply.
+
+### What changed
+
+- **Playable output monitor.** The still-frame preview is now a real player showing the exact export
+  frame (9:16 blur-fill / center-crop, or 16:9) with the bilingual overlay composited on top. Cue
+  playback stops at the line's end; Space / J / K / L match the Step 2 transport; the overlay follows
+  the frame clock.
+- **Subtitle track (cue ribbon).** One block per line, proportional to duration. Click to jump,
+  drag the body to shift, drag either edge to retime. Neighbours clamp the drag, so overlapping
+  burn-ins cannot be created.
+- **One line open at a time.** The wall of textareas is replaced by compact rows (time, duration,
+  Arabic, Thai) that expand into the two editors for the selected line only.
+- **Review loop.** Added optional `SubtitleCue.reviewed`. Rows show checked / to-check state; the
+  header and clip queue show `checked/total`; "To check" filters the list; checking a line in that
+  filter auto-advances to the next unchecked line and `Enter` does the same.
+- **Batch Arabic check.** "Check N Arabic" verifies every Arabic line in the clip sequentially with
+  progress and Stop, then reports a single summary toast. The per-line action stays as "Check
+  Arabic" (the full "Verify Quran / Fix Arabic" wording lives in its tooltip).
+- **Split / merge / delete / add.** Split at the caret (Ctrl+Enter or the split button), merge with
+  the next line, delete with an Undo toast, and add a line at the playhead.
+- **Settings demoted.** Aspect / framing / style preset / safe zone moved into one "9:16 · Blur fill
+  · Studio default" popover under the monitor, with an Edit jump to Settings → 3 · Subtitles.
+- **Focus preview.** A full-window output preview (Escape or the close button) for judging the
+  frame at a useful size on short laptop screens.
+- **Clip queue** replaces the overflowing tab strip and carries per-clip progress.
+
+### Data and tests
+
+- `.tafseer` schema stays v1; `reviewed` is optional and older files load unchanged.
+- No new endpoint, dependency, or render payload field (`reviewed` is editor-only).
+- `tests/e2e/project-flow.spec.ts` now opens each row to verify the split halves; the deck renders
+  one Thai editor at a time by design.
+- Gates at implementation: typecheck + `pnpm lint`, `pnpm build`, 20/20 Playwright, 62/62 backend.
+
+### Transcript → subtitle seeding (follow-up, 2026-11-16)
+
+Raw transcript segments are **not** subtitle lines. Some Cloud STT providers return character-level
+Thai segments; seeding one cue per segment produced hundreds of 0.1 s slivers and 0.0 s lines.
+
+- `src/lib/subtitleCues.ts` builds cues per clip:
+  - reconstructs a **timed word stream** from the segments (each segment's span is distributed
+    across its characters, then `Intl.Segmenter` recovers whole Thai words, so character-level
+    transcripts still yield complete words with real timings);
+  - packs whole words into lines capped by `maxCharsPerLine`, sentence ends, silences (> 0.9 s),
+    and a 6 s on-screen ceiling — a line never starts or ends inside a word;
+  - wraps Arabic/Latin lines on spaces and pairs Arabic words to the Thai line whose span holds
+    their midpoint, so a verse stays with its translation;
+  - bumps unreadable lines to 0.9 s when the neighbouring cue leaves room;
+  - folds an orphan final fragment (≤ 8 chars) into the previous line instead of leaving a 0.5 s
+    one-character cue.
+- Step 3 uses it for fresh seeds, auto-heals an untouched legacy fragment seed on open (text-match
+  guard), and offers a confirmed **Rebuild lines from transcript** action (header + warning banner)
+  for edited tracks.
+- `tests/e2e/subtitles.spec.ts` covers a fresh character-level transcript, the saved
+  one-cue-per-character seed (342-fragment class of bug), word-boundary cuts, the orphan-tail
+  case, and the Rebuild banner for a legacy mid-word track.
+- Gates after this fix: typecheck + `pnpm lint`, `pnpm build`, 25/25 Playwright, 62/62 backend.
+
+### Recitation recovery + sentence cues (2026-11-16)
+
+**Stage 1 — ingest (`POST /extract-and-transcribe`, additive request/response fields):**
+
+- The primary STT is unchanged and model-agnostic (local faster-whisper or cloud).
+- An LLM audit reads the transcript (word/character-level segments can be phonetic Thai
+  transliteration of Arabic) and returns candidate Arabic spans. The prompt includes Thai-script
+  Arabic examples; it explicitly targets phonetic Arabic, not Thai explanations.
+- Each span is cut from the extracted 16 kHz WAV and re-transcribed **alone** by the configured STT
+  (local `language="ar"`, cloud span auto-detect; an optional “Arabic recitation model” uses the same
+  connection). A result is only accepted when it is actually Arabic script.
+- Qur'an candidates are normalized and fuzzy-matched against the bundled corpus
+  (`backend/data/quran.json`, 6,236 verses / 114 surahs, Arabic + Thai translation, no audio). A
+  match replaces the STT spelling with the canonical verse and carries `reference` +
+  `translation`; hadith/quotes stay AI-suggested. The original Thai transliteration is kept in
+  `original_text` for Restore.
+- An LLM sentence-grouping pass assigns `sentence_id` to Thai segments (deterministic pause/segment
+  fallback if it fails).
+- Response segments now carry optional `language`, `sentence_id`, `source`, `reference`,
+  `confidence`, `original_text`, `translation`. The transcript is persisted and `.tafseer`-compatible.
+- The bundled corpus is generated by `backend/scripts/build_quran_corpus.py` from the user-provided
+  HTML reader (the flattened JSON had three misnumbered verses in surah 37); the generated JSON is
+  bundled by `build_sidecar.spec`.
+
+**Stage 3 — subtitles (deterministic, no AI call):**
+
+- Language runs are built independently: Thai sentence cues (one sentence per cue, up to
+  `editor.subtitleMaxLines` = 1/2 lines, default 2) and **Arabic-only cues** (`thai` empty). A Thai
+  cue can never overlap an Arabic cue.
+- A sentence longer than the line cap is split only at word/clause boundaries; character-level STT
+  still reconstructs whole Thai words. Orphan final fragments are folded in only when the merged
+  text still fits the configured line count.
+- An **Arabic passages** review strip/dialog lists each recitation with Play, Approve, Edit,
+  Restore Thai, source label (Qur'an ref / hadith / quote), Qur'an translation reference and
+  confidence. “Approve all verified” handles corpus-verified Qur'an passages in one click.
+- New setting: Settings → 3 · Subtitles → **Lines per subtitle** (2 recommended, 1 available).
+
+**Validation:** backend E2E **67/67** (includes corpus normalization/matching and the recitation merge
+accept/reject paths); Playwright **26/26** (includes the Arabic-only review strip, sentence grouping
+and 2-line word-safe cuts). A real Vercel AI Gateway smoke test (`spacexai/grok-stt` + an LLM audit on
+Quran 1:1) returned a single Arabic-only segment with `source=quran`, `reference=1:1`; the same audit
+flagged the user's screenshot transliteration lines as one Qur'anic span in a text-only probe.
+
+**Important:** projects transcribed before this pipeline have no Arabic recovery/sentence metadata.
+Re-transcribe the lecture on Step 1 (it resets the derived subtitle tracks) and review the Arabic
+passages in Step 3.
+
+

@@ -140,6 +140,23 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Friendly wording for a check that fails because the release feed is live but
+ * empty. Tauri reports the missing `latest.json` as "Could not fetch a valid
+ * release JSON from the remote"; the same 404 happens while the first release
+ * is still a draft. Neither is a problem with this copy of the app.
+ */
+const NO_RELEASE_MESSAGE =
+  "No signed release has been published for this build yet, so there is nothing to update from.";
+
+function describeCheckError(error: unknown): string {
+  const raw = describeError(error);
+  if (/valid release json|latest\.json|\b404\b|not found/i.test(raw)) {
+    return NO_RELEASE_MESSAGE;
+  }
+  return raw;
+}
+
 /** The updater plugin is only registered by the desktop shell. */
 export function isUpdaterSupported(): boolean {
   return isTauriRuntime();
@@ -218,7 +235,7 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
     };
   } catch (error) {
     pendingUpdate = null;
-    const message = describeError(error);
+    const message = describeCheckError(error);
     publish({
       phase: "error",
       version: null,

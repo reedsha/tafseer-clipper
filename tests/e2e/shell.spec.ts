@@ -1,7 +1,8 @@
 /**
- * Shell smoke tests: the app boots against the real sidecar, the five Settings
- * tabs render, the command palette opens with Ctrl+K, and Step 1 shows the
- * dropzone plus the first-run local-transcription hint.
+ * Shell smoke tests: the app boots against the real sidecar, the full-page
+ * Settings screen renders with its sidebar sections, a stage's configuration
+ * screen replaces the step, the command palette opens with Ctrl+K, and Step 1
+ * shows the dropzone plus the first-run local-transcription hint.
  */
 
 import { expect, test } from "@playwright/test";
@@ -14,20 +15,19 @@ test.describe("app shell", () => {
 
     const stepper = page.getByRole("navigation", { name: "Wizard steps" });
     await expect(stepper).toBeVisible();
-    // Each stage pill holds the step button plus its settings gear.
+    // Each stage pill holds the step button plus its configuration gear.
     await expect(stepper.getByRole("button")).toHaveCount(8);
     await expect(stepper.getByRole("button", { name: /1\. Upload/ })).toHaveAttribute(
       "aria-current",
       "step",
     );
 
-    // The gear on a stage pill opens that stage's settings tab.
-    await stepper.getByRole("button", { name: "Step 2 settings" }).click();
-    await expect(page.getByRole("tab", { name: "2 · Find Clips" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-    await page.getByRole("button", { name: "Close settings" }).click();
+    // The gear on a stage pill replaces the screen with that stage's
+    // configuration, and Back returns to the wizard.
+    await stepper.getByRole("button", { name: "Step 2 configuration" }).click();
+    await expect(page.getByRole("heading", { name: "Find Clips configuration" })).toBeVisible();
+    await page.getByRole("button", { name: "Back", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Find Clips configuration" })).toBeHidden();
 
     // /health is real: the LED flips to online once the sidecar answers.
     await expect(page.getByRole("button", { name: "Engine ready" })).toBeVisible({
@@ -35,40 +35,37 @@ test.describe("app shell", () => {
     });
   });
 
-  test("Settings drawer has all five tabs, updates state and diagnostics", async ({ page }) => {
+  test("Settings is a full page with a sidebar and working diagnostics", async ({ page }) => {
     // Clipboard writes are granted so "Copy diagnostics" can succeed headlessly.
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     await page.goto("/");
 
     await page.getByRole("button", { name: "Open settings" }).click();
-    const drawerSubtitle = page.getByText(
-      "Power-user configuration. Changes save automatically.",
-    );
-    await expect(drawerSubtitle).toBeVisible();
 
-    await expect(page.getByRole("tab")).toHaveCount(5);
-    for (const name of [
-      "1 · Upload & Transcribe",
-      "2 · Find Clips",
-      "3 · Subtitles",
-      "4 · Export",
-      "Main",
+    // The sidebar lists every section; the content pane follows it.
+    await expect(page.getByRole("heading", { name: "AI connection", exact: true })).toBeVisible();
+    for (const section of [
+      "GPU acceleration",
+      "Storage & cache",
+      "Engine & diagnostics",
+      "Language",
+      "Backup & reset",
+      "Updates",
+      "Keyboard shortcuts",
     ]) {
-      await expect(page.getByRole("tab", { name })).toBeVisible();
+      await expect(
+        page.locator("aside").getByRole("button", { name: section, exact: true }),
+      ).toBeVisible();
     }
 
-    await page.getByRole("tab", { name: "Main" }).click();
-    await expect(page.getByRole("heading", { name: "Updates" })).toBeVisible();
-    await expect(
-      page.getByText("Updates are available in the installed desktop app."),
-    ).toBeVisible();
+    // Diagnostics live in Engine & diagnostics.
+    await page.getByRole("button", { name: "Engine & diagnostics", exact: true }).click();
     await expect(page.getByRole("button", { name: "Copy diagnostics" })).toBeVisible();
-
     await page.getByRole("button", { name: "Copy diagnostics" }).click();
     await expect(page.getByText("Diagnostics copied")).toBeVisible();
 
-    await page.getByRole("button", { name: "Close settings" }).click();
-    await expect(drawerSubtitle).toBeHidden();
+    await page.getByRole("button", { name: "Back to app" }).click();
+    await expect(page.getByRole("button", { name: "Back to app" })).toBeHidden();
   });
 
   test("Ctrl+K opens and closes the command palette", async ({ page }) => {
@@ -86,6 +83,25 @@ test.describe("app shell", () => {
 
     await page.keyboard.press("Escape");
     await expect(paletteInput).toBeHidden();
+  });
+
+  test("recent AI activity is reachable from the header and the palette", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: "Engine ready" })).toBeVisible({
+      timeout: 30_000,
+    });
+
+    await page.getByRole("button", { name: "Recent AI activity" }).click();
+    await expect(page.getByText("No AI runs yet this session.")).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    await page.keyboard.press("Control+k");
+    const paletteInput = page.getByPlaceholder(
+      "Jump to a step, toggle a setting, or open a panel…",
+    );
+    await expect(paletteInput).toBeVisible();
+    await page.getByText("Show recent AI activity").click();
+    await expect(page.getByText("No AI runs yet this session.")).toBeVisible();
   });
 
   test("Step 1 shows the dropzone and the hardware-agnostic acceleration hint", async ({
@@ -112,9 +128,9 @@ test.describe("app shell", () => {
     await page.goto("/");
 
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Main" }).click();
+    await page.getByRole("button", { name: "GPU acceleration", exact: true }).click();
 
-    await expect(page.getByRole("heading", { name: "GPU acceleration" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "GPU acceleration", exact: true })).toBeVisible();
     // Browser builds cannot download the pack: the section must say so instead
     // of failing, and the CPU fallback has to stay visible.
     await expect(page.getByText("Available in the installed desktop app").first()).toBeVisible();
@@ -130,10 +146,10 @@ test.describe("app shell", () => {
     await expect(page.getByRole("heading", { name: "Add your lecture" })).toBeVisible();
 
     await page.getByRole("button", { name: "Open settings" }).click();
-    await page.getByRole("tab", { name: "Main" }).click();
+    await page.getByRole("button", { name: "Language", exact: true }).click();
     await page.getByRole("combobox", { name: "Language", exact: true }).click();
     await page.getByRole("option", { name: "ไทย" }).click();
-    await page.getByRole("button", { name: "Close settings" }).click();
+    await page.getByRole("button", { name: "Back to app" }).click();
 
     await expect(page.getByRole("heading", { name: "เพิ่มบทบรรยายของคุณ" })).toBeVisible();
   });

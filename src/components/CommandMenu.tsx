@@ -9,11 +9,11 @@ import {
   FolderOpen,
   Gauge,
   History,
+  KeyRound,
+  Keyboard,
+  Languages,
   Save,
-  Scissors,
-  SlidersHorizontal,
-  Type,
-  Upload,
+  Settings2,
 } from "lucide-react";
 
 import {
@@ -24,22 +24,25 @@ import {
   CommandItem,
   CommandList,
   CommandSeparator,
-  CommandShortcut,
 } from "@/components/ui/command";
-import { describeAcceleration } from "@/lib/acceleration";import { openProjectFile, saveProjectFile, suggestProjectFileName } from "@/lib/projectFile";
+import { describeAcceleration } from "@/lib/acceleration";
+import { openProjectFile, saveProjectFile, suggestProjectFileName } from "@/lib/projectFile";
 import { STEP_LABELS, type Resolution, type WizardStep } from "@/lib/projectTypes";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore } from "@/store/settingsStore";
-import { useUiStore, type SettingsTab } from "@/store/uiStore";
+import { useUiStore, type SettingsSection } from "@/store/uiStore";
 
 const STEPS: WizardStep[] = [1, 2, 3, 4];
 
-const SETTINGS_ENTRIES: { tab: SettingsTab; label: string; icon: typeof SlidersHorizontal }[] = [
-  { tab: "stage1", label: "Step 1 settings — upload, transcription & glossary", icon: Upload },
-  { tab: "stage2", label: "Step 2 settings — clip discovery", icon: Scissors },
-  { tab: "stage3", label: "Step 3 settings — subtitles, fonts & style", icon: Type },
-  { tab: "stage4", label: "Step 4 settings — export defaults", icon: Download },
-  { tab: "main", label: "Main settings — connections, hardware & storage", icon: SlidersHorizontal },
+const SETTINGS_ENTRIES: { section: SettingsSection; label: string; icon: typeof Cpu }[] = [
+  { section: "connection", label: "Settings — AI connection (cloud & local)", icon: KeyRound },
+  { section: "gpu", label: "Settings — GPU acceleration", icon: Cpu },
+  { section: "storage", label: "Settings — storage & cache", icon: FolderOpen },
+  { section: "engine", label: "Settings — engine & diagnostics", icon: Activity },
+  { section: "language", label: "Settings — language", icon: Languages },
+  { section: "backup", label: "Settings — backup & reset", icon: Save },
+  { section: "updates", label: "Settings — updates", icon: Download },
+  { section: "shortcuts", label: "Settings — keyboard shortcuts", icon: Keyboard },
 ];
 
 function describeError(error: unknown): string {
@@ -51,10 +54,10 @@ export function CommandMenu() {
   const setCommandOpen = useUiStore((state) => state.setCommandOpen);
   const toggleCommand = useUiStore((state) => state.toggleCommand);
   const openSettings = useUiStore((state) => state.openSettings);
-  const setRecentOpen = useUiStore((state) => state.setRecentOpen);
+  const openConfig = useUiStore((state) => state.openConfig);
+  const setAiActivityOpen = useUiStore((state) => state.setAiActivityOpen);
 
   const project = useProjectStore((state) => state.project);
-  const recentCount = useProjectStore((state) => state.recentProjects.length);
   const createProject = useProjectStore((state) => state.createProject);
   const setStep = useProjectStore((state) => state.setStep);
 
@@ -83,19 +86,19 @@ export function CommandMenu() {
   async function handleSaveProject() {
     const current = useProjectStore.getState().project;
     if (!current) {
-      toast.error("No project open", { description: "Start a project from Step 1." });
+      toast.error("No session open", { description: "Start a session from Step 1." });
       return;
     }
     try {
       const result = await saveProjectFile(current);
       if (result === "saved") {
         useProjectStore.getState().markSaved();
-        toast.success("Project saved", {
+        toast.success("Session saved", {
           description: suggestProjectFileName(current),
         });
       }
     } catch (error) {
-      toast.error("Could not save project", { description: describeError(error) });
+      toast.error("Could not save session", { description: describeError(error) });
     }
   }
 
@@ -104,9 +107,9 @@ export function CommandMenu() {
       const opened = await openProjectFile();
       if (!opened) return;
       useProjectStore.getState().openProject(opened);
-      toast.success("Project opened", { description: opened.name });
+      toast.success("Session opened", { description: opened.name });
     } catch (error) {
-      toast.error("Could not open project", { description: describeError(error) });
+      toast.error("Could not open session", { description: describeError(error) });
     }
   }
 
@@ -170,7 +173,7 @@ export function CommandMenu() {
 
         <CommandGroup heading="Project">
           <CommandItem
-            value="new project"
+            value="new session project"
             onSelect={() =>
               run(() => {
                 createProject();
@@ -178,42 +181,47 @@ export function CommandMenu() {
             }
           >
             <FilePlus2 />
-            New project
+            New session
           </CommandItem>
           <CommandItem
-            value="save project tafseer"
+            value="save session project tafseer"
             disabled={!project}
             onSelect={() => run(handleSaveProject)}
           >
             <Save />
-            Save project (.tafseer)
-          </CommandItem>
-          <CommandItem value="open project tafseer" onSelect={() => run(handleOpenProject)}>
-            <FolderOpen />
-            Open project (.tafseer)
+            Save session (.tafseer)
           </CommandItem>
           <CommandItem
-            value="recent lectures resume"
-            disabled={recentCount === 0}
-            onSelect={() => run(() => setRecentOpen(true))}
+            value="open session project tafseer"
+            onSelect={() => run(handleOpenProject)}
           >
-            <History />
-            Recent lectures
-            <CommandShortcut>{recentCount}</CommandShortcut>
+            <FolderOpen />
+            Open session (.tafseer)
           </CommandItem>
         </CommandGroup>
 
         <CommandSeparator />
 
-        <CommandGroup heading="Settings panels">
-          {SETTINGS_ENTRIES.map(({ tab, label, icon: Icon }) => (
+        <CommandGroup heading="Settings">
+          {SETTINGS_ENTRIES.map(({ section, label, icon: Icon }) => (
             <CommandItem
-              key={tab}
-              value={`settings ${tab} ${label}`}
-              onSelect={() => run(() => openSettings(tab))}
+              key={section}
+              value={`settings ${section} ${label}`}
+              onSelect={() => run(() => openSettings(section))}
             >
               <Icon />
               {label}
+            </CommandItem>
+          ))}
+          {STEPS.map((step) => (
+            <CommandItem
+              key={`config-${step}`}
+              value={`configuration ${step} ${STEP_LABELS[step]}`}
+              disabled={!project && step !== 1}
+              onSelect={() => run(() => openConfig(step))}
+            >
+              <Settings2 />
+              {STEP_LABELS[step]} configuration
             </CommandItem>
           ))}
         </CommandGroup>
@@ -257,6 +265,13 @@ export function CommandMenu() {
           <CommandItem value="health sidecar status" onSelect={() => run(handleHealthCheck)}>
             <Activity />
             Check that everything is running
+          </CommandItem>
+          <CommandItem
+            value="ai activity recent runs model task"
+            onSelect={() => run(() => setAiActivityOpen(true))}
+          >
+            <History />
+            Show recent AI activity
           </CommandItem>
         </CommandGroup>
       </CommandList>
