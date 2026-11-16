@@ -16,6 +16,8 @@ Optional Cloud STT is supported through any OpenAI-compatible
 
 from __future__ import annotations
 
+import base64
+import contextlib
 import gc
 import logging
 import math
@@ -27,6 +29,7 @@ from array import array
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -78,6 +81,14 @@ class Segment:
     end: float
     text: str
     language: str | None = None
+    #: Step-1 enrichment: sentence group (Thai segments), Arabic passage
+    #: provenance, and the original Thai transliteration for restore.
+    sentence_id: int | None = None
+    source: str | None = None
+    reference: str | None = None
+    confidence: float | None = None
+    original_text: str | None = None
+    translation: str | None = None
 
 
 @dataclass(slots=True)
@@ -630,6 +641,333 @@ class WhisperTranscriber:
 # --------------------------------------------------------------------------- #
 # Cloud STT (optional)
 # --------------------------------------------------------------------------- #
+#: Upload budget per request. OpenAI and Groq reject files over 25 MB; 16 kHz
+#: mono PCM is 32 KB/s, so a single 24 MB request is ~12.5 minutes of lecture.
+#: Longer lectures are split on WAV frame boundaries and stitched back together
+#: with their timestamps offset.
+CLOUD_STT_MAX_UPLOAD_BYTES = 24 * 1024 * 1024
+#: Hard per-chunk cap even for servers without an upload limit: keeps one
+#: request comfortably inside the 300 s timeout on slow providers.
+CLOUD_STT_MAX_CHUNK_SECONDS = 10 * 60
+
+#: The Vercel AI Gateway is OpenAI-compatible for chat but serves speech-to-text
+#: on its own protocol endpoint: ``POST /v4/ai/transcription-model`` with the
+#: audio base64-encoded in a JSON body. ``/v1/audio/transcriptions`` is a hard
+#: 404 there, whatever the model is called.
+VERCEL_GATEWAY_HOST = "ai-gateway.vercel.sh"
+VERCEL_GATEWAY_PATH = "/v4/ai/transcription-model"
+#: Base64 inflates the payload by ~33 %, so the raw-audio budget is lower than
+#: for a multipart upload.
+VERCEL_GATEWAY_MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+VERCEL_GATEWAY_HEADERS = {
+    "ai-gateway-protocol-version": "0.0.1",
+    "ai-transcription-model-specification-version": "4",
+}
+
+
+def _is_vercel_gateway(base_url: str) -> bool:
+    raw = (base_url or "").strip()
+    try:
+        parts = urlsplit(raw if "://" in raw else f"https://{raw}")
+    except ValueError:
+        return False
+    return (parts.hostname or "").lower() == VERCEL_GATEWAY_HOST
+
+
+def _vercel_gateway_endpoint(base_url: str) -> str:
+    """The gateway's transcription route, derived from the configured host.
+
+    The saved address usually is the chat URL (``https://ai-gateway.vercel.sh/v1``);
+    only the scheme and host are kept.
+    """
+    raw = (base_url or "").strip()
+    try:
+        parts = urlsplit(raw if "://" in raw else f"https://{raw}")
+    except ValueError:
+        parts = None
+    if parts is None or not parts.netloc:
+        return f"https://{VERCEL_GATEWAY_HOST}{VERCEL_GATEWAY_PATH}"
+    return f"{parts.scheme or 'https'}://{parts.netloc}{VERCEL_GATEWAY_PATH}"
+
+
+@dataclass(frozen=True, slots=True)
+class _CloudChunk:
+    offset: float
+    #: Duration of this chunk in seconds (from the WAV header), used when the
+    #: provider returns plain ``json`` without a duration/segment times.
+    duration: float
+    path: Path
+    temporary: bool
+
+
+def _wav_duration(path: Path) -> float:
+    """Duration in seconds from the WAV header; 0.0 when it cannot be read."""
+    try:
+        with wave.open(str(path), "rb") as reader:
+            rate = reader.getframerate()
+            if rate <= 0:
+                return 0.0
+            return reader.getnframes() / float(rate)
+    except (wave.Error, OSError, EOFError):
+        return 0.0
+
+
+def _split_wav_for_upload(
+    path: Path, *, max_bytes: int | None = None
+) -> tuple[list[_CloudChunk], list[Path]]:
+    """Split a PCM WAV into API-sized pieces; also return the files to delete.
+
+    A file that already fits the budget is returned untouched (the previous
+    single-request behaviour). Anything else is written as numbered ``.partNNN``
+    WAVs next to the original, preserving channels/width/rate exactly.
+
+    ``max_bytes`` overrides the multipart budget (the gateway needs a smaller
+    one because its JSON body is base64).
+    """
+    budget = CLOUD_STT_MAX_UPLOAD_BYTES if max_bytes is None else max_bytes
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise TranscriptionError(
+            f"Could not read the extracted audio file {path}: {exc}"
+        ) from exc
+    if size <= budget:
+        return [
+            _CloudChunk(offset=0.0, duration=_wav_duration(path), path=path, temporary=False)
+        ], []
+
+    try:
+        reader = wave.open(str(path), "rb")
+    except (wave.Error, OSError, EOFError):
+        # Not a WAV we can split: let the provider judge the single request.
+        return [
+            _CloudChunk(offset=0.0, duration=_wav_duration(path), path=path, temporary=False)
+        ], []
+
+    with reader:
+        params = reader.getparams()
+        channels = reader.getnchannels()
+        width = reader.getsampwidth()
+        rate = reader.getframerate()
+        bytes_per_frame = channels * width
+        if bytes_per_frame <= 0 or rate <= 0 or reader.getnframes() <= 0:
+            return [
+                _CloudChunk(offset=0.0, duration=0.0, path=path, temporary=False)
+            ], []
+        frames_per_chunk = min(
+            max(1, budget // bytes_per_frame),
+            rate * CLOUD_STT_MAX_CHUNK_SECONDS,
+        )
+        chunks: list[_CloudChunk] = []
+        temporary: list[Path] = []
+        index = 0
+        while True:
+            frames = reader.readframes(frames_per_chunk)
+            if not frames:
+                break
+            part_path = path.with_name(f"{path.stem}.part{index:03d}.wav")
+            try:
+                with wave.open(str(part_path), "wb") as writer:
+                    writer.setnchannels(params.nchannels)
+                    writer.setsampwidth(params.sampwidth)
+                    writer.setframerate(params.framerate)
+                    writer.writeframes(frames)
+            except (wave.Error, OSError) as exc:
+                for created in temporary:
+                    with contextlib.suppress(OSError):
+                        created.unlink(missing_ok=True)
+                raise TranscriptionError(
+                    f"Could not prepare the audio for Cloud STT: {exc}"
+                ) from exc
+            frame_count = len(frames) // bytes_per_frame if bytes_per_frame else 0
+            chunks.append(
+                _CloudChunk(
+                    offset=index * frames_per_chunk / float(rate),
+                    duration=frame_count / float(rate),
+                    path=part_path,
+                    temporary=True,
+                )
+            )
+            temporary.append(part_path)
+            index += 1
+
+    if len(chunks) <= 1:
+        for created in temporary:
+            with contextlib.suppress(OSError):
+                created.unlink(missing_ok=True)
+        return [
+            _CloudChunk(offset=0.0, duration=_wav_duration(path), path=path, temporary=False)
+        ], []
+    return chunks, temporary
+
+
+def _cloud_status_error(
+    response: httpx.Response,
+    endpoint: str,
+    base_url: str,
+    *,
+    gateway: bool = False,
+) -> TranscriptionError:
+    """Turn a provider rejection into something the editor can act on."""
+    status = response.status_code
+    body = (response.text or "")[:400]
+    if gateway:
+        if status in (400, 404, 422):
+            return TranscriptionError(
+                "The AI Gateway rejected the speech-to-text request "
+                f"(HTTP {status}). Check that the chosen model is a transcription "
+                "model available to your account (for example openai/whisper-1) "
+                "and that audio transcription is enabled. "
+                f"Provider response: {body}"
+            )
+        if status in (401, 403):
+            return TranscriptionError(
+                f"The AI Gateway rejected the API key for speech-to-text "
+                f"(HTTP {status}). Check the key saved in Settings. "
+                f"Provider response: {body}"
+            )
+        return TranscriptionError(f"Cloud STT rejected the request ({status}): {body}")
+    if status in (404, 405):
+        return TranscriptionError(
+            f"The speech service at {base_url.strip() or endpoint} has no "
+            f"OpenAI-compatible audio transcription endpoint (HTTP {status}). "
+            "This account works for chat but not for speech-to-text. In "
+            "Upload → Speech-to-text, add a speech service that supports "
+            "transcription (for example an OpenAI or Groq API key), or switch "
+            f"the engine to “This computer”. Provider response: {body}"
+        )
+    if status in (401, 403):
+        return TranscriptionError(
+            f"The speech service rejected the API key (HTTP {status}). Check the "
+            f"speech service credentials. Provider response: {body}"
+        )
+    return TranscriptionError(f"Cloud STT rejected the request ({status}): {body}")
+
+
+async def _post_audio_chunk(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    headers: dict[str, str],
+    data: dict[str, str],
+    chunk_path: Path,
+) -> httpx.Response:
+    """POST one WAV chunk, retrying once without ``verbose_json``.
+
+    ``whisper-1``/``whisper-large-v3`` return segments only in ``verbose_json``;
+    the ``gpt-4o-*-transcribe`` family accepts just ``json``/``text`` and rejects
+    the request. One cheap retry keeps both families working.
+    """
+    payload = dict(data)
+    response: httpx.Response | None = None
+    for attempt in range(2):
+        try:
+            with chunk_path.open("rb") as handle:
+                response = await client.post(
+                    endpoint,
+                    headers=headers,
+                    data=payload,
+                    files={"file": (chunk_path.name, handle, "audio/wav")},
+                )
+        except OSError as exc:
+            raise TranscriptionError(
+                f"Could not read the extracted audio file {chunk_path}: {exc}"
+            ) from exc
+        if (
+            attempt == 0
+            and response.status_code == 400
+            and payload.get("response_format") == "verbose_json"
+        ):
+            body = (response.text or "").lower()
+            if "response_format" in body or "verbose_json" in body:
+                payload["response_format"] = "json"
+                continue
+        return response
+    assert response is not None
+    return response
+
+
+async def _post_gateway_chunk(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    headers: dict[str, str],
+    model: str,
+    chunk_path: Path,
+) -> httpx.Response:
+    """POST one WAV chunk to the Vercel AI Gateway transcription protocol.
+
+    The gateway takes the audio base64-encoded in a JSON body and picks the
+    model with an ``ai-model-id`` header; its OpenAI-compatible surface covers
+    chat only, so the multipart route returns 404 there.
+    """
+    try:
+        audio = base64.b64encode(chunk_path.read_bytes()).decode("ascii")
+    except OSError as exc:
+        raise TranscriptionError(
+            f"Could not read the extracted audio file {chunk_path}: {exc}"
+        ) from exc
+    return await client.post(
+        endpoint,
+        headers={**headers, "ai-model-id": model},
+        json={"audio": audio, "mediaType": "audio/wav"},
+    )
+
+
+def _segments_from_gateway_payload(
+    payload: dict,
+    *,
+    offset: float = 0.0,
+    duration_hint: float = 0.0,
+) -> tuple[list[Segment], float]:
+    """Normalise an AI Gateway transcription payload into segments + duration.
+
+    The gateway reports ``durationInSeconds`` and, when the model provides
+    timing, segments with ``startSecond``/``endSecond``. ``start``/``end`` are
+    accepted as well so either shape parses.
+    """
+    reported = payload.get("durationInSeconds", payload.get("duration", 0.0))
+    try:
+        reported_duration = float(reported or 0.0)
+    except (TypeError, ValueError):
+        reported_duration = 0.0
+    duration = (
+        reported_duration if reported_duration > 0 else max(0.0, duration_hint)
+    )
+    language = payload.get("language")
+    segments: list[Segment] = []
+    raw_segments = payload.get("segments") or []
+    if isinstance(raw_segments, list):
+        for index, item in enumerate(raw_segments):
+            if not isinstance(item, dict):
+                continue
+            text = (item.get("text") or "").strip()
+            if not text:
+                continue
+            start = float(item.get("startSecond", item.get("start", 0.0)) or 0.0)
+            end = float(item.get("endSecond", item.get("end", 0.0)) or 0.0)
+            segments.append(
+                Segment(
+                    id=index,
+                    start=start + offset,
+                    end=end + offset,
+                    text=text,
+                    language=language,
+                )
+            )
+    if not segments:
+        text = (payload.get("text") or "").strip()
+        if text:
+            segments.append(
+                Segment(
+                    id=0,
+                    start=offset,
+                    end=offset + duration,
+                    text=text,
+                    language=language,
+                )
+            )
+    return segments, duration
+
+
 async def transcribe_cloud(
     audio_path: str | Path,
     *,
@@ -642,68 +980,120 @@ async def transcribe_cloud(
     timeout: float = 300.0,
     cancel_event: threading.Event | None = None,
 ) -> TranscriptionResult:
-    """Transcribe through an OpenAI-compatible ``/audio/transcriptions`` API."""
+    """Transcribe through a cloud speech service.
+
+    Two protocols are supported: OpenAI's multipart ``/audio/transcriptions``
+    (OpenAI, Groq, local servers) and the Vercel AI Gateway's own
+    ``/v4/ai/transcription-model`` (base64 JSON), which is what the gateway
+    exposes instead of the OpenAI audio route.
+
+    Audio is segmented so no upload exceeds the provider's size cap, then the
+    per-chunk segments are re-timed onto the lecture timeline and returned as
+    one transcript. Short files keep the old single-request path.
+    """
     raise_if_cancelled(cancel_event)
-    endpoint = base_url.rstrip("/") + "/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    data = {"model": model, "response_format": "verbose_json"}
     language = normalize_language(language)
-    if language:
-        data["language"] = language
-    if prompt:
-        data["prompt"] = prompt
+    gateway = _is_vercel_gateway(base_url)
+    data: dict[str, str] = {}
+    max_bytes: int | None = None
+    if gateway:
+        endpoint = _vercel_gateway_endpoint(base_url)
+        headers = {**VERCEL_GATEWAY_HEADERS, "Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        # The gateway schema has no top-level language/prompt fields.
+        max_bytes = VERCEL_GATEWAY_MAX_UPLOAD_BYTES
+    else:
+        endpoint = base_url.rstrip("/") + "/audio/transcriptions"
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        data = {"model": model, "response_format": "verbose_json"}
+        if language:
+            data["language"] = language
+        if prompt:
+            data["prompt"] = prompt
 
     path = Path(audio_path)
     if not path.is_file():
         raise TranscriptionError(f"Audio file not found: {path}")
 
+    audio_duration = _wav_duration(path)
+    chunks, temporary = _split_wav_for_upload(path, max_bytes=max_bytes)
+    if len(chunks) > 1:
+        logger.info(
+            "Cloud STT: uploading %.1fs of audio as %d requests",
+            audio_duration,
+            len(chunks),
+        )
+
+    segments: list[Segment] = []
+    detected_language: str | None = None
+    duration = 0.0
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            with path.open("rb") as handle:
-                response = await client.post(
-                    endpoint,
-                    headers=headers,
-                    data=data,
-                    files={"file": (path.name, handle, "audio/wav")},
-                )
+            for index, chunk in enumerate(chunks):
+                # Natural cancellation boundary: one provider call per chunk.
+                raise_if_cancelled(cancel_event)
+                if index:
+                    logger.info(
+                        "Cloud STT: request %d/%d at %.1fs", index + 1, len(chunks), chunk.offset
+                    )
+                if gateway:
+                    response = await _post_gateway_chunk(
+                        client, endpoint, headers, model, chunk.path
+                    )
+                else:
+                    response = await _post_audio_chunk(
+                        client, endpoint, headers, data, chunk.path
+                    )
+                if response.status_code >= 400:
+                    raise _cloud_status_error(
+                        response, endpoint, base_url, gateway=gateway
+                    )
+                try:
+                    payload = response.json()
+                except ValueError as exc:
+                    raise TranscriptionError(
+                        "Cloud STT returned a response that is not JSON: "
+                        f"{response.text[:400]}"
+                    ) from exc
+                if not isinstance(payload, dict):
+                    raise TranscriptionError(
+                        f"Cloud STT returned an unexpected payload: {response.text[:400]}"
+                    )
+                try:
+                    if gateway:
+                        part_segments, part_duration = _segments_from_gateway_payload(
+                            payload, offset=chunk.offset, duration_hint=chunk.duration
+                        )
+                    else:
+                        part_segments, part_duration = _segments_from_cloud_payload(
+                            payload, offset=chunk.offset, duration_hint=chunk.duration
+                        )
+                except (AttributeError, TypeError, ValueError) as exc:
+                    raise TranscriptionError(
+                        f"Cloud STT returned malformed segments: {exc}"
+                    ) from exc
+                segments.extend(part_segments)
+                detected_language = detected_language or payload.get("language")
+                duration = max(duration, chunk.offset + part_duration)
     except httpx.HTTPError as exc:
         raise TranscriptionError(
             f"Could not reach the Cloud STT endpoint at {endpoint}: {exc}"
         ) from exc
-    except OSError as exc:
-        raise TranscriptionError(
-            f"Could not read the extracted audio file {path}: {exc}"
-        ) from exc
+    finally:
+        for created in temporary:
+            with contextlib.suppress(OSError):
+                created.unlink(missing_ok=True)
 
-    if response.status_code >= 400:
-        raise TranscriptionError(
-            f"Cloud STT rejected the request ({response.status_code}): "
-            f"{response.text[:400]}"
-        )
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise TranscriptionError(
-            "Cloud STT returned a response that is not JSON: "
-            f"{response.text[:400]}"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise TranscriptionError(
-            f"Cloud STT returned an unexpected payload: {response.text[:400]}"
-        )
-
-    try:
-        segments, duration = _segments_from_cloud_payload(payload)
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise TranscriptionError(
-            f"Cloud STT returned malformed segments: {exc}"
-        ) from exc
+    for index, segment in enumerate(segments):
+        segment.id = index
+    if duration <= 0:
+        duration = audio_duration
 
     return TranscriptionResult(
         segments=apply_glossary_to_segments(segments, glossary),
         duration=duration,
-        language=payload.get("language"),
+        language=detected_language,
         language_probability=None,
         device="cloud",
         compute_type="cloud",
@@ -714,8 +1104,19 @@ async def transcribe_cloud(
 
 def _segments_from_cloud_payload(
     payload: dict,
+    *,
+    offset: float = 0.0,
+    duration_hint: float = 0.0,
 ) -> tuple[list[Segment], float]:
-    """Normalise a verbose-json Cloud STT payload into segments + duration."""
+    """Normalise a verbose-json Cloud STT payload into segments + duration.
+
+    ``offset`` shifts a chunk's relative timestamps onto the lecture timeline;
+    ``duration_hint`` is the chunk's known length, used when a provider answers
+    with plain ``json`` (no duration, no segments). Ids are renumbered by the
+    caller after all chunks are merged.
+    """
+    reported_duration = float(payload.get("duration", 0.0) or 0.0)
+    duration = reported_duration if reported_duration > 0 else max(0.0, duration_hint)
     raw_segments = payload.get("segments") or []
     segments: list[Segment] = []
     if raw_segments:
@@ -727,8 +1128,8 @@ def _segments_from_cloud_payload(
                 segments.append(
                     Segment(
                         id=index,
-                        start=float(item.get("start", 0.0)),
-                        end=float(item.get("end", 0.0)),
+                        start=float(item.get("start", 0.0)) + offset,
+                        end=float(item.get("end", 0.0)) + offset,
                         text=text,
                         language=payload.get("language"),
                     )
@@ -739,13 +1140,13 @@ def _segments_from_cloud_payload(
             segments.append(
                 Segment(
                     id=0,
-                    start=0.0,
-                    end=float(payload.get("duration", 0.0) or 0.0),
+                    start=offset,
+                    end=offset + duration,
                     text=text,
                     language=payload.get("language"),
                 )
             )
-    return segments, float(payload.get("duration", 0.0) or 0.0)
+    return segments, duration
 
 
 # --------------------------------------------------------------------------- #

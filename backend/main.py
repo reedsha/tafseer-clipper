@@ -1,6 +1,6 @@
 """FastAPI sidecar for Tafseer Clipper (localhost:8008).
 
-Exposes exactly the six endpoints allowed by the architecture contract:
+Exposes exactly the seven endpoints allowed by the architecture contract:
 
 1. ``GET  /health``
 2. ``POST /extract-and-transcribe``
@@ -8,6 +8,7 @@ Exposes exactly the six endpoints allowed by the architecture contract:
 4. ``POST /verify-arabic``
 5. ``POST /fonts/import``
 6. ``POST /render-batch``  (Server-Sent Events)
+7. ``POST /list-models``   (model discovery for the Settings selectors)
 
 All heavy lifting (FFmpeg, Whisper, LLM calls) happens here, never in the
 frontend.  Configuration defaults come from the environment; per-request
@@ -52,7 +53,8 @@ from services.cancel import JobCancelled
 # module can import ctranslate2/faster-whisper, which load the CUDA DLLs.
 accel.activate_runtime_dirs()
 
-from services import analyzer, renderer, subtitle_gen, transcriber  # noqa: E402
+from services import analyzer, decision, recitation, renderer, subtitle_gen, transcriber  # noqa: E402
+from services import verify as verify_service  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Logging: console + rotating file under the user data directory
@@ -146,6 +148,40 @@ class ProviderOverride(BaseModel):
         )
 
 
+class DecisionProvider(BaseModel):
+    """Optional per-slot decision-model override (System One tier).
+
+    Absence means "keep today's behavior": the sidecar falls back to the
+    deterministic heuristics and the generative model exactly as before.
+    """
+
+    mode: Literal["local", "cloud"] | None = Field(
+        default=None, description="Informational: where the connection comes from."
+    )
+    base_url: str | None = Field(
+        default=None, description="Service root or OpenAI-compatible URL."
+    )
+    api_key: str | None = Field(default=None, description="Bearer token; omit for Ollama.")
+    model: str | None = Field(default=None, description="Decision model id.")
+    endpoint_style: Literal[
+        "auto", "ollama", "openrouter", "perplexity", "runware", "typesafe"
+    ] | None = Field(
+        default=None,
+        description="Adapter for the decisions path; 'auto' infers from the host.",
+    )
+    timeout: float | None = Field(default=None, gt=0, description="Seconds.")
+
+    def to_service(self) -> decision.DecisionProviderOverride:
+        return decision.DecisionProviderOverride(
+            mode=self.mode,
+            base_url=self.base_url,
+            api_key=self.api_key,
+            model=self.model,
+            endpoint_style=self.endpoint_style,
+            timeout=self.timeout,
+        )
+
+
 # --------------------------------------------------------------------------- #
 # 1. GET /health
 # --------------------------------------------------------------------------- #
@@ -178,12 +214,26 @@ class OllamaProviderStatus(BaseModel):
     detected: bool = False
     url: str | None = None
     models: list[str] = Field(default_factory=list)
+    #: Additive: installed decision-capable models (System One tier). Empty on
+    #: Ollama builds older than 0.35, which have no ``/v1/systemone`` route.
+    decision_models: list[str] = Field(default_factory=list)
+
+
+class WhisperLocalStatus(BaseModel):
+    """Whisper models already downloaded on this machine (additive)."""
+
+    models: list[str] = Field(default_factory=list)
 
 
 class ProvidersStatus(BaseModel):
     """Detected AI services the app can use without extra setup."""
 
     ollama: OllamaProviderStatus = Field(default_factory=OllamaProviderStatus)
+    #: Additive: locally downloaded faster-whisper models for the STT selector.
+    whisper_local: WhisperLocalStatus = Field(default_factory=WhisperLocalStatus)
+    #: Additive: System One path on the detected Ollama server, only when the
+    #: daemon reports a version that actually serves it.
+    decision_endpoint: str | None = None
 
 
 class HardwareTier(BaseModel):
@@ -250,6 +300,20 @@ class TranscribeRequest(BaseModel):
     cloud: CloudSttConfig | None = Field(
         default=None, description="Required when use_local_whisper is false."
     )
+    #: Optional Step-1 enrichment (additive; older clients omit it and get the
+    #: plain transcript). The analysis provider is the same one used in Step 2.
+    analysis_provider: ProviderOverride | None = None
+    #: Optional analysis-slot decision model; absent = today's windowed LLM audit.
+    decision_provider: DecisionProvider | None = None
+    #: Cloud model used only for the isolated Arabic recitation pass. Empty
+    #: means "same as the primary speech model".
+    arabic_model: str | None = None
+    detect_arabic: bool = Field(
+        default=True, description="Audit the transcript for Arabic recitation spans."
+    )
+    group_sentences: bool = Field(
+        default=True, description="Group Thai segments into sentences for Step 3."
+    )
 
     @field_validator("file_path")
     @classmethod
@@ -265,6 +329,13 @@ class TranscriptSegment(BaseModel):
     end: float
     text: str
     language: str | None = None
+    #: Additive Step-1 enrichment (older clients ignore these).
+    sentence_id: int | None = None
+    source: str | None = None
+    reference: str | None = None
+    confidence: float | None = None
+    original_text: str | None = None
+    translation: str | None = None
 
 
 class TranscribeResponse(BaseModel):
@@ -286,6 +357,17 @@ class TranscribeResponse(BaseModel):
 # --------------------------------------------------------------------------- #
 # 3. POST /discover-clips
 # --------------------------------------------------------------------------- #
+class ClipExemplar(BaseModel):
+    """A clip the editor kept (or passed on) during a previous re-roll."""
+
+    start: float = Field(ge=0.0)
+    end: float = Field(gt=0.0)
+    title: str = Field(default="", max_length=160)
+    text: str = Field(
+        default="", max_length=2000, description="Transcript excerpt, optional."
+    )
+
+
 class DiscoverRequest(BaseModel):
     transcript_id: str = Field(description="Id returned by /extract-and-transcribe.")
     base_prompt: str = Field(default="", description="Editable Base System Prompt.")
@@ -302,6 +384,17 @@ class DiscoverRequest(BaseModel):
     max_duration: float = Field(default=90.0, gt=1.0, le=1800.0)
     language: str = Field(default="th", description="Language for titles/rationales.")
     provider: ProviderOverride | None = None
+    #: Optional clip-scoring decision model; absent = today's prompt pipeline.
+    decision_provider: DecisionProvider | None = None
+    #: Additive re-roll feedback: approved/excluded clips already in the project.
+    approved_exemplars: list[ClipExemplar] = Field(
+        default_factory=list,
+        description="Approved clips the next re-roll should imitate (text excerpts).",
+    )
+    rejected_exemplars: list[ClipExemplar] = Field(
+        default_factory=list,
+        description="Trashed clips the next re-roll should avoid (text excerpts).",
+    )
 
     @model_validator(mode="after")
     def _duration_bounds(self) -> DiscoverRequest:
@@ -334,10 +427,14 @@ class DiscoverResponse(BaseModel):
 # --------------------------------------------------------------------------- #
 # 4. POST /verify-arabic
 # --------------------------------------------------------------------------- #
-class VerifyArabicRequest(BaseModel):
+class VerifyLine(BaseModel):
+    """One line of an additive batched verification request."""
+
     arabic_text: str = Field(description="One Arabic subtitle line to proofread.")
     context_thai: str = Field(default="", description="Surrounding Thai explanation.")
-    provider: ProviderOverride | None = None
+    cue_id: str | None = Field(
+        default=None, description="Opaque renderer id, echoed back unchanged."
+    )
 
     @field_validator("arabic_text")
     @classmethod
@@ -347,11 +444,51 @@ class VerifyArabicRequest(BaseModel):
         return value
 
 
-class VerifyArabicResponse(BaseModel):
+class VerifyArabicRequest(BaseModel):
+    arabic_text: str = Field(
+        default="",
+        description="One Arabic subtitle line. Omit when the additive 'lines' batch is used.",
+    )
+    context_thai: str = Field(default="", description="Surrounding Thai explanation.")
+    #: Additive batch shape (<= 64 lines), used by "Check all Arabic".
+    lines: list[VerifyLine] | None = Field(default=None, max_length=64)
+    provider: ProviderOverride | None = None
+    decision_provider: DecisionProvider | None = None
+
+    @model_validator(mode="after")
+    def _one_shape(self) -> VerifyArabicRequest:
+        if self.lines is not None:
+            if not self.lines:
+                raise ValueError("'lines' must not be empty.")
+            if self.arabic_text.strip():
+                raise ValueError("Send either 'arabic_text' or 'lines', not both.")
+            return self
+        if not self.arabic_text.strip():
+            raise ValueError("'arabic_text' must not be empty.")
+        return self
+
+
+class VerifyArabicLineResult(BaseModel):
+    cue_id: str | None = None
     verified_text: str
     correction_applied: bool
     notes: str = ""
+    #: ``quran`` (corpus exact), ``triage`` (fast check passed), ``proofread``.
+    source: str = "proofread"
+    reference: str | None = None
+    confidence: float | None = None
+
+
+class VerifyArabicResponse(BaseModel):
+    verified_text: str = ""
+    correction_applied: bool = False
+    notes: str = ""
     model: str
+    #: Additive provenance for the single-line shape.
+    source: str = "proofread"
+    reference: str | None = None
+    #: Additive per-line results for a batched request.
+    lines: list[VerifyArabicLineResult] | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -558,6 +695,12 @@ def _persist_transcript(record: TranscriptRecord) -> None:
                 "end": segment.end,
                 "text": segment.text,
                 "language": segment.language,
+                "sentence_id": segment.sentence_id,
+                "source": segment.source,
+                "reference": segment.reference,
+                "confidence": segment.confidence,
+                "original_text": segment.original_text,
+                "translation": segment.translation,
             }
             for segment in record.segments
         ],
@@ -610,6 +753,12 @@ def _load_transcript(transcript_id: str) -> TranscriptRecord | None:
                 end=float(item["end"]),
                 text=str(item["text"]),
                 language=item.get("language"),
+                sentence_id=item.get("sentence_id"),
+                source=item.get("source"),
+                reference=item.get("reference"),
+                confidence=item.get("confidence"),
+                original_text=item.get("original_text"),
+                translation=item.get("translation"),
             )
             for item in payload.get("segments") or []
         ]
@@ -856,24 +1005,114 @@ def _hardware_snapshot() -> dict:
 #    Detected providers + capability tier (additive /health fields)
 # --------------------------------------------------------------------------- #
 OLLAMA_DEFAULT_URL = "http://127.0.0.1:11434"
-OLLAMA_PROBE_TIMEOUT_SECONDS = 0.5
+#: A cold daemon (first ``/api/tags`` after idle scans the model store) can take
+#: longer than the old 0.5 s budget, which reported a running Ollama as missing.
+OLLAMA_PROBE_TIMEOUT_SECONDS = 2.0
 OLLAMA_PROBE_TTL_SECONDS = 30.0
-_ollama_cache: tuple[float, OllamaProviderStatus] | None = None
+#: A *negative* result is cached only briefly: after the user starts
+#: ``ollama serve`` the next poll (or "Check again") has to see it, instead of
+#: repeating "not found" for the full TTL.
+OLLAMA_MISS_TTL_SECONDS = 5.0
+
+#: Substrings of well-known embedding-only model families. They cannot answer a
+#: chat request, so listing them next to chat models invited a 400 on verify.
+#: Deliberately conservative: only unambiguous embedding names.
+_OLLAMA_NON_CHAT_MARKERS = ("embed", "all-minilm", "bge-", "mxbai-")
+
+#: Decision-capable ("System One") model families. Names are matched
+#: case-insensitively; the Settings picker uses the same table server-side.
+_DECISION_MODEL_PATTERN = re.compile(
+    r"jev|decider|tev|laya|kev|nimble|strands-decider|systemone|system-one",
+    re.IGNORECASE,
+)
+
+_ollama_cache: tuple[float, str, OllamaProviderStatus] | None = None
 _ollama_lock = threading.Lock()
+_ollama_version_cache: tuple[float, str, str | None] | None = None
 
 
-def _probe_ollama() -> OllamaProviderStatus:
-    """Detect a local Ollama instance and list its installed models."""
-    global _ollama_cache
+def _ollama_root_url(base_url: str | None) -> str:
+    """Normalise the configured ``.../v1`` chat URL to Ollama's HTTP root.
+
+    The probe talks to the native ``/api/tags`` route, so a trailing OpenAI-
+    compatibility path (``/v1``) has to be dropped. Any other custom URL is kept
+    as-is, which lets the probe follow a non-default ``OLLAMA_HOST``/port.
+    """
+    raw = (base_url or "").strip() or OLLAMA_DEFAULT_URL
+    cleaned = raw.rstrip("/")
+    if cleaned.endswith("/v1"):
+        cleaned = cleaned[: -len("/v1")]
+    return cleaned or OLLAMA_DEFAULT_URL
+
+
+def _is_chat_capable_model(name: str) -> bool:
+    lowered = name.lower()
+    return not any(marker in lowered for marker in _OLLAMA_NON_CHAT_MARKERS)
+
+
+def _is_decision_model(name: str) -> bool:
+    return bool(_DECISION_MODEL_PATTERN.search(name))
+
+
+def _probe_ollama_version(root: str, *, force: bool = False) -> str | None:
+    """Ollama's reported version, cached like the provider scan.
+
+    ``/v1/systemone`` only exists from 0.35 on, so the health block must never
+    assume decision support without this probe.
+    """
+    global _ollama_version_cache
     now = time.monotonic()
     with _ollama_lock:
-        if _ollama_cache is not None and now - _ollama_cache[0] < OLLAMA_PROBE_TTL_SECONDS:
-            return _ollama_cache[1]
-
-    status = OllamaProviderStatus(detected=False, url=OLLAMA_DEFAULT_URL, models=[])
+        if (
+            not force
+            and _ollama_version_cache is not None
+            and _ollama_version_cache[1] == root
+            and now - _ollama_version_cache[0] < OLLAMA_PROBE_TTL_SECONDS
+        ):
+            return _ollama_version_cache[2]
+    version: str | None = None
     try:
         response = httpx.get(
-            f"{OLLAMA_DEFAULT_URL}/api/tags", timeout=OLLAMA_PROBE_TIMEOUT_SECONDS
+            f"{root}/api/version", timeout=OLLAMA_PROBE_TIMEOUT_SECONDS
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            raw = payload.get("version") if isinstance(payload, dict) else None
+            if isinstance(raw, str) and raw.strip():
+                version = raw.strip()
+    except Exception:  # noqa: BLE001 - detection must never fail /health
+        version = None
+    with _ollama_lock:
+        _ollama_version_cache = (now, root, version)
+    return version
+
+
+def _probe_ollama(
+    base_url: str | None = None, *, force: bool = False
+) -> OllamaProviderStatus:
+    """Detect a local Ollama instance and list its chat-capable models.
+
+    ``base_url`` comes from Settings (``ollama.baseUrl``); ``force`` bypasses the
+    short-lived cache so the "Check again" button can pick up a daemon the user
+    just started.
+    """
+    global _ollama_cache
+    root = _ollama_root_url(base_url)
+    now = time.monotonic()
+    with _ollama_lock:
+        if not force and _ollama_cache is not None and _ollama_cache[1] == root:
+            ttl = (
+                OLLAMA_PROBE_TTL_SECONDS
+                if _ollama_cache[2].detected
+                else OLLAMA_MISS_TTL_SECONDS
+            )
+            if now - _ollama_cache[0] < ttl:
+                return _ollama_cache[2]
+
+    status = OllamaProviderStatus(detected=False, url=root, models=[])
+    try:
+        response = httpx.get(
+            f"{root}/api/tags", timeout=OLLAMA_PROBE_TIMEOUT_SECONDS
         )
         if response.status_code == 200:
             payload = response.json()
@@ -882,18 +1121,21 @@ def _probe_ollama() -> OllamaProviderStatus:
             if isinstance(entries, list):
                 for entry in entries:
                     name = entry.get("name") if isinstance(entry, dict) else None
-                    if isinstance(name, str) and name:
+                    if isinstance(name, str) and name and _is_chat_capable_model(name):
                         names.append(name)
             status = OllamaProviderStatus(
                 detected=True,
-                url=OLLAMA_DEFAULT_URL,
+                url=root,
                 models=sorted(set(names)),
+                decision_models=sorted(
+                    {name for name in names if _is_decision_model(name)}
+                ),
             )
     except Exception:  # noqa: BLE001 - detection must never fail /health
         pass
 
     with _ollama_lock:
-        _ollama_cache = (now, status)
+        _ollama_cache = (now, root, status)
     return status
 
 
@@ -950,11 +1192,33 @@ def _hardware_tier(vram_mb: int) -> HardwareTier:
 
 
 @app.get("/health", response_model=HealthResponse, summary="Sidecar readiness & hardware")
-async def health() -> HealthResponse:
+async def health(
+    refresh: bool = False,
+    ollama_base_url: str | None = None,
+) -> HealthResponse:
+    """Sidecar readiness, hardware, and detected local services.
+
+    ``ollama_base_url`` lets the renderer pass the address saved in Settings, so
+    a non-default ``OLLAMA_HOST``/port is detected too. ``refresh=1`` bypasses
+    the short-lived provider caches (used by the "Check again" buttons after the
+    user starts a service); both parameters are optional and every older caller
+    keeps the previous behaviour.
+    """
+    global _whisper_cache
+    if refresh:
+        with _whisper_lock:
+            _whisper_cache = None
     snapshot = await run_in_threadpool(_hardware_snapshot)
     disk_cache_bytes = await run_in_threadpool(_disk_cache_bytes)
     acceleration = await run_in_threadpool(accel.acceleration_report)
-    ollama = await run_in_threadpool(_probe_ollama)
+    ollama = await run_in_threadpool(_probe_ollama, ollama_base_url, force=refresh)
+    decision_endpoint: str | None = None
+    if ollama.detected and ollama.url:
+        version = await run_in_threadpool(
+            _probe_ollama_version, ollama.url, force=refresh
+        )
+        if decision.supports_systemone(version):
+            decision_endpoint = ollama.url.rstrip("/") + decision.SYSTEMONE_PATH
     ffmpeg = config.ffmpeg_path()
     return HealthResponse(
         version=config.APP_VERSION,
@@ -974,9 +1238,228 @@ async def health() -> HealthResponse:
             compute_type=str(snapshot["whisper_compute_type"]),
         ),
         acceleration=AccelerationStatus.model_validate(acceleration),
-        providers=ProvidersStatus(ollama=ollama),
+        providers=ProvidersStatus(
+            ollama=ollama,
+            whisper_local=_probe_whisper_cache(),
+            decision_endpoint=decision_endpoint,
+        ),
         hardware=_hardware_tier(int(snapshot["vram_mb"])),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Local Whisper model cache scan (additive /health.providers.whisper_local)
+# --------------------------------------------------------------------------- #
+_whisper_cache: tuple[float, WhisperLocalStatus] | None = None
+_whisper_lock = threading.Lock()
+_WHISPER_CACHE_TTL_SECONDS = 30.0
+
+
+def _huggingface_hub_cache() -> Path:
+    """The huggingface_hub download cache faster-whisper pulls models into.
+
+    Mirrors huggingface_hub's own resolution order without importing it:
+    ``HF_HUB_CACHE`` → ``HUGGINGFACE_HUB_CACHE`` → ``$HF_HOME/hub`` →
+    ``~/.cache/huggingface/hub``.
+    """
+    for var in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        raw = os.environ.get(var)
+        if raw:
+            return Path(raw)
+    home = os.environ.get("HF_HOME")
+    if home:
+        return Path(home) / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _scan_whisper_cache() -> WhisperLocalStatus:
+    """List faster-whisper models already downloaded locally.
+
+    A model counts as available only when at least one snapshot directory with
+    real content exists, so a cancelled download never shows up as a usable
+    choice. Only Whisper-family repos are listed (the shared HF cache also
+    holds unrelated models). Canonical ``Systran/faster-whisper-*`` repos are
+    reported by their size name (``large-v3``); any other repo keeps its full
+    id.
+    """
+    root = _huggingface_hub_cache()
+    names: set[str] = set()
+    try:
+        for entry in root.glob("models--*--*"):
+            snapshots = entry / "snapshots"
+            if not snapshots.is_dir():
+                continue
+            populated = any(
+                snapshot.is_dir() and any(snapshot.iterdir()) for snapshot in snapshots.iterdir()
+            )
+            if not populated:
+                continue
+            repo_id = entry.name.removeprefix("models--").replace("--", "/")
+            if "whisper" not in repo_id.lower():
+                continue
+            if repo_id.startswith("Systran/faster-whisper-"):
+                names.add(repo_id.removeprefix("Systran/faster-whisper-"))
+            else:
+                names.add(repo_id)
+    except OSError:
+        pass
+    return WhisperLocalStatus(models=sorted(names))
+
+
+def _probe_whisper_cache() -> WhisperLocalStatus:
+    global _whisper_cache
+    now = time.monotonic()
+    with _whisper_lock:
+        if _whisper_cache is not None and now - _whisper_cache[0] < _WHISPER_CACHE_TTL_SECONDS:
+            return _whisper_cache[1]
+    status = _scan_whisper_cache()
+    with _whisper_lock:
+        _whisper_cache = (now, status)
+    return status
+
+
+# --------------------------------------------------------------------------- #
+# 7. POST /list-models
+# --------------------------------------------------------------------------- #
+class ListModelRequest(BaseModel):
+    """One OpenAI-compatible service to enumerate models from."""
+
+    base_url: str = Field(description="OpenAI-compatible base URL, e.g. https://api.openai.com/v1")
+    api_key: str | None = Field(default=None, description="Bearer token; omit for local servers.")
+    timeout: float | None = Field(default=None, gt=0, description="Seconds.")
+    #: Additive: keep only decision-capable model ids (System One tier).
+    filter: Literal["decision"] | None = None
+    #: Additive: live System One probe of this model (Settings "Test").
+    probe_model: str | None = None
+    #: Additive: adapter hint for the probe (auto infers from the host).
+    endpoint_style: Literal[
+        "auto", "ollama", "openrouter", "perplexity", "runware", "typesafe"
+    ] | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("'base_url' must not be empty.")
+        return value
+
+
+class ModelProbeResult(BaseModel):
+    ok: bool
+    model: str
+    detail: str = ""
+    confidence: float | None = None
+
+
+class ListModelResponse(BaseModel):
+    models: list[str] = Field(default_factory=list)
+    #: Additive: present only when the request asked for a live probe.
+    probe: ModelProbeResult | None = None
+
+
+def _extract_model_ids(payload: Any) -> list[str]:
+    """Read ids from OpenAI-style ``{"data": [...]}`` or a bare JSON array."""
+    entries: Any = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        return []
+    names: list[str] = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            name = entry.get("id") or entry.get("name")
+        else:
+            name = entry
+        if isinstance(name, str) and name.strip():
+            names.append(name.strip())
+    return sorted(set(names))
+
+
+@app.post(
+    "/list-models",
+    response_model=ListModelResponse,
+    summary="List models offered by an OpenAI-compatible service",
+)
+async def list_models(body: ListModelRequest) -> ListModelResponse:
+    """Model discovery for the Settings selectors.
+
+    The frontend never talks to providers directly (AGENTS.md §3), so the
+    sidecar performs the ``GET {base_url}/models`` call with the saved key and
+    answers with a flat id list. Failures surface as a friendly 502, never the
+    provider's raw error body.
+    """
+
+    def work() -> list[str]:
+        base_url = body.base_url.strip().rstrip("/")
+        headers = {"Authorization": f"Bearer {body.api_key}"} if body.api_key else {}
+        try:
+            response = httpx.get(
+                f"{base_url}/models",
+                headers=headers,
+                timeout=body.timeout or 10.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced as a friendly 502
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Could not reach the AI service to list its models. "
+                    "Check the server address and your connection."
+                ),
+            ) from exc
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "The AI service refused the model list request "
+                    f"(HTTP {response.status_code}). Check the server address and API key."
+                ),
+            )
+        try:
+            return _extract_model_ids(response.json())
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="The AI service returned an unexpected model list format.",
+            ) from exc
+
+    models = await run_in_threadpool(work)
+    if body.filter == "decision":
+        decision_models = [name for name in models if _is_decision_model(name)]
+        # A capability table is a heuristic: when it recognises nothing, keep the
+        # full list so the Settings picker still offers a Custom-name escape.
+        if decision_models:
+            models = decision_models
+
+    probe: ModelProbeResult | None = None
+    if body.probe_model:
+        config = decision.merge_decision_provider(
+            decision.DecisionProviderOverride(
+                base_url=body.base_url,
+                api_key=body.api_key,
+                model=body.probe_model,
+                endpoint_style=body.endpoint_style,
+                timeout=body.timeout,
+            )
+        )
+        if config is None:
+            probe = ModelProbeResult(
+                ok=False,
+                model=body.probe_model,
+                detail="Choose a decision model first.",
+            )
+        else:
+            try:
+                answer = await decision.probe(config)
+                probe = ModelProbeResult(
+                    ok=True,
+                    model=body.probe_model,
+                    detail=f"Answered with confidence {answer.confidence:.2f}.",
+                    confidence=answer.confidence,
+                )
+            except decision.DecisionError as exc:
+                probe = ModelProbeResult(
+                    ok=False, model=body.probe_model, detail=str(exc)
+                )
+
+    return ListModelResponse(models=models, probe=probe)
 
 
 # --------------------------------------------------------------------------- #
@@ -1044,6 +1527,25 @@ def _engine_for(body: TranscribeRequest) -> transcriber.WhisperTranscriber:
     return transcriber.get_transcriber(body.model, body.device, body.compute_type)
 
 
+def _decision_provider(
+    override: DecisionProvider | None,
+) -> decision.DecisionProviderConfig | None:
+    """Resolve the optional System One slot; ``None`` keeps today's behavior."""
+    try:
+        return decision.merge_decision_provider(
+            override.to_service() if override is not None else None
+        )
+    except decision.DecisionError as exc:
+        logger.warning("Ignoring an invalid decision-model configuration: %s", exc)
+        return None
+
+
+async def _release_local_model(engine: transcriber.WhisperTranscriber) -> bool:
+    """Unload the warm Whisper model even if the client disconnects mid-request."""
+    task = asyncio.ensure_future(run_in_threadpool(engine.unload))
+    return await asyncio.shield(task)
+
+
 @app.post(
     "/extract-and-transcribe",
     response_model=TranscribeResponse,
@@ -1068,8 +1570,12 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
             transcriber.compute_waveform_peaks, wav_path
         )
 
+        engine: transcriber.WhisperTranscriber | None = None
         if body.use_local_whisper:
             engine = _engine_for(body)
+            # 3.0 - defer the unload until every enrichment pass (including the
+            # isolated Arabic recitation spans that reuse this warm model) is
+            # done.  Unloading here would only force an immediate reload.
             result = await run_in_threadpool(
                 engine.transcribe,
                 wav_path,
@@ -1077,7 +1583,7 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                 language=body.language,
                 vad_filter=body.vad_filter,
                 glossary=body.glossary,
-                auto_unload=auto_unload,
+                auto_unload=False,
                 cancel_event=cancel_event,
             )
         else:
@@ -1096,6 +1602,125 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                 glossary=body.glossary,
                 cancel_event=cancel_event,
             )
+
+        try:
+            # Step-1 enrichment: Arabic recitation recovery + sentence groups.
+            # Everything is inside the same request; a provider/decision failure
+            # simply leaves the plain transcript in place.
+            decision_provider = _decision_provider(body.decision_provider)
+            provider = None
+            if body.analysis_provider is not None:
+                try:
+                    provider = analyzer.merge_provider(
+                        "reasoning", body.analysis_provider.to_service()
+                    )
+                except analyzer.LLMError as exc:
+                    logger.warning("Step-1 AI enrichment skipped: %s", exc)
+
+            if body.detect_arabic and (provider is not None or decision_provider is not None):
+                audit_input = [
+                    {
+                        "id": segment.id,
+                        "start": segment.start,
+                        "end": segment.end,
+                        "text": segment.text,
+                        "language": segment.language,
+                    }
+                    for segment in result.segments
+                ]
+                try:
+                    if decision_provider is not None:
+                        spans = await analyzer.audit_arabic_decision(
+                            segments=audit_input,
+                            provider=decision_provider,
+                            escalator=provider,
+                            cancel_event=cancel_event,
+                        )
+                    else:
+                        spans = await analyzer.audit_arabic(
+                            segments=audit_input,
+                            provider=provider,
+                            cancel_event=cancel_event,
+                        )
+                except analyzer.LLMError as exc:
+                    logger.warning("Arabic audit failed; keeping the plain transcript: %s", exc)
+                    spans = []
+                if spans:
+                    async def transcribe_span(
+                        path: Path,
+                    ) -> transcriber.TranscriptionResult:
+                        if body.use_local_whisper:
+                            engine = _engine_for(body)
+                            return await run_in_threadpool(
+                                engine.transcribe,
+                                path,
+                                initial_prompt="",
+                                language="ar",
+                                vad_filter=True,
+                                glossary=None,
+                                auto_unload=False,
+                                cancel_event=cancel_event,
+                            )
+                        if body.cloud is None:
+                            raise RuntimeError("Cloud STT config disappeared.")
+                        return await transcriber.transcribe_cloud(
+                            path,
+                            base_url=body.cloud.base_url,
+                            api_key=body.cloud.api_key,
+                            model=body.arabic_model or body.cloud.model,
+                            language="ar",
+                            prompt=None,
+                            glossary=None,
+                            cancel_event=cancel_event,
+                        )
+
+                    logger.info(
+                        "Arabic audit found %d candidate recitation span(s).", len(spans)
+                    )
+                    result.segments = await recitation.recover_arabic(
+                        wav_path=wav_path,
+                        segments=result.segments,
+                        spans=spans,
+                        transcribe_span=transcribe_span,
+                        cancel_event=cancel_event,
+                    )
+
+            if body.group_sentences and (provider is not None or decision_provider is not None):
+                thai_segments = [
+                    {
+                        "id": segment.id,
+                        "start": segment.start,
+                        "end": segment.end,
+                        "text": segment.text,
+                    }
+                    for segment in result.segments
+                    if segment.language != "ar" and segment.text.strip()
+                ]
+                try:
+                    sentence_map = await analyzer.group_sentences_with_decision(
+                        segments=thai_segments,
+                        provider=provider,
+                        decision_provider=decision_provider,
+                        cancel_event=cancel_event,
+                    )
+                except analyzer.LLMError as exc:
+                    logger.warning("Sentence grouping failed; leaving segments ungrouped: %s", exc)
+                    sentence_map = {}
+                if sentence_map:
+                    for segment in result.segments:
+                        if segment.id in sentence_map:
+                            segment.sentence_id = sentence_map[segment.id]
+        finally:
+            # 3.0 - release the warm model only after every span pass, and even
+            # when a client disconnect cancels the enrichment.
+            if engine is not None and auto_unload:
+                try:
+                    result.vram_unloaded = await _release_local_model(engine)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - unload must not fail Step 1
+                    logger.warning("Could not unload the transcription model: %s", exc)
+
         return result, waveform_peaks
 
     try:
@@ -1133,6 +1758,12 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                 end=round(segment.end, 3),
                 text=segment.text,
                 language=segment.language,
+                sentence_id=segment.sentence_id,
+                source=segment.source,
+                reference=segment.reference,
+                confidence=segment.confidence,
+                original_text=segment.original_text,
+                translation=segment.translation,
             )
             for segment in result.segments
         ],
@@ -1155,10 +1786,17 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
 )
 async def discover_clips(body: DiscoverRequest, request: Request) -> DiscoverResponse:
     record = _get_transcript(body.transcript_id)
-    provider = analyzer.merge_provider(
-        "reasoning", body.provider.to_service() if body.provider else None
-    )
+    decision_provider = _decision_provider(body.decision_provider)
+    provider = None
+    if body.provider is not None or decision_provider is None:
+        # Without a clip-scoring slot, the writing model stays mandatory exactly
+        # as today.  With a slot, titles may fall back to neutral text.
+        provider = analyzer.merge_provider(
+            "reasoning", body.provider.to_service() if body.provider else None
+        )
     excluded = [item.model_dump() for item in body.excluded_ranges]
+    approved = [item.model_dump() for item in body.approved_exemplars]
+    rejected = [item.model_dump() for item in body.rejected_exemplars]
     segments = [
         {"start": segment.start, "end": segment.end, "text": segment.text}
         for segment in record.segments
@@ -1181,13 +1819,19 @@ async def discover_clips(body: DiscoverRequest, request: Request) -> DiscoverRes
             max_clips=body.max_clips,
             language=body.language,
             cancel_event=cancel_event,
+            decision_provider=decision_provider,
+            approved_exemplars=approved,
+            rejected_exemplars=rejected,
         )
 
     clips = await _run_until_disconnected(request, run)
+    model = provider.model if provider is not None else (
+        decision_provider.model if decision_provider is not None else ""
+    )
 
     return DiscoverResponse(
         clips=[ClipProposal(**clip) for clip in clips],
-        model=provider.model,
+        model=model,
         excluded_ranges_applied=len(excluded),
     )
 
@@ -1201,9 +1845,48 @@ async def discover_clips(body: DiscoverRequest, request: Request) -> DiscoverRes
     summary="Uthmani spelling / Harakat verification with the fast text model",
 )
 async def verify_arabic(body: VerifyArabicRequest) -> VerifyArabicResponse:
-    provider = analyzer.merge_provider(
-        "fast", body.provider.to_service() if body.provider else None
-    )
+    decision_provider = _decision_provider(body.decision_provider)
+    if body.provider is not None:
+        provider = analyzer.merge_provider("fast", body.provider.to_service())
+    else:
+        # The fast proofreader stays mandatory exactly as today; with a triage
+        # slot configured it becomes optional (every line may be gated away).
+        try:
+            provider = analyzer.merge_provider("fast", None)
+        except analyzer.LLMError:
+            if decision_provider is None:
+                raise
+            provider = None
+
+    if body.lines is not None:
+        batch = await verify_service.verify_lines(
+            [
+                verify_service.VerifyLine(
+                    arabic_text=line.arabic_text,
+                    context_thai=line.context_thai,
+                    cue_id=line.cue_id,
+                )
+                for line in body.lines
+            ],
+            provider=provider,
+            decision_provider=decision_provider,
+        )
+        return VerifyArabicResponse(
+            model=batch.model,
+            lines=[
+                VerifyArabicLineResult(**verify_service.outcome_payload(outcome))
+                for outcome in batch.lines
+            ],
+        )
+
+    # The editor's per-line "Check Arabic" keeps today's exact path: one
+    # proofread call, no corpus gate and no triage (a single line gains nothing
+    # from either, and Phase 2.1 pins this shape unchanged).
+    if provider is None:
+        raise analyzer.LLMError(
+            "A proofreader model is required to check one line. Choose a fast "
+            "text model in Settings."
+        )
     result = await analyzer.verify_arabic(
         arabic_text=body.arabic_text,
         context_thai=body.context_thai,

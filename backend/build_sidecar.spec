@@ -44,6 +44,13 @@ datas: list = []
 binaries: list = []
 hiddenimports: list = []
 
+# --- Bundled Qur'an corpus -------------------------------------------------- #
+_quran_corpus = BACKEND_DIR / "data" / "quran.json"
+if _quran_corpus.is_file():
+    datas.append((str(_quran_corpus), "data"))
+else:
+    print(f"[spec] WARNING: Qur'an corpus missing at {_quran_corpus}")
+
 # --- AI stack -------------------------------------------------------------- #
 for _package in ("faster_whisper", "ctranslate2", "av", "onnxruntime"):
     _datas, _binaries, _hidden = _collect(_package)

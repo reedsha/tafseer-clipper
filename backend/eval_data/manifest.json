@@ -1,0 +1,23 @@
+{
+  "builtAt": "2026-11-17T03:04:19",
+  "counts": {
+    "recitation": 66,
+    "verify_triage": 177,
+    "clip_scoring": 120
+  },
+  "gaps": {
+    "recitation": 34
+  },
+  "notes": {
+    "recitation": "No real lecture transcript is stored in the repository, so Thai explanation and Thai-script-Arabic rows are curated seeds; the Qur'an rows are real corpus text. Treat Thai accuracy as indicative.",
+    "verify_triage": "Corruptions are synthetic (diacritics dropped, one letter swapped) and ground truth is exact by construction.",
+    "clip_scoring": "Candidates are synthetic windows with seeded quality labels; this measures rubric adherence, not real-lecture recall."
+  },
+  "candidates": [
+    "tev1",
+    "tev1:0.8b",
+    "laya",
+    "nimble",
+    "pplx-decider"
+  ]
+}

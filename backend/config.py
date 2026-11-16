@@ -286,6 +286,34 @@ def llm_timeout() -> float:
 
 
 # --------------------------------------------------------------------------- #
+# Decision-model defaults (optional System One tier)
+# --------------------------------------------------------------------------- #
+#: No model is configured by default: the decision tier is opt-in and every
+#: caller must behave exactly like today when it is absent.
+def decision_model() -> str:
+    return env_str("TAFSEER_DECISION_MODEL", "")
+
+
+def decision_base_url() -> str:
+    """Decision service address; follows the main AI connection by default."""
+    return env_str("TAFSEER_DECISION_BASE_URL", llm_base_url())
+
+
+def decision_api_key() -> str | None:
+    raw = os.environ.get("TAFSEER_DECISION_API_KEY")
+    return raw if raw else llm_api_key()
+
+
+def decision_endpoint_style() -> str:
+    """Adapter hint (``auto`` infers from the host and an explicit style wins)."""
+    return env_str("TAFSEER_DECISION_ENDPOINT_STYLE", "auto")
+
+
+def decision_timeout() -> float:
+    return env_float("TAFSEER_DECISION_TIMEOUT", 45.0)
+
+
+# --------------------------------------------------------------------------- #
 # Server binding
 # --------------------------------------------------------------------------- #
 def host() -> str:

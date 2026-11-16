@@ -26,7 +26,11 @@ FastAPI sidecar:
                                  still asserted over HTTP).
 9. ``POST /extract-and-transcribe`` - error contract (400 bad path, 503 when
                                  faster-whisper is absent) plus real 16 kHz mono
-                                 WAV extraction and the Thai-Arabic glossary.
+                                 WAV extraction, the Thai-Arabic glossary, and
+                                 the Cloud STT chunking / gateway protocol.
+10. ``POST /list-models``       - model discovery against the mock provider,
+                                 friendly 502 for unreachable services, 422
+                                 validation.
 
 Run:  python test_phase1_e2e.py
 Exit code 0 = every check passed.
@@ -44,6 +48,7 @@ import sys
 import tempfile
 import threading
 import time
+import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -55,7 +60,18 @@ BACKEND = Path(__file__).resolve().parent
 sys.path.insert(0, str(BACKEND))
 
 import config
-from services import accel, analyzer, renderer, subtitle_gen, transcriber
+from services import (
+    accel,
+    analyzer,
+    decision,
+    decision_tasks,
+    quran,
+    recitation,
+    renderer,
+    subtitle_gen,
+    transcriber,
+)
+from services import verify as verify_service
 from services.cancel import JobCancelled, raise_if_cancelled
 
 ARTIFACTS = BACKEND / ".e2e"
@@ -246,6 +262,26 @@ class MockLLMHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.rstrip("/").endswith("/models"):
+            body = json.dumps(
+                {
+                    "object": "list",
+                    "data": [
+                        {"id": "mock-large", "object": "model"},
+                        {"id": "mock-tiny", "object": "model"},
+                        {"id": "mock-large", "object": "model"},
+                    ],
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_error(404)
 
 
 def start_mock_llm() -> ThreadingHTTPServer:
@@ -487,6 +523,7 @@ def run_http_checks(
     source: Path,
     thai_font: Path,
     arabic_font: Path,
+    mock_base_url: str,
     renders: Path,
     control_dir: Path,
 ) -> None:
@@ -551,11 +588,71 @@ def run_http_checks(
             f"ollama={ollama}",
         )
 
+        # Settings passes its saved Ollama address, and "Check again" adds
+        # refresh=1. The probe must normalise a ".../v1" chat URL to Ollama's
+        # HTTP root and stay well-formed even when nothing listens there.
+        refresh_probe = client.get(
+            "/health",
+            params={"refresh": "1", "ollama_base_url": "http://127.0.0.1:9/v1"},
+        )
+        refresh_ollama = (
+            (refresh_probe.json().get("providers") or {}).get("ollama")
+            if refresh_probe.status_code == 200
+            else None
+        )
+        check(
+            "GET /health: a configured Ollama address is probed and normalised",
+            refresh_probe.status_code == 200
+            and isinstance(refresh_ollama, dict)
+            and refresh_ollama.get("detected") is False
+            and refresh_ollama.get("url") == "http://127.0.0.1:9",
+            f"status={refresh_probe.status_code} ollama={refresh_ollama}",
+        )
+
         hardware = health.get("hardware") or {}
         check(
             "GET /health: hardware tier is a known value",
             isinstance(hardware, dict) and hardware.get("tier") in {"high", "medium", "low"},
             f"hardware={hardware}",
+        )
+
+        # Additive whisper_local scan: shape only — a machine may have no
+        # downloaded models, but the block must always be well-formed.
+        whisper_local = providers.get("whisper_local") if isinstance(providers, dict) else None
+        whisper_local_ok = (
+            isinstance(whisper_local, dict)
+            and isinstance(whisper_local.get("models"), list)
+            and all(isinstance(name, str) and name for name in whisper_local.get("models", []))
+        )
+        check(
+            "GET /health: whisper_local scan block is well-formed",
+            whisper_local_ok,
+            f"whisper_local={whisper_local}",
+        )
+
+        # ---- 1b. POST /list-models ------------------------------------------- #
+        response = client.post("/list-models", json={"base_url": mock_base_url})
+        listed = response.json() if response.status_code == 200 else {}
+        check(
+            "POST /list-models: enumerates a service's models (deduped, sorted)",
+            response.status_code == 200
+            and listed.get("models") == ["mock-large", "mock-tiny"],
+            f"status={response.status_code} models={listed.get('models')}",
+        )
+        response = client.post(
+            "/list-models", json={"base_url": "http://127.0.0.1:1/unreachable"}
+        )
+        detail = error_detail(response)
+        check(
+            "POST /list-models: unreachable service is a friendly 502",
+            response.status_code == 502 and "Could not reach" in detail,
+            f"status={response.status_code} detail={detail}",
+        )
+        response = client.post("/list-models", json={"base_url": "   "})
+        check(
+            "POST /list-models: empty base_url is rejected",
+            response.status_code == 422,
+            f"status={response.status_code}",
         )
 
         # ---- 2. /fonts/import ---------------------------------------------- #
@@ -1045,6 +1142,123 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         == "อัลลอฮฺ กับ เศาะฮาบะฮฺ",
         transcriber.apply_glossary("อัลเลาะห์ กับ ซอฮาบะห์", glossary),
     )
+
+    # ---- Cloud STT: upload chunking, re-timing and actionable errors -------- #
+    # Providers cap uploads at 25 MB (~12.5 min of 16 kHz PCM), so a long
+    # lecture has to be split. The budget is shrunk here instead of writing a
+    # 24 MB fixture; frame-exact slicing does not depend on the value.
+    whole_chunks, whole_temps = transcriber._split_wav_for_upload(extracted)
+    check(
+        "transcriber: a short lecture stays a single Cloud STT upload",
+        len(whole_chunks) == 1
+        and whole_chunks[0].path == extracted
+        and whole_chunks[0].offset == 0.0
+        and whole_temps == [],
+        f"chunks={len(whole_chunks)}",
+    )
+    parts, temporary = transcriber._split_wav_for_upload(extracted, max_bytes=64_000)
+    try:
+        offsets_ok = all(
+            abs(chunk.offset - index * 2.0) < 0.01 for index, chunk in enumerate(parts)
+        )
+        check(
+            "transcriber: a long lecture is split under the provider size cap",
+            len(parts) >= 2
+            and len(temporary) == len(parts)
+            and all(chunk.path.is_file() for chunk in parts)
+            and offsets_ok,
+            f"chunks={len(parts)} offsets={[round(chunk.offset, 2) for chunk in parts]}",
+        )
+    finally:
+        for created in temporary:
+            created.unlink(missing_ok=True)
+
+    re_timed, part_duration = transcriber._segments_from_cloud_payload(
+        {"segments": [{"start": 1.0, "end": 2.5, "text": "hello"}], "duration": 2.5},
+        offset=600.0,
+    )
+    check(
+        "transcriber: cloud segments are re-timed onto the lecture timeline",
+        len(re_timed) == 1
+        and re_timed[0].start == 601.0
+        and re_timed[0].end == 602.5
+        and part_duration == 2.5,
+        f"{[(segment.start, segment.end) for segment in re_timed]}",
+    )
+
+    hinted, hinted_duration = transcriber._segments_from_cloud_payload(
+        {"text": "plain json, no timing"}, offset=120.0, duration_hint=60.0
+    )
+    check(
+        "transcriber: a provider without timestamps still yields a timed segment",
+        len(hinted) == 1
+        and hinted[0].start == 120.0
+        and hinted[0].end == 180.0
+        and hinted_duration == 60.0,
+        f"{[(segment.start, segment.end) for segment in hinted]} duration={hinted_duration}",
+    )
+
+    chat_only = transcriber._cloud_status_error(
+        httpx.Response(404, text='{"error":"not found"}'),
+        "https://gateway.example/v1/audio/transcriptions",
+        "https://gateway.example/v1",
+    )
+    check(
+        "transcriber: a 404 names the speech service problem, not raw provider JSON",
+        "speech service" in str(chat_only) and "This computer" in str(chat_only),
+        str(chat_only)[:120],
+    )
+
+    # ---- Vercel AI Gateway: its own transcription protocol ------------------ #
+    # The gateway is OpenAI-compatible for chat only; its audio route is a 404.
+    # These checks lock in the dedicated endpoint/header/payload path.
+    gateway_url = "https://ai-gateway.vercel.sh/v1"
+    gateway_segments, gateway_duration = transcriber._segments_from_gateway_payload(
+        {
+            "text": "full text",
+            "language": "th",
+            "durationInSeconds": 12.5,
+            "segments": [
+                {"text": "one", "startSecond": 0.0, "endSecond": 2.0},
+                {"text": "two", "startSecond": 2.0, "endSecond": 4.5},
+            ],
+        },
+        offset=600.0,
+    )
+    check(
+        "transcriber: gateway segments use startSecond/endSecond and the lecture timeline",
+        transcriber._is_vercel_gateway(gateway_url)
+        and not transcriber._is_vercel_gateway("https://api.openai.com/v1")
+        and transcriber._vercel_gateway_endpoint(gateway_url)
+        == "https://ai-gateway.vercel.sh/v4/ai/transcription-model"
+        and gateway_duration == 12.5
+        and [(s.start, s.end) for s in gateway_segments] == [(600.0, 602.0), (602.0, 604.5)],
+        f"duration={gateway_duration} segments={[(s.start, s.end) for s in gateway_segments]}",
+    )
+
+    gateway_text, gateway_text_duration = transcriber._segments_from_gateway_payload(
+        {"text": "no timing", "durationInSeconds": 0}, duration_hint=30.0
+    )
+    check(
+        "transcriber: gateway text-only payload falls back to the chunk duration",
+        len(gateway_text) == 1
+        and gateway_text[0].start == 0.0
+        and gateway_text[0].end == 30.0
+        and gateway_text_duration == 30.0,
+        f"segments={[(s.start, s.end) for s in gateway_text]}",
+    )
+
+    gateway_error = transcriber._cloud_status_error(
+        httpx.Response(400, text='{"error":{"message":"bad model"}}'),
+        "https://ai-gateway.vercel.sh/v4/ai/transcription-model",
+        gateway_url,
+        gateway=True,
+    )
+    check(
+        "transcriber: a gateway 400 points at the model/account, not at OpenAI routes",
+        "AI Gateway" in str(gateway_error) and "transcription model" in str(gateway_error),
+        str(gateway_error)[:120],
+    )
     # ---- accel: the CUDA probe must be honest in BOTH directions ----------- #
     # Too permissive = the original bug (claiming a CUDA runtime that is not
     # loadable, then 500ing at the first inference). Too strict = the product's
@@ -1277,6 +1491,947 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         f"calls={len(MockLLMHandler.calls) - mock_calls_before}",
     )
 
+    # ---- Qur'an corpus + Arabic recitation merge -------------------------- #
+    check(
+        "quran: bundled corpus has 6236 verses / 114 surahs",
+        quran.corpus_size() == 6236,
+        f"verses={quran.corpus_size()}",
+    )
+    match = quran.match_text("قل هو الله احد")
+    check(
+        "quran: fuzzy match recovers 112:1 without diacritics",
+        match is not None and match.reference == "112:1",
+        match.reference if match else "no match",
+    )
+    check(
+        "quran: ordinary Thai/Arabic commentary is not forced to a verse",
+        quran.match_text("هذا حديث عادي عن الصبر") is None,
+    )
+
+    wave_path = work / "recitation.wav"
+    with wave.open(str(wave_path), "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(16_000)
+        writer.writeframes(b"\x00\x00" * 32_000)
+
+    originals = [
+        transcriber.Segment(
+            id=0, start=0.0, end=2.0, text="ประโยคเดิม", language="th"
+        )
+    ]
+
+    async def fake_arabic(_path: Path) -> transcriber.TranscriptionResult:
+        return transcriber.TranscriptionResult(
+            segments=[
+                transcriber.Segment(
+                    id=0, start=0.0, end=1.6, text="بسم الله الرحمن الرحيم", language="ar"
+                )
+            ],
+            duration=1.6,
+            language="ar",
+            language_probability=1.0,
+            device="cloud",
+            compute_type="cloud",
+            model="mock",
+            vram_unloaded=False,
+        )
+
+    async def fake_thai(_path: Path) -> transcriber.TranscriptionResult:
+        return transcriber.TranscriptionResult(
+            segments=[
+                transcriber.Segment(id=0, start=0.0, end=1.6, text="ภาษาไทย", language="th")
+            ],
+            duration=1.6,
+            language="th",
+            language_probability=1.0,
+            device="cloud",
+            compute_type="cloud",
+            model="mock",
+            vram_unloaded=False,
+        )
+
+    spans = [
+        {
+            "start": 0.2,
+            "end": 1.8,
+            "kind": "quran",
+            "reference": "1:1",
+            "confidence": 0.9,
+        }
+    ]
+    merged = asyncio.run(
+        recitation.recover_arabic(
+            wav_path=wave_path,
+            segments=originals,
+            spans=spans,
+            transcribe_span=fake_arabic,
+        )
+    )
+    check(
+        "recitation: Arabic span becomes an Arabic-only, corpus-verified segment",
+        len(merged) == 1
+        and merged[0].language == "ar"
+        and merged[0].source == "quran"
+        and merged[0].reference == "1:1"
+        and bool(merged[0].original_text)
+        and quran.normalize_arabic(merged[0].text) == "بسم الله الرحمن الرحيم",
+        f"{merged[0].source if merged else 'empty'} {merged[0].reference if merged else ''}",
+    )
+    kept = asyncio.run(
+        recitation.recover_arabic(
+            wav_path=wave_path,
+            segments=originals,
+            spans=spans,
+            transcribe_span=fake_thai,
+        )
+    )
+    check(
+        "recitation: a Thai second pass is rejected; original Thai is kept",
+        len(kept) == 1 and kept[0].text == "ประโยคเดิม" and kept[0].language == "th",
+    )
+
+    # ====================================================================== #
+    # Decision tier (docs/DECISION_MODELS_PLAN.md, Phase 5)
+    # ====================================================================== #
+    run_decision_checks(work, source)
+
+
+# --------------------------------------------------------------------------- #
+# Decision tier - adapters, sanitize table, gated verification, recitation,
+# sentence grouping and the deferred-unload contract.
+# --------------------------------------------------------------------------- #
+def run_decision_checks(work: Path, source: Path) -> None:
+    provider = decision.DecisionProviderConfig(
+        base_url="http://127.0.0.1:11434/v1",
+        api_key=None,
+        model="mock-decision",
+        timeout=5.0,
+        endpoint_style="ollama",
+    )
+
+    # ---- A. adapters, parsing and provider precedence ---------------------- #
+    check(
+        "decision: adapter paths normalise the root and pick /v1/systemone vs /v1/decisions",
+        decision.decision_endpoint("http://localhost:11434/v1", "auto")
+        == "http://localhost:11434/v1/systemone"
+        and decision.decision_endpoint("https://api.perplexity.ai/v1", "auto")
+        == "https://api.perplexity.ai/v1/decisions"
+        and decision.decision_endpoint("https://openrouter.ai/api/v1", "auto")
+        == "https://openrouter.ai/api/v1/systemone"
+        and decision.decision_endpoint(
+            "https://api.perplexity.ai/v1", "ollama"
+        )
+        == "https://api.perplexity.ai/v1/systemone",
+        decision.decision_endpoint("http://localhost:11434/v1", "auto"),
+    )
+    unknown_style: Exception | None = None
+    try:
+        decision.resolve_endpoint_style("bogus", "https://example.test/v1")
+    except Exception as exc:  # noqa: BLE001 - asserting the type
+        unknown_style = exc
+    check(
+        "decision: an unknown endpoint style is rejected, not guessed",
+        isinstance(unknown_style, decision.DecisionError),
+        type(unknown_style).__name__ if unknown_style else "no exception",
+    )
+
+    captured: dict[str, object] = {}
+
+    def _reply(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "model": "mock-decision",
+                "answers": {
+                    "kind": {
+                        "type": "choice",
+                        "choice": "quran",
+                        "probabilities": {"quran": 0.82, "none": 0.18},
+                    },
+                    "needs_fix": {"type": "noul", "noul": True, "confidence": 0.91},
+                    "fit": {"type": "score", "score": 0.72},
+                },
+            },
+        )
+
+    questions = {
+        "kind": decision.Question(type="choice", instructions="Classify.", criteria="c"),
+        "needs_fix": decision.Question(type="noul", instructions="Fix?"),
+        "fit": decision.Question(type="score", instructions="Score."),
+    }
+    transport = httpx.MockTransport(_reply)
+    answers = asyncio.run(
+        decision.decide(provider, {"segments": [1, 2]}, questions, transport=transport)
+    )
+    sent = captured.get("payload") or {}
+    check(
+        "decision.decide: one POST with model/state/questions and parsed typed answers",
+        captured.get("url") == "http://127.0.0.1:11434/v1/systemone"
+        and sent.get("model") == "mock-decision"
+        and sent.get("state") == {"segments": [1, 2]}
+        and sent.get("questions", {}).get("kind", {}).get("type") == "choice"
+        and answers["kind"].value == "quran"
+        and abs(answers["kind"].confidence - 0.82) < 1e-9
+        and answers["needs_fix"].value is True
+        and answers["needs_fix"].confidence == 0.91
+        and abs(answers["fit"].value - 0.72) < 1e-9,
+        json.dumps(sent, ensure_ascii=False)[:140],
+    )
+
+    malformed_cases: list[tuple[str, httpx.Response]] = [
+        ("missing answers object", httpx.Response(200, json={"model": "x"})),
+        ("missing one answer", httpx.Response(200, json={"answers": {}})),
+        (
+            "wrong type",
+            httpx.Response(
+                200,
+                json={
+                    "answers": {
+                        "kind": {"type": "noul", "noul": True},
+                        "needs_fix": {"type": "noul", "noul": True},
+                        "fit": {"type": "score", "score": 0.5},
+                    }
+                },
+            ),
+        ),
+        (
+            "choice label absent from probabilities",
+            httpx.Response(
+                200,
+                json={
+                    "answers": {
+                        "kind": {
+                            "type": "choice",
+                            "choice": "quran",
+                            "probabilities": {"none": 1.0},
+                        },
+                        "needs_fix": {"type": "noul", "noul": False},
+                        "fit": {"type": "score", "score": 0.5},
+                    }
+                },
+            ),
+        ),
+        (
+            "non-boolean noul",
+            httpx.Response(
+                200,
+                json={
+                    "answers": {
+                        "kind": {"type": "choice", "choice": "quran"},
+                        "needs_fix": {"type": "noul", "noul": "maybe"},
+                        "fit": {"type": "score", "score": 0.5},
+                    }
+                },
+            ),
+        ),
+        (
+            "non-numeric score",
+            httpx.Response(
+                200,
+                json={
+                    "answers": {
+                        "kind": {"type": "choice", "choice": "quran"},
+                        "needs_fix": {"type": "noul", "noul": False},
+                        "fit": {"type": "score", "score": "high"},
+                    }
+                },
+            ),
+        ),
+        ("HTTP 500", httpx.Response(500, text="upstream exploded")),
+        ("invalid JSON", httpx.Response(200, text="<html>not json</html>")),
+        ("provider error object", httpx.Response(200, json={"error": "quota"})),
+    ]
+    untyped: list[str] = []
+    for label, response in malformed_cases:
+        try:
+            asyncio.run(
+                decision.decide(
+                    provider,
+                    "state",
+                    questions,
+                    transport=httpx.MockTransport(lambda _r, resp=response: resp),
+                )
+            )
+        except decision.DecisionError:
+            continue
+        except Exception:  # noqa: BLE001 - a wrong exception type is the defect
+            untyped.append(label)
+            continue
+        untyped.append(label)
+    check(
+        "decision.decide: every malformed reply raises DecisionError (never a silent answer)",
+        not untyped,
+        f"not rejected as DecisionError: {untyped}",
+    )
+
+    saved_model = os.environ.get("TAFSEER_DECISION_MODEL")
+    saved_key = os.environ.get("TAFSEER_DECISION_API_KEY")
+    try:
+        os.environ["TAFSEER_DECISION_MODEL"] = ""
+        off = decision.merge_decision_provider(None)
+        os.environ["TAFSEER_DECISION_MODEL"] = "env-model"
+        inherited = decision.merge_decision_provider(None)
+        overridden = decision.merge_decision_provider(
+            decision.DecisionProviderOverride(
+                model="slot-model", api_key="", endpoint_style="perplexity"
+            )
+        )
+        check(
+            "decision: no model means Off; the per-slot model and adapter beat the env default",
+            off is None
+            and inherited is not None
+            and inherited.model == "env-model"
+            and overridden is not None
+            and overridden.model == "slot-model"
+            and overridden.endpoint_style == "perplexity"
+            and overridden.api_key is None,
+            f"off={off} inherited={getattr(inherited, 'model', None)} "
+            f"slot={getattr(overridden, 'model', None)}",
+        )
+    finally:
+        for name, value in (
+            ("TAFSEER_DECISION_MODEL", saved_model),
+            ("TAFSEER_DECISION_API_KEY", saved_key),
+        ):
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    # ---- B. sanitize_clips rules table (one case per row) ------------------ #
+    def sanitize(raw, **overrides):
+        options = dict(
+            duration=100.0,
+            excluded_ranges=[],
+            min_duration=10.0,
+            max_duration=20.0,
+            max_clips=8,
+        )
+        options.update(overrides)
+        return analyzer.sanitize_clips(raw, **options)
+
+    r1 = sanitize([42, "clip", {"start": 0.0, "end": 10.0, "title": "ok"}])
+    check(
+        "sanitize R1: non-object proposals are dropped",
+        len(r1) == 1 and r1[0]["title"] == "ok",
+        json.dumps(r1, ensure_ascii=False)[:120],
+    )
+    r2 = sanitize(
+        [
+            {"start": "abc", "end": 5.0},
+            {"start": float("nan"), "end": 5.0},
+            {"start": 0.0, "end": float("inf")},
+        ]
+    )
+    check(
+        "sanitize R2: missing/non-numeric/NaN/Infinity bounds are dropped",
+        r2 == [],
+        json.dumps(r2, ensure_ascii=False)[:120],
+    )
+    r3 = sanitize(
+        [{"start": 8.0, "end": 130.0}],
+        duration=100.0,
+        max_duration=120.0,
+    )
+    check(
+        "sanitize R3: a duration overrun is clamped into [0, duration]",
+        len(r3) == 1 and r3[0]["start"] == 8.0 and r3[0]["end"] == 100.0,
+        json.dumps(r3, ensure_ascii=False)[:120],
+    )
+    r4 = sanitize([{"start": 0.0, "end": 0.5}])
+    check("sanitize R4: an empty (<1s) window is dropped", r4 == [], str(r4))
+    r5_short = sanitize([{"start": 0.0, "end": 4.9}], min_duration=10.0)
+    r5_edge = sanitize([{"start": 0.0, "end": 5.0}], min_duration=10.0)
+    check(
+        "sanitize R5: below min_duration*0.5 is dropped, the exact edge is kept",
+        r5_short == [] and len(r5_edge) == 1,
+        f"short={r5_short} edge={r5_edge}",
+    )
+    r6_long = sanitize([{"start": 0.0, "end": 31.0}], max_duration=20.0)
+    r6_edge = sanitize([{"start": 0.0, "end": 30.0}], max_duration=20.0)
+    check(
+        "sanitize R6: above max_duration*1.5 is dropped, the exact edge is kept",
+        r6_long == [] and len(r6_edge) == 1,
+        f"long={r6_long} edge={r6_edge}",
+    )
+    r7 = sanitize(
+        [{"start": 1.0, "end": 3.0}],
+        excluded_ranges=[{"start": 2.0, "end": 4.0}],
+    )
+    check("sanitize R7: an excluded-range overlap is dropped", r7 == [], str(r7))
+    r8_rank = sanitize(
+        [
+            {"start": 0.0, "end": 10.0, "score": 0.2, "title": "early"},
+            {"start": 5.0, "end": 15.0, "score": 0.9, "title": "better"},
+        ]
+    )
+    check(
+        "sanitize R8: overlap is resolved by score rank, not 'keep earliest'",
+        len(r8_rank) == 1 and r8_rank[0]["title"] == "better",
+        json.dumps(r8_rank, ensure_ascii=False)[:140],
+    )
+    r8_long = sanitize(
+        [
+            {"start": 0.0, "end": 10.0, "score": 0.5, "title": "short"},
+            {"start": 5.0, "end": 18.0, "score": 0.5, "title": "longer"},
+        ]
+    )
+    r8_tie = sanitize(
+        [
+            {"start": 0.0, "end": 10.0, "score": 0.5, "title": "earlier"},
+            {"start": 2.0, "end": 12.0, "score": 0.5, "title": "later"},
+        ]
+    )
+    check(
+        "sanitize R8 ties: longer wins, then the earlier window",
+        len(r8_long) == 1
+        and r8_long[0]["title"] == "longer"
+        and len(r8_tie) == 1
+        and r8_tie[0]["title"] == "earlier",
+        f"long={r8_long} tie={r8_tie}",
+    )
+    r9 = sanitize(
+        [
+            {"start": 40.0, "end": 50.0},
+            {"start": 0.0, "end": 10.0},
+            {"start": 20.0, "end": 30.0},
+        ],
+        max_clips=2,
+    )
+    check(
+        "sanitize R9: result is start-ordered and capped at max_clips",
+        [clip["start"] for clip in r9] == [0.0, 20.0],
+        json.dumps(r9, ensure_ascii=False)[:140],
+    )
+    check(
+        "sanitize R10: internal ordering keys never leave the service",
+        all(
+            set(clip) == {"start", "end", "title", "rationale"}
+            for clip in r8_rank + r9
+        ),
+    )
+
+    # ---- C/D. corpus gate + batched triage -------------------------------- #
+    real_decide = decision.decide
+    real_verify_arabic = analyzer.verify_arabic
+    decide_calls: list[list[str]] = []
+    proofread_calls: list[str] = []
+
+    async def fake_proofread(*, arabic_text, context_thai, provider):  # noqa: ARG001
+        proofread_calls.append(arabic_text)
+        return {
+            "verified_text": arabic_text,
+            "correction_applied": False,
+            "notes": "ok",
+        }
+
+    def make_triage(flag_index: int | None = None):
+        async def fake_decision(
+            _provider, _state, questions, *, transport=None, cancel_event=None  # noqa: ARG001
+        ):
+            decide_calls.append(list(questions))
+            replies: dict[str, decision.Answer] = {}
+            for name in questions:
+                index = int(name.removeprefix("line_"))
+                flagged = flag_index is not None and index == flag_index
+                replies[name] = decision.Answer(
+                    name=name,
+                    type="noul",
+                    noul=flagged,
+                    probabilities={"true": 0.9 if flagged else 0.05, "false": 0.95},
+                    confidence=0.95,
+                )
+            return replies
+
+        return fake_decision
+
+    not_a_verse = "نص عربي تجريبي للاختبار"
+
+    # C: a corpus-exact line passes with zero model calls.
+    decision.decide = make_triage()  # must never be reached
+    analyzer.verify_arabic = fake_proofread
+    try:
+        gated = asyncio.run(
+            verify_service.verify_lines(
+                [verify_service.VerifyLine(arabic_text=ARABIC_TEXT)],
+                provider=None,
+                decision_provider=provider,
+            )
+        )
+        check(
+            "verify: a corpus-exact line passes with zero decision/proofreader calls",
+            len(gated.lines) == 1
+            and gated.lines[0].source == "quran"
+            and gated.lines[0].reference == "1:1"
+            and gated.corpus_lines == 1
+            and gated.triage_lines == 0
+            and gated.proofread_lines == 0
+            and decide_calls == []
+            and proofread_calls == [],
+            f"source={gated.lines[0].source if gated.lines else 'none'} "
+            f"decide={len(decide_calls)} proof={len(proofread_calls)}",
+        )
+    finally:
+        decision.decide = real_decide
+        analyzer.verify_arabic = real_verify_arabic
+
+    # D1: 40 unflagged lines -> one batched call, zero proofreads.
+    decide_calls.clear()
+    proofread_calls.clear()
+    decision.decide = make_triage()
+    analyzer.verify_arabic = fake_proofread
+    try:
+        skipped = asyncio.run(
+            verify_service.verify_lines(
+                [
+                    verify_service.VerifyLine(
+                        arabic_text=f"{not_a_verse} {index}", cue_id=f"cue-{index}"
+                    )
+                    for index in range(40)
+                ],
+                provider=None,
+                decision_provider=provider,
+            )
+        )
+        check(
+            "verify: 40 lines cost one triage call and no proofread (batched, confidence-gated)",
+            len(skipped.lines) == 40
+            and all(line.source == "triage" for line in skipped.lines)
+            and skipped.triage_lines == 40
+            and skipped.proofread_lines == 0
+            and len(decide_calls) == 1
+            and len(decide_calls[0]) == 40
+            and proofread_calls == []
+            and [line.cue_id for line in skipped.lines] == [f"cue-{index}" for index in range(40)],
+            f"decide={len(decide_calls)}/{len(decide_calls[0]) if decide_calls else 0} "
+            f"proof={len(proofread_calls)}",
+        )
+
+        # D2: exactly the flagged line reaches the proofreader.
+        decide_calls.clear()
+        proofread_calls.clear()
+        decision.decide = make_triage(flag_index=7)
+        flagged = asyncio.run(
+            verify_service.verify_lines(
+                [
+                    verify_service.VerifyLine(arabic_text=f"{not_a_verse} {index}")
+                    for index in range(40)
+                ],
+                provider=analyzer.ProviderConfig(
+                    base_url="http://127.0.0.1:9/v1",
+                    api_key=None,
+                    model="mock-proofreader",
+                    timeout=5.0,
+                ),
+                decision_provider=provider,
+            )
+        )
+        check(
+            "verify: only the triaged line is proofread, the other 39 are skipped",
+            flagged.proofread_lines == 1
+            and flagged.triage_lines == 40
+            and len(proofread_calls) == 1
+            and proofread_calls[0] == f"{not_a_verse} 7"
+            and sum(1 for line in flagged.lines if line.source == "triage") == 39,
+            f"proof={len(proofread_calls)} triage_lines={flagged.triage_lines}",
+        )
+
+        # D3: a decision failure falls back to proofreading every line.
+        decide_calls.clear()
+        proofread_calls.clear()
+
+        async def failing_decision(*_args, **_kwargs):
+            raise decision.DecisionError("provider down")
+
+        decision.decide = failing_decision
+        fallback = asyncio.run(
+            verify_service.verify_lines(
+                [verify_service.VerifyLine(arabic_text=f"{not_a_verse} {i}") for i in range(5)],
+                provider=analyzer.ProviderConfig(
+                    base_url="http://127.0.0.1:9/v1",
+                    api_key=None,
+                    model="mock-proofreader",
+                    timeout=5.0,
+                ),
+                decision_provider=provider,
+            )
+        )
+        check(
+            "verify: a decision failure degrades to today's per-line proofread",
+            fallback.proofread_lines == 5
+            and len(proofread_calls) == 5
+            and all(line.source == "proofread" for line in fallback.lines),
+            f"proof={len(proofread_calls)}",
+        )
+
+        # D4: no decision slot -> today's per-line loop.
+        decide_calls.clear()
+        proofread_calls.clear()
+        legacy = asyncio.run(
+            verify_service.verify_lines(
+                [verify_service.VerifyLine(arabic_text=f"{not_a_verse} {i}") for i in range(5)],
+                provider=analyzer.ProviderConfig(
+                    base_url="http://127.0.0.1:9/v1",
+                    api_key=None,
+                    model="mock-proofreader",
+                    timeout=5.0,
+                ),
+                decision_provider=None,
+            )
+        )
+        check(
+            "verify: no decision model means one proofread per line, as today",
+            legacy.proofread_lines == 5
+            and len(proofread_calls) == 5
+            and decide_calls == [],
+            f"proof={len(proofread_calls)} decide={len(decide_calls)}",
+        )
+
+        # D5: batches split at 64 questions.
+        decide_calls.clear()
+        proofread_calls.clear()
+        decision.decide = make_triage()
+        chunked = asyncio.run(
+            verify_service.verify_lines(
+                [verify_service.VerifyLine(arabic_text=f"{not_a_verse} {i}") for i in range(70)],
+                provider=None,
+                decision_provider=provider,
+            )
+        )
+        check(
+            "verify: a 70-line clip splits into two triage batches of <=64",
+            len(decide_calls) == 2
+            and [len(call) for call in decide_calls] == [64, 6]
+            and chunked.triage_lines == 70
+            and chunked.proofread_lines == 0,
+            f"batches={[len(call) for call in decide_calls]}",
+        )
+
+        # D6: a flagged line without any text model is an honest error.
+        decide_calls.clear()
+        decision.decide = make_triage(flag_index=0)
+        missing_provider: Exception | None = None
+        try:
+            asyncio.run(
+                verify_service.verify_lines(
+                    [verify_service.VerifyLine(arabic_text=not_a_verse)],
+                    provider=None,
+                    decision_provider=provider,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - asserting the type
+            missing_provider = exc
+        check(
+            "verify: a flagged line with no proofreader raises LLMError (502), never 'all good'",
+            isinstance(missing_provider, analyzer.LLMError),
+            type(missing_provider).__name__ if missing_provider else "no exception",
+        )
+    finally:
+        decision.decide = real_decide
+        analyzer.verify_arabic = real_verify_arabic
+
+    # ---- E. recitation decisions + escalator ------------------------------ #
+    recitation_segments = [
+        {"id": 0, "start": 0.0, "end": 2.0, "text": "บิสมิลลาฮิรเราะห์มานิรรอฮีม", "language": "th"},
+        {"id": 1, "start": 2.0, "end": 3.0, "text": "นี่คือคำอธิบายภาษาไทย", "language": "th"},
+        {"id": 2, "start": 3.0, "end": 4.0, "text": "อัลฮัมดุลิลลาฮิร็อบบิลอาละมีน", "language": "th"},
+        {"id": 3, "start": 4.0, "end": 5.0, "text": "ร็อบบิลอาละมีน", "language": "th"},
+    ]
+    real_analyzer_decide = analyzer.decide
+    real_audit = analyzer.audit_arabic
+    audit_calls: list[list[int]] = []
+
+    def make_recitation(labels: dict[int, str], confidence: float = 0.9):
+        async def fake_decision(
+            _provider, _state, questions, *, transport=None, cancel_event=None  # noqa: ARG001
+        ):
+            replies: dict[str, decision.Answer] = {}
+            for name in questions:
+                index = int(name.removeprefix("segment_"))
+                label = labels.get(index, "none")
+                replies[name] = decision.Answer(
+                    name=name,
+                    type="choice",
+                    choice=label,
+                    probabilities={label: confidence, "none": 1.0 - confidence},
+                    confidence=confidence,
+                )
+            return replies
+
+        return fake_decision
+
+    async def escalator(*, segments, provider, cancel_event=None):  # noqa: ARG001
+        audit_calls.append([int(segment["id"]) for segment in segments])
+        return [
+            {
+                "start_id": 0,
+                "end_id": 0,
+                "start": 0.0,
+                "end": 2.0,
+                "kind": "quran",
+                "reference": "1:1",
+                "confidence": 0.8,
+                "reason": "escalated audit",
+            }
+        ]
+
+    analyzer.decide = make_recitation({0: "quran", 2: "quran", 3: "quran"})
+    analyzer.audit_arabic = escalator
+    try:
+        spans = asyncio.run(
+            analyzer.audit_arabic_decision(
+                segments=recitation_segments, provider=provider, escalator=None
+            )
+        )
+        check(
+            "recitation decision: one choice batch becomes contiguous Quran spans",
+            [(span["start"], span["end"], span["kind"]) for span in spans]
+            == [(0.0, 2.0, "quran"), (3.0, 5.0, "quran")],
+            json.dumps(spans, ensure_ascii=False)[:160],
+        )
+
+        # Low confidence escalates instead of guessing.
+        audit_calls.clear()
+        analyzer.decide = make_recitation(
+            {0: "quran", 2: "quran", 3: "quran"}, confidence=0.3
+        )
+        escalated = asyncio.run(
+            analyzer.audit_arabic_decision(
+                segments=recitation_segments, provider=provider, escalator=escalator  # type: ignore[arg-type]
+            )
+        )
+        check(
+            "recitation decision: low-confidence segments escalate to the windowed audit",
+            audit_calls == [[0, 1, 2, 3]]
+            and len(escalated) == 1
+            and escalated[0]["reason"] == "escalated audit",
+            f"escalated={audit_calls}",
+        )
+
+        # A decision transport failure degrades to today's audit.
+        audit_calls.clear()
+
+        async def failing_recitation(*_args, **_kwargs):
+            raise decision.DecisionError("offline")
+
+        analyzer.decide = failing_recitation
+        degraded = asyncio.run(
+            analyzer.audit_arabic_decision(
+                segments=recitation_segments, provider=provider, escalator=escalator  # type: ignore[arg-type]
+            )
+        )
+        check(
+            "recitation decision: a provider failure degrades to today's audit",
+            audit_calls == [[0, 1, 2, 3]]
+            and len(degraded) == 1
+            and degraded[0]["reference"] == "1:1",
+            f"escalated={audit_calls}",
+        )
+
+        no_escalator: Exception | None = None
+        try:
+            asyncio.run(
+                analyzer.audit_arabic_decision(
+                    segments=recitation_segments, provider=provider, escalator=None
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - asserting the type
+            no_escalator = exc
+        check(
+            "recitation decision: without an escalator a total failure surfaces (no silent 'no Quran')",
+            isinstance(no_escalator, analyzer.LLMError),
+            type(no_escalator).__name__ if no_escalator else "no exception",
+        )
+    finally:
+        analyzer.decide = real_analyzer_decide
+        analyzer.audit_arabic = real_audit
+
+    many_segments = [
+        {"id": index, "start": float(index), "end": float(index + 1), "text": "نص"}
+        for index in range(70)
+    ]
+    _, recitation_questions = decision_tasks.recitation_request(many_segments)
+    check(
+        "decision_tasks: recitation requests cap at 64 questions",
+        len(recitation_questions) == 64
+        and "segment_63" in recitation_questions
+        and "segment_64" not in recitation_questions,
+        f"questions={len(recitation_questions)}",
+    )
+
+    # ---- F. sentence boundaries ------------------------------------------- #
+    sentence_segments = [
+        {"id": 0, "start": 0.0, "end": 1.0, "text": "ประโยคแรก"},
+        {"id": 1, "start": 1.5, "end": 2.0, "text": "ต่อเนื่องกัน"},
+        {"id": 2, "start": 3.5, "end": 4.0, "text": "ประโยคใหม่"},
+        {"id": 3, "start": 4.0, "end": 5.0, "text": "จบประโยค."},
+        {"id": 4, "start": 5.0, "end": 6.0, "text": "เริ่มใหม่"},
+    ]
+    starts, ambiguous = analyzer.group_sentences_heuristic(sentence_segments)
+    check(
+        "sentences: timestamp pauses, punctuation and length produce deterministic starts",
+        starts == {0, 2, 4} and ambiguous == [0],
+        f"starts={sorted(starts)} ambiguous={ambiguous}",
+    )
+
+    real_group = analyzer.group_sentences
+    real_analyzer_decide = analyzer.decide
+
+    async def fake_group(*, segments, provider, cancel_event=None):  # noqa: ARG001
+        return {99: 99}
+
+    def make_breaks(answer: bool):
+        async def fake_decision(
+            _provider, _state, questions, *, transport=None, cancel_event=None  # noqa: ARG001
+        ):
+            return {
+                name: decision.Answer(
+                    name=name,
+                    type="noul",
+                    noul=answer,
+                    probabilities={"true": 0.9 if answer else 0.1},
+                    confidence=0.9,
+                )
+                for name in questions
+            }
+
+        return fake_decision
+
+    sentence_provider = analyzer.ProviderConfig(
+        base_url="http://127.0.0.1:9/v1",
+        api_key=None,
+        model="mock-reasoning",
+        timeout=5.0,
+    )
+    analyzer.group_sentences = fake_group
+    try:
+        analyzer.decide = make_breaks(True)
+        accepted = asyncio.run(
+            analyzer.group_sentences_with_decision(
+                segments=sentence_segments,
+                provider=sentence_provider,
+                decision_provider=provider,
+            )
+        )
+        analyzer.decide = make_breaks(False)
+        rejected = asyncio.run(
+            analyzer.group_sentences_with_decision(
+                segments=sentence_segments,
+                provider=sentence_provider,
+                decision_provider=provider,
+            )
+        )
+        check(
+            "sentences: only the ambiguous gap is asked, and the answer moves the boundary",
+            accepted == {0: 0, 1: 1, 2: 2, 3: 2, 4: 3}
+            and rejected == {0: 0, 1: 0, 2: 1, 3: 1, 4: 2},
+            f"accepted={accepted} rejected={rejected}",
+        )
+
+        async def failing_sentences(*_args, **_kwargs):
+            raise decision.DecisionError("offline")
+
+        analyzer.decide = failing_sentences
+        degraded = asyncio.run(
+            analyzer.group_sentences_with_decision(
+                segments=sentence_segments,
+                provider=sentence_provider,
+                decision_provider=provider,
+            )
+        )
+        check(
+            "sentences: a decision failure falls back to the LLM grouping",
+            degraded == {99: 99},
+            str(degraded),
+        )
+
+        degraded_no_llm = asyncio.run(
+            analyzer.group_sentences_with_decision(
+                segments=sentence_segments,
+                provider=None,
+                decision_provider=provider,
+            )
+        )
+        check(
+            "sentences: with no LLM the heuristic map is kept, not an empty result",
+            degraded_no_llm == {0: 0, 1: 0, 2: 1, 3: 1, 4: 2},
+            str(degraded_no_llm),
+        )
+
+        legacy_group = asyncio.run(
+            analyzer.group_sentences_with_decision(
+                segments=sentence_segments,
+                provider=sentence_provider,
+                decision_provider=None,
+            )
+        )
+        check(
+            "sentences: no decision slot is exactly today's single LLM grouping call",
+            legacy_group == {99: 99},
+            str(legacy_group),
+        )
+    finally:
+        analyzer.group_sentences = real_group
+        analyzer.decide = real_analyzer_decide
+
+    # ---- G. deferred unload (Phase 3.0) ----------------------------------- #
+    class _UnloadProbeEngine(transcriber.WhisperTranscriber):
+        """Records load/infer calls without touching faster-whisper."""
+
+        def __init__(self) -> None:
+            super().__init__(model_size="tiny", device="cpu", compute_type="int8")
+            self.events: list[str] = []
+
+        def _ensure_model(self):
+            if self._model is None:
+                self.events.append("load")
+                self._model = object()
+            return self._model
+
+        def _run_transcribe(self, model, audio_path, prompt, language, vad):  # noqa: ARG002
+            self.events.append("infer")
+            item = type("Item", (), {"text": "สวัสดี", "start": 0.0, "end": 1.0})()
+            info = type(
+                "Info",
+                (),
+                {"language": "th", "duration": 1.0, "language_probability": 0.9},
+            )()
+            return iter([item]), info
+
+    try:
+        import main as sidecar_main
+
+        engine = _UnloadProbeEngine()
+        primary = engine.transcribe(source, auto_unload=False, vad_filter=False)
+        span_pass = engine.transcribe(source, auto_unload=False, vad_filter=False)
+        check(
+            "unload: the primary and recitation span passes keep the warm model loaded",
+            engine.loaded is True
+            and engine.events == ["load", "infer", "infer"]
+            and primary.vram_unloaded is False
+            and span_pass.vram_unloaded is False,
+            f"events={engine.events} loaded={engine.loaded}",
+        )
+        released = asyncio.run(sidecar_main._release_local_model(engine))
+        released_again = asyncio.run(sidecar_main._release_local_model(engine))
+        check(
+            "unload: one deferred release at end-of-request frees the model, second is a no-op",
+            released is True
+            and released_again is False
+            and engine.loaded is False
+            and engine.events == ["load", "infer", "infer"],
+            f"released={released} again={released_again} loaded={engine.loaded}",
+        )
+    except ImportError as exc:  # pragma: no cover - fastapi is a sidecar dependency
+        check(
+            "unload: deferred release helper is importable from the sidecar",
+            False,
+            f"{type(exc).__name__}: {exc}",
+        )
+
 
 # --------------------------------------------------------------------------- #
 # Main
@@ -1349,6 +2504,7 @@ def main() -> int:
                 source,
                 thai_font,
                 arabic_font,
+                env["TAFSEER_LLM_BASE_URL"],
                 renders,
                 control_dir,
             )
