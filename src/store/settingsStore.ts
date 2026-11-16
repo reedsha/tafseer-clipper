@@ -60,6 +60,8 @@ export interface WhisperSettings {
 /** The three System One slots from docs/DECISION_MODELS_PLAN.md. */
 export type DecisionSlotId = "analysis" | "clip_scoring" | "verify_triage";
 export type DecisionSlotMode = "local" | "cloud";
+/** Two wire formats exist; `auto` is measured once by Test, then remembered. */
+export type DecisionFormat = "auto" | "systemone" | "decisions";
 
 /**
  * One fast-judgment slot. `enabled: false` (or an empty model) means the step
@@ -70,6 +72,9 @@ export interface DecisionSlotSettings {
   enabled: boolean;
   mode: DecisionSlotMode;
   model: string;
+  format: DecisionFormat;
+  /** Advanced: a full judgment URL that replaces the built-in path. */
+  endpointUrl: string;
 }
 
 export type DecisionSlots = Record<DecisionSlotId, DecisionSlotSettings>;
@@ -323,9 +328,9 @@ const DEFAULT_GLOSSARY: GlossaryEntry[] = [
  * generative paths exactly as they are until the editor picks a model.
  */
 const DEFAULT_DECISION_SLOTS: DecisionSlots = {
-  analysis: { enabled: false, mode: "local", model: "" },
-  clip_scoring: { enabled: false, mode: "cloud", model: "" },
-  verify_triage: { enabled: false, mode: "cloud", model: "" },
+  analysis: { enabled: false, mode: "local", model: "", format: "auto", endpointUrl: "" },
+  clip_scoring: { enabled: false, mode: "cloud", model: "", format: "auto", endpointUrl: "" },
+  verify_triage: { enabled: false, mode: "cloud", model: "", format: "auto", endpointUrl: "" },
 };
 
 const DEFAULT_DATA: SettingsData = {
@@ -528,6 +533,16 @@ function coercePromptPresets(value: unknown, fallback: PromptPreset[]): PromptPr
   return presets;
 }
 
+function asDecisionFormat(value: unknown, fallback: DecisionFormat): DecisionFormat {
+  if (value === "auto" || value === "systemone" || value === "decisions") return value;
+  // Older builds saved a vendor name rather than a wire format.
+  if (value === "ollama" || value === "openrouter" || value === "typesafe" || value === "system-one") {
+    return "systemone";
+  }
+  if (value === "perplexity" || value === "runware") return "decisions";
+  return fallback;
+}
+
 function coerceDecisionSlots(value: unknown): DecisionSlots {
   const slots = structuredClone(DEFAULT_DECISION_SLOTS);
   if (!isRecord(value)) return slots;
@@ -538,6 +553,11 @@ function coerceDecisionSlots(value: unknown): DecisionSlots {
       enabled: asBoolean(raw.enabled, slots[id].enabled),
       mode: raw.mode === "local" || raw.mode === "cloud" ? raw.mode : slots[id].mode,
       model: asString(raw.model, slots[id].model).trim(),
+      format: asDecisionFormat(
+        raw.format ?? raw.endpoint_style,
+        slots[id].format,
+      ),
+      endpointUrl: asString(raw.endpointUrl, slots[id].endpointUrl).trim(),
     };
   }
   return slots;

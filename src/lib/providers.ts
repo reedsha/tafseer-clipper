@@ -80,13 +80,15 @@ export function buildDecisionProviderFor(
   const model = config.model.trim();
   if (!config.enabled || !model) return null;
   const timeout = settings.cloud.timeout || null;
+  const endpoint_url = config.endpointUrl.trim() || null;
   if (config.mode === "local") {
     return {
       mode: "local",
       base_url: settings.ollama.baseUrl || null,
       api_key: "",
       model,
-      endpoint_style: "ollama",
+      endpoint_style: config.format,
+      endpoint_url,
       timeout,
     };
   }
@@ -95,7 +97,8 @@ export function buildDecisionProviderFor(
     base_url: settings.cloud.baseUrl || null,
     api_key: settings.cloud.apiKey || null,
     model,
-    endpoint_style: "auto",
+    endpoint_style: config.format,
+    endpoint_url,
     timeout,
   };
 }

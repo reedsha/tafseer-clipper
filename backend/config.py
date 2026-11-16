@@ -305,7 +305,7 @@ def decision_api_key() -> str | None:
 
 
 def decision_endpoint_style() -> str:
-    """Adapter hint (``auto`` infers from the host and an explicit style wins)."""
+    """Wire format (``systemone``, ``decisions`` or ``auto`` to measure once)."""
     return env_str("TAFSEER_DECISION_ENDPOINT_STYLE", "auto")
 
 

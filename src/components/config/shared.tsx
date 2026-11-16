@@ -537,8 +537,9 @@ const TRANSCRIPTION_MODEL_PATTERN =
   /whisper|transcri|\basr\b|\bspeech\b|\bstt\b|\b(?:tiny|base|small|medium|large)-v\d/i;
 
 /**
- * Mirrors `backend/main.py::_DECISION_MODEL_PATTERN`: the System One family
- * plus the local alias, so the picker and the sidecar cannot disagree.
+ * Mirrors `backend/main.py::_DECISION_MODEL_PATTERN`. This only *ranks* familiar
+ * decision families first — a new family will not match the pattern, so it must
+ * never be used to hide a model from the picker.
  */
 const DECISION_MODEL_PATTERN =
   /jev|decider|tev|laya|kev|nimble|strands-decider|systemone|system-one/i;
@@ -552,12 +553,16 @@ function filterModels(
   filter: ModelCapabilityFilter | undefined,
 ): string[] {
   if (!filter) return names;
+  if (filter === "decision") {
+    // Rank, never hide: model names cannot prove a capability.
+    return [...names].sort(
+      (a, b) =>
+        Number(DECISION_MODEL_PATTERN.test(b)) -
+        Number(DECISION_MODEL_PATTERN.test(a)),
+    );
+  }
   return names.filter((name) =>
-    filter === "transcribe"
-      ? isTranscriptionModel(name)
-      : filter === "decision"
-        ? DECISION_MODEL_PATTERN.test(name)
-        : !isTranscriptionModel(name),
+    filter === "transcribe" ? isTranscriptionModel(name) : !isTranscriptionModel(name),
   );
 }
 
@@ -662,9 +667,7 @@ export function ModelSelect({
 
   const allModels =
     source === "ollama"
-      ? filter === "decision" && health?.providers?.ollama?.decision_models?.length
-        ? health.providers.ollama.decision_models
-        : (health?.providers?.ollama?.models ?? [])
+      ? (health?.providers?.ollama?.models ?? [])
       : source === "whisper-local"
         ? (health?.providers?.whisper_local?.models ?? [])
         : (fetched ?? []);

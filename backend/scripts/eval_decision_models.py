@@ -577,9 +577,10 @@ async def evaluate_candidate(
         result["reason"] = "No decision model configured (pass --models or set TAFSEER_DECISION_MODEL)."
         return result
     try:
-        await decision.probe(provider)
+        fmt, _answer = await decision.probe(provider)
         result["available"] = True
-        result["endpoint"] = provider.endpoint
+        result["format"] = fmt
+        result["endpoint"] = provider.endpoint_for(fmt)
     except decision.DecisionError as exc:
         result["reason"] = str(exc)
         return result
@@ -784,12 +785,12 @@ async def _probe(args: argparse.Namespace) -> int:
             print(f"{model}: no decision provider configured")
             continue
         try:
-            answer = await decision.probe(provider)
+            fmt, answer = await decision.probe(provider)
         except decision.DecisionError as exc:
             print(f"{model}: unavailable — {exc}")
             continue
         print(
-            f"{model}: available at {provider.endpoint} "
+            f"{model}: available at {provider.endpoint_for(fmt)} [{fmt}] "
             f"(answer={answer.noul}, confidence={answer.confidence:.2f})"
         )
     return 0

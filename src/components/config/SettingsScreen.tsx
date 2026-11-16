@@ -32,11 +32,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -80,7 +82,13 @@ import {
   useUpdaterStatus,
 } from "@/lib/updater";
 import { useProjectStore } from "@/store/projectStore";
-import { useSettingsStore, type DecisionSlotId, type DecisionSlotMode, type UiLanguage } from "@/store/settingsStore";
+import {
+  useSettingsStore,
+  type DecisionFormat,
+  type DecisionSlotId,
+  type DecisionSlotMode,
+  type UiLanguage,
+} from "@/store/settingsStore";
 import { useUiStore, type SettingsSection } from "@/store/uiStore";
 import { cn } from "cn";
 
@@ -448,7 +456,8 @@ function JudgmentsSection() {
         base_url: baseUrl,
         api_key: config.mode === "local" ? "" : cloud.apiKey || null,
         probe_model: model,
-        endpoint_style: config.mode === "local" ? "ollama" : "auto",
+        endpoint_style: config.format,
+        endpoint_url: config.endpointUrl.trim() || null,
         timeout: cloud.timeout || null,
       });
       const probe = result.probe;
@@ -462,9 +471,24 @@ function JudgmentsSection() {
       } else {
         const confidence =
           typeof probe.confidence === "number" ? ` (${Math.round(probe.confidence * 100)}%)` : "";
+        const detected =
+          probe.format === "systemone" || probe.format === "decisions"
+            ? probe.format
+            : null;
+        // Auto means "measure once and remember": the next run uses the saved
+        // result instead of probing again.
+        if (detected && config.format === "auto") {
+          updateDecisionSlot(slot, { format: detected });
+        }
+        const via =
+          probe.format === "decisions"
+            ? "Decisions"
+            : probe.format === "systemone"
+              ? "System One"
+              : "";
         setProbe(slot, {
           status: "ok",
-          detail: `Answered correctly${confidence}.`,
+          detail: `Answered correctly${confidence}${via ? ` · ${via}` : ""}.`,
         });
       }
     } catch (error) {
@@ -520,7 +544,7 @@ function JudgmentsSection() {
 
               <Field
                 label="Model"
-                hint="Fast-judgment models only — the list is filtered for you"
+                hint="Fast-judgment models appear first; every model is still listed"
               >
                 <ModelSelect
                   source={config.mode === "local" ? "ollama" : "cloud"}
@@ -530,6 +554,72 @@ function JudgmentsSection() {
                   label={`${slot.title} model`}
                 />
               </Field>
+
+              <Dialog>
+                <DialogTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-0 text-[11px] text-muted-foreground hover:text-foreground"
+                  >
+                    Advanced
+                  </Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Advanced · {slot.title}</DialogTitle>
+                    <DialogDescription>
+                      Leave the format on Detect automatically unless Test could
+                      not find your service. Change the URL only when your
+                      provider uses a different judgment route.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-4">
+                    <Field label="Format" hint="How the app asks this service for judgments.">
+                      <Select
+                        value={config.format}
+                        onValueChange={(format) =>
+                          updateDecisionSlot(slot.id, {
+                            format: format as DecisionFormat,
+                          })
+                        }
+                      >
+                        <SelectTrigger
+                          className="w-full"
+                          aria-label={`${slot.title} format`}
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="auto">Detect automatically</SelectItem>
+                          <SelectItem value="systemone">System One</SelectItem>
+                          <SelectItem value="decisions">OpenAI Decisions</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    <Field
+                      label="Judgment URL"
+                      hint="Optional. Paste the full address only if the automatic one fails."
+                    >
+                      <Input
+                        value={config.endpointUrl}
+                        onChange={(event) =>
+                          updateDecisionSlot(slot.id, {
+                            endpointUrl: event.target.value,
+                          })
+                        }
+                        placeholder="https://service.example/v1/decisions"
+                        aria-label={`${slot.title} judgment URL`}
+                      />
+                    </Field>
+                  </div>
+                  <DialogFooter>
+                    <DialogClose asChild>
+                      <Button variant="outline">Done</Button>
+                    </DialogClose>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
 
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <Button

@@ -164,10 +164,25 @@ class DecisionProvider(BaseModel):
     api_key: str | None = Field(default=None, description="Bearer token; omit for Ollama.")
     model: str | None = Field(default=None, description="Decision model id.")
     endpoint_style: Literal[
-        "auto", "ollama", "openrouter", "perplexity", "runware", "typesafe"
+        "auto",
+        "systemone",
+        "decisions",
+        # Older settings that named a vendor instead of a wire format.
+        "ollama",
+        "openrouter",
+        "perplexity",
+        "runware",
+        "typesafe",
     ] | None = Field(
         default=None,
-        description="Adapter for the decisions path; 'auto' infers from the host.",
+        description=(
+            "Wire format: 'systemone' or 'decisions'. 'auto' measures it once "
+            "and remembers the answer; vendor names are legacy aliases."
+        ),
+    )
+    endpoint_url: str | None = Field(
+        default=None,
+        description="Advanced: full decisions URL that replaces the built-in path.",
     )
     timeout: float | None = Field(default=None, gt=0, description="Seconds.")
 
@@ -178,6 +193,7 @@ class DecisionProvider(BaseModel):
             api_key=self.api_key,
             model=self.model,
             endpoint_style=self.endpoint_style,
+            endpoint_url=self.endpoint_url,
             timeout=self.timeout,
         )
 
@@ -1327,14 +1343,23 @@ class ListModelRequest(BaseModel):
     base_url: str = Field(description="OpenAI-compatible base URL, e.g. https://api.openai.com/v1")
     api_key: str | None = Field(default=None, description="Bearer token; omit for local servers.")
     timeout: float | None = Field(default=None, gt=0, description="Seconds.")
-    #: Additive: keep only decision-capable model ids (System One tier).
+    #: Additive: rank decision-capable ids first; never hide other models.
     filter: Literal["decision"] | None = None
     #: Additive: live System One probe of this model (Settings "Test").
     probe_model: str | None = None
-    #: Additive: adapter hint for the probe (auto infers from the host).
+    #: Additive: wire-format hint (auto measures it once and remembers it).
     endpoint_style: Literal[
-        "auto", "ollama", "openrouter", "perplexity", "runware", "typesafe"
+        "auto",
+        "systemone",
+        "decisions",
+        "ollama",
+        "openrouter",
+        "perplexity",
+        "runware",
+        "typesafe",
     ] | None = None
+    #: Additive: full decisions URL that replaces the built-in path.
+    endpoint_url: str | None = None
 
     @field_validator("base_url")
     @classmethod
@@ -1349,6 +1374,8 @@ class ModelProbeResult(BaseModel):
     model: str
     detail: str = ""
     confidence: float | None = None
+    #: Additive: the wire format that actually answered (Settings remembers it).
+    format: str | None = None
 
 
 class ListModelResponse(BaseModel):
@@ -1422,11 +1449,9 @@ async def list_models(body: ListModelRequest) -> ListModelResponse:
 
     models = await run_in_threadpool(work)
     if body.filter == "decision":
-        decision_models = [name for name in models if _is_decision_model(name)]
-        # A capability table is a heuristic: when it recognises nothing, keep the
-        # full list so the Settings picker still offers a Custom-name escape.
-        if decision_models:
-            models = decision_models
+        # A name heuristic must never hide a model: a new decision family will
+        # not match today's pattern. Rank the familiar ones first, keep them all.
+        models = sorted(models, key=lambda name: (not _is_decision_model(name), name))
 
     probe: ModelProbeResult | None = None
     if body.probe_model:
@@ -1436,6 +1461,7 @@ async def list_models(body: ListModelRequest) -> ListModelResponse:
                 api_key=body.api_key,
                 model=body.probe_model,
                 endpoint_style=body.endpoint_style,
+                endpoint_url=body.endpoint_url,
                 timeout=body.timeout,
             )
         )
@@ -1447,12 +1473,13 @@ async def list_models(body: ListModelRequest) -> ListModelResponse:
             )
         else:
             try:
-                answer = await decision.probe(config)
+                fmt, answer = await decision.probe(config)
                 probe = ModelProbeResult(
                     ok=True,
                     model=body.probe_model,
                     detail=f"Answered with confidence {answer.confidence:.2f}.",
                     confidence=answer.confidence,
+                    format=fmt,
                 )
             except decision.DecisionError as exc:
                 probe = ModelProbeResult(

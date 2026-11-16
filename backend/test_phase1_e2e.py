@@ -1607,33 +1607,38 @@ def run_decision_checks(work: Path, source: Path) -> None:
         api_key=None,
         model="mock-decision",
         timeout=5.0,
-        endpoint_style="ollama",
+        wire_format=decision.SYSTEMONE,
     )
 
-    # ---- A. adapters, parsing and provider precedence ---------------------- #
+    # ---- A. the two wire formats, parsing and provider precedence ---------- #
     check(
-        "decision: adapter paths normalise the root and pick /v1/systemone vs /v1/decisions",
-        decision.decision_endpoint("http://localhost:11434/v1", "auto")
+        "decision: only two wire formats exist and their paths never depend on the host",
+        decision.decision_endpoint("http://localhost:11434/v1", "systemone")
         == "http://localhost:11434/v1/systemone"
-        and decision.decision_endpoint("https://api.perplexity.ai/v1", "auto")
-        == "https://api.perplexity.ai/v1/decisions"
-        and decision.decision_endpoint("https://openrouter.ai/api/v1", "auto")
-        == "https://openrouter.ai/api/v1/systemone"
-        and decision.decision_endpoint(
-            "https://api.perplexity.ai/v1", "ollama"
-        )
-        == "https://api.perplexity.ai/v1/systemone",
-        decision.decision_endpoint("http://localhost:11434/v1", "auto"),
+        and decision.decision_endpoint("https://ai-gateway.vercel.sh/v1", "decisions")
+        == "https://ai-gateway.vercel.sh/v1/decisions"
+        and decision.decision_endpoint("https://openrouter.ai/api/v1", "systemone")
+        == "https://openrouter.ai/api/v1/systemone",
+        decision.decision_endpoint("http://localhost:11434/v1", "systemone"),
     )
     unknown_style: Exception | None = None
+    auto_path: Exception | None = None
     try:
-        decision.resolve_endpoint_style("bogus", "https://example.test/v1")
+        decision.normalize_wire_format("bogus")
     except Exception as exc:  # noqa: BLE001 - asserting the type
         unknown_style = exc
+    try:
+        decision.decision_endpoint("https://ai-gateway.vercel.sh/v1", "auto")
+    except Exception as exc:  # noqa: BLE001 - asserting the type
+        auto_path = exc
     check(
-        "decision: an unknown endpoint style is rejected, not guessed",
-        isinstance(unknown_style, decision.DecisionError),
-        type(unknown_style).__name__ if unknown_style else "no exception",
+        "decision: an unknown format is rejected and 'auto' never silently becomes a URL",
+        isinstance(unknown_style, decision.DecisionError)
+        and isinstance(auto_path, decision.DecisionError)
+        and decision.normalize_wire_format("ollama") == decision.SYSTEMONE
+        and decision.normalize_wire_format("perplexity") == decision.DECISIONS,
+        f"unknown={type(unknown_style).__name__ if unknown_style else 'none'} "
+        f"auto={type(auto_path).__name__ if auto_path else 'none'}",
     )
 
     captured: dict[str, object] = {}
@@ -1871,6 +1876,181 @@ def run_decision_checks(work: Path, source: Path) -> None:
         f"not rejected as DecisionError: {untyped}",
     )
 
+    # ---- A2. the OpenAI Decisions wire shape, detection and URL override ---- #
+    decisions_sent: dict[str, Any] = {}
+    decisions_questions = {
+        "kind": decision.Question(
+            type="choice",
+            instructions="Classify.",
+            criteria={"quran": "Recitation.", "none": "Other."},
+        ),
+        "needs_fix": decision.Question(
+            type="noul",
+            instructions="Fix?",
+            criteria={"true": "Needs a fix.", "false": "Already correct."},
+        ),
+        "fit": decision.Question(
+            type="score",
+            instructions="Score.",
+            criteria=[
+                "Unusable: filler",
+                "Weak: thin",
+                "Good: coherent",
+                "Excellent: ideal",
+            ],
+        ),
+    }
+
+    def _decisions_reply(request: httpx.Request) -> httpx.Response:
+        decisions_sent["url"] = str(request.url)
+        decisions_sent["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "model": "mock-decision",
+                "answers": [
+                    {
+                        "type": "choice",
+                        "name": "kind",
+                        "choice": "quran",
+                        "confidence": 0.82,
+                        "probabilities": [
+                            {"value": "quran", "probability": 0.82},
+                            {"value": "none", "probability": 0.18},
+                        ],
+                    },
+                    {"type": "predicate", "name": "needs_fix", "probability": 0.91},
+                    {
+                        "type": "score",
+                        "name": "fit",
+                        "score": 2.16,
+                        "confidence": 0.6,
+                        "probabilities": [
+                            {"value": 0, "probability": 0.02},
+                            {"value": 1, "probability": 0.1},
+                            {"value": 2, "probability": 0.6},
+                            {"value": 3, "probability": 0.28},
+                        ],
+                    },
+                ],
+            },
+        )
+
+    decisions_provider = decision.DecisionProviderConfig(
+        base_url="https://ai-gateway.vercel.sh/v1",
+        api_key="test-key",
+        model="typesafe-ai/jev-1.13.0",
+        timeout=5.0,
+        wire_format=decision.DECISIONS,
+    )
+    parsed = asyncio.run(
+        decision.decide(
+            decisions_provider,
+            {"segments": [1, 2]},
+            decisions_questions,
+            transport=httpx.MockTransport(_decisions_reply),
+        )
+    )
+    sent = decisions_sent.get("payload") or {}
+    sent_questions = sent.get("questions") or []
+    check(
+        "decision.decide: /v1/decisions sends input, named questions and choices/levels",
+        decisions_sent.get("url") == "https://ai-gateway.vercel.sh/v1/decisions"
+        and sent.get("input")
+        == [
+            {
+                "role": "user",
+                "content": [{"type": "input_json", "data": {"segments": [1, 2]}}],
+            }
+        ]
+        and [item.get("type") for item in sent_questions]
+        == ["choice", "predicate", "score"]
+        and sent_questions[0].get("choices", [{}])[0].get("value") == "quran"
+        and len(sent_questions[2].get("levels", [])) == 4
+        and sent_questions[1].get("instructions", "").startswith("Fix?"),
+        json.dumps(sent, ensure_ascii=False)[:200],
+    )
+    check(
+        "decision.decide: /v1/decisions answers are read in question order",
+        parsed["kind"].value == "quran"
+        and abs(parsed["kind"].confidence - 0.82) < 1e-9
+        and parsed["needs_fix"].value is True
+        and abs(parsed["needs_fix"].probability("true") - 0.91) < 1e-9
+        and abs(parsed["fit"].value - 0.72) < 1e-9
+        and parsed["fit"].legend.get("2") == "Good: coherent",
+        f"kind={parsed['kind'].value} noul={parsed['needs_fix'].value} "
+        f"score={parsed['fit'].value}",
+    )
+
+    refusal_error: Exception | None = None
+    try:
+        asyncio.run(
+            decision.decide(
+                decisions_provider,
+                "state",
+                decisions_questions,
+                transport=httpx.MockTransport(
+                    lambda _r: httpx.Response(
+                        200,
+                        json={
+                            "answers": [
+                                {"type": "refusal", "name": "kind"},
+                                {"type": "predicate", "name": "needs_fix", "probability": 0.9},
+                                {"type": "score", "name": "fit", "score": 1.0},
+                            ]
+                        },
+                    )
+                ),
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - asserting the type
+        refusal_error = exc
+    check(
+        "decision.decide: a refusal raises so the step degrades, never 'all good'",
+        isinstance(refusal_error, decision.DecisionError),
+        type(refusal_error).__name__ if refusal_error else "no exception",
+    )
+
+    decision.reset_format_cache()
+    probed: list[str] = []
+
+    def _detect_reply(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        probed.append(path)
+        if path.endswith(decision.DECISIONS_PATH):
+            return httpx.Response(404, text="not found")
+        return httpx.Response(
+            200,
+            json={"answers": {"reachable": {"type": "noul", "noul": 0.99}}},
+        )
+
+    auto_provider = decision.DecisionProviderConfig(
+        base_url="http://127.0.0.1:11434/v1",
+        api_key=None,
+        model="tev1:4b",
+        timeout=5.0,
+        wire_format=decision.AUTO_FORMAT,
+    )
+    detect_transport = httpx.MockTransport(_detect_reply)
+    fmt, _probe_answer = asyncio.run(
+        decision.probe(auto_provider, transport=detect_transport)
+    )
+    fmt_again = asyncio.run(
+        decision.detect_format(auto_provider, transport=detect_transport)
+    )
+    check(
+        "decision: auto measures the format once, caches it and never guesses by host",
+        fmt == decision.SYSTEMONE
+        and fmt_again == decision.SYSTEMONE
+        # Detection sends one rejected probe to /decisions, one accepted probe
+        # to /systemone, then the Test question itself; a second detection adds
+        # no request because the measured format is cached.
+        and probed
+        == ["/v1/decisions", "/v1/systemone", "/v1/systemone"],
+        f"fmt={fmt} probed={probed}",
+    )
+    decision.reset_format_cache()
+
     saved_model = os.environ.get("TAFSEER_DECISION_MODEL")
     saved_key = os.environ.get("TAFSEER_DECISION_API_KEY")
     try:
@@ -1880,17 +2060,23 @@ def run_decision_checks(work: Path, source: Path) -> None:
         inherited = decision.merge_decision_provider(None)
         overridden = decision.merge_decision_provider(
             decision.DecisionProviderOverride(
-                model="slot-model", api_key="", endpoint_style="perplexity"
+                model="slot-model",
+                api_key="",
+                endpoint_style="decisions",
+                endpoint_url="https://gateway.test/custom/v1/decisions",
             )
         )
         check(
-            "decision: no model means Off; the per-slot model and adapter beat the env default",
+            "decision: no model means Off; the per-slot model and format beat the env default",
             off is None
             and inherited is not None
             and inherited.model == "env-model"
             and overridden is not None
             and overridden.model == "slot-model"
-            and overridden.endpoint_style == "perplexity"
+            and overridden.wire_format == "decisions"
+            and overridden.endpoint_url == "https://gateway.test/custom/v1/decisions"
+            and overridden.endpoint_for("decisions")
+            == "https://gateway.test/custom/v1/decisions"
             and overridden.api_key is None,
             f"off={off} inherited={getattr(inherited, 'model', None)} "
             f"slot={getattr(overridden, 'model', None)}",

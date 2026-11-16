@@ -290,8 +290,10 @@ export interface ListModelsRequest {
   filter?: "decision" | null;
   /** Additive: run one live decision probe of this model (Settings "Test"). */
   probe_model?: string | null;
-  /** Additive: adapter hint for the probe; `auto` infers from the host. */
+  /** Additive: wire format; `auto` measures it once and remembers the answer. */
   endpoint_style?: DecisionEndpointStyle | null;
+  /** Additive: full decisions URL that replaces the built-in path. */
+  endpoint_url?: string | null;
 }
 
 export interface ModelProbeResult {
@@ -299,6 +301,8 @@ export interface ModelProbeResult {
   model: string;
   detail: string;
   confidence?: number | null;
+  /** Additive: the wire format that actually answered. */
+  format?: string | null;
 }
 
 export interface ListModelsResponse {
@@ -415,16 +419,10 @@ export interface ProviderOverride {
   timeout?: number | null;
 }
 
-export type DecisionEndpointStyle =
-  | "auto"
-  | "ollama"
-  | "openrouter"
-  | "perplexity"
-  | "runware"
-  | "typesafe";
+export type DecisionEndpointStyle = "auto" | "systemone" | "decisions";
 
 /**
- * Optional System One slot sent with a request (additive). Absence means the
+ * Optional decision slot sent with a request (additive). Absence means the
  * sidecar keeps today's heuristics + generative model exactly as before.
  */
 export interface DecisionProviderOverride {
@@ -432,7 +430,10 @@ export interface DecisionProviderOverride {
   base_url?: string | null;
   api_key?: string | null;
   model?: string | null;
+  /** Wire format; `auto` is measured once by Test, then remembered. */
   endpoint_style?: DecisionEndpointStyle | null;
+  /** Advanced: full URL that replaces the built-in path for this format. */
+  endpoint_url?: string | null;
   timeout?: number | null;
 }
 
