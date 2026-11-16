@@ -2,7 +2,7 @@
 
 > **Granularity policy.** The base of this plan is **mid-tier**: work packages with scope, touch points, and acceptance criteria — enough to steer and review, not an edit-by-edit script. Selected parts are broken down to **atomic tier** (numbered steps, each with its own verification) where precision pays for itself: contract guards, unproven technology, and small fixes that are cheap to verify independently. Atomic sections are marked **[ATOMIC]**.
 
-> **Status:** approved direction, not yet implemented. Nothing in this plan exists in code until a phase is explicitly started.
+> **Status:** implemented 2026-11 (Phases 0-5). The tier lives in `backend/services/decision.py`, `decision_tasks.py`, `verify.py`, `recitation.py` and `quran.py`; the renderer only sends per-slot settings on its existing requests. Measured baselines, the gate and the per-slot runtime thresholds are in `docs/DECISION_MODELS_PHASE0.md`.
 
 ---
 
