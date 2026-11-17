@@ -187,10 +187,14 @@ deployment. Add them under
 | `WINDOWS_CERT_THUMBPRINT` | ❌ **missing** | certificate-store signing (alternative) |
 | `SIGNTOOL_PATH` | optional | path to `signtool.exe` when it is not on `PATH` |
 
-`REQUIRE_CODE_SIGNING=1` is set by the workflow itself, so **the build fails
+`REQUIRE_CODE_SIGNING` defaults to `1` in the workflow, so **the build fails
 rather than shipping an unsigned installer** while the Authenticode secrets
 are missing. That is intentional — add one of the three credential sets above
-before the first release.
+before the first release. The `production` environment secret
+`REQUIRE_CODE_SIGNING` overrides the default; it is set to `0` for the
+**v0.1.0-beta** pre-release only, which was published **unsigned by explicit
+decision** (SmartScreen warnings accepted). Set it back to `1` — or delete it —
+once Authenticode credentials are configured, to restore fail-closed.
 
 > **Note on the key format.** `TAURI_SIGNING_PRIVATE_KEY` must be the **base64
 > text** of the minisign key (exactly the contents of `.release-secrets/updater.key`).
@@ -301,6 +305,11 @@ clean-VM checklist runs on GPU hardware with real lecture material. Authenticode
 signing is **deliberately out of scope** (`docs/RELEASE_READINESS.md` BL-3), so
 builds stay internal-unsigned; `release.yml` keeps failing closed on tags, which
 means the public-release path stays shut rather than shipping unsigned.
+
+Exception on record (2026-11-17): the **v0.1.0-beta** pre-release was published
+unsigned to GitHub Releases by explicit decision, with the `production`
+environment secret `REQUIRE_CODE_SIGNING=0`. The workflow default remains
+fail-closed; restore `1` before any further release.
 
 
 

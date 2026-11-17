@@ -113,7 +113,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          REQUIRE_CODE_SIGNING: "1"
+          # Defaults to fail-closed ("1"). The `production` environment secret
+          # of the same name overrides it; it is "0" only for the explicitly
+          # unsigned v0.1.0-beta pre-release (docs/RELEASING.md §6).
+          REQUIRE_CODE_SIGNING: ${{ secrets.REQUIRE_CODE_SIGNING || '1' }}
           AZURE_TRUSTED_SIGNING_METADATA: ${{ secrets.AZURE_TRUSTED_SIGNING_METADATA }}
           AZURE_TRUSTED_SIGNING_DLIB: ${{ secrets.AZURE_TRUSTED_SIGNING_DLIB }}
           WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
