@@ -14,6 +14,7 @@ import {
   ArrowLeft,
   Copy,
   Download,
+  ExternalLink,
   FolderOpen,
   Keyboard,
   KeyRound,
@@ -78,6 +79,7 @@ import {
   downloadAndInstall,
   getPendingUpdate,
   getUpdaterStatus,
+  RELEASES_URL,
   relaunchApp,
   useUpdaterStatus,
 } from "@/lib/updater";
@@ -1194,7 +1196,7 @@ function UpdatesSection() {
   return (
     <Section
       title="Release channel"
-      description="Signed release updates for the installed desktop app. Nothing installs automatically."
+      description="Download the latest release for the installed desktop app. Nothing installs automatically."
     >
       <div className="space-y-2 rounded-md border border-border bg-card/40 px-3 py-2.5">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1228,6 +1230,15 @@ function UpdatesSection() {
                 <RefreshCw className="size-3.5" />
               )}
               Check for updates
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-1.5 text-muted-foreground"
+              onClick={() => void openExternalUrl(RELEASES_URL)}
+            >
+              <ExternalLink className="size-3.5" />
+              View all releases
             </Button>
             {updater.phase === "available" ? (
               <Button

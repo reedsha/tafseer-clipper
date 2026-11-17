@@ -2,9 +2,10 @@
  * Typed auto-updater helpers for the Tauri v2 desktop shell.
  *
  * The updater only exists in the packaged app: `@tauri-apps/plugin-updater`
- * talks to the Rust side, which needs a signed release channel. Every import is
- * therefore dynamic and guarded by {@link isTauriRuntime}, so a plain-browser
- * build (Vite preview, Playwright) never loads the plugin and never crashes.
+ * talks to the Rust side, which reads the published release feed. Every import
+ * is therefore dynamic and guarded by {@link isTauriRuntime}, so a
+ * plain-browser build (Vite preview, Playwright) never loads the plugin and
+ * never crashes.
  *
  * Nothing here installs automatically: `checkForUpdates` only reports, and the
  * caller decides when to call {@link downloadAndInstall}. A module-level status
@@ -140,14 +141,17 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Where users can download any published build, signed or not. */
+export const RELEASES_URL = "https://github.com/reedsha/tafseer-clipper/releases";
+
 /**
- * Friendly wording for a check that fails because the release feed is live but
- * empty. Tauri reports the missing `latest.json` as "Could not fetch a valid
- * release JSON from the remote"; the same 404 happens while the first release
- * is still a draft. Neither is a problem with this copy of the app.
+ * Friendly wording when the release feed has no usable manifest yet. Tauri
+ * reports a missing `latest.json` as "Could not fetch a valid release JSON from
+ * the remote"; the same 404 happens while a release is still a draft or before
+ * its assets finish uploading. It is a missing feed, not a signing problem —
+ * the Releases page always has the downloadable builds.
  */
-const NO_RELEASE_MESSAGE =
-  "No signed release has been published for this build yet, so there is nothing to update from.";
+const NO_RELEASE_MESSAGE = `No update feed is available for this build yet. You can still download the latest release from GitHub Releases.`;
 
 function describeCheckError(error: unknown): string {
   const raw = describeError(error);
