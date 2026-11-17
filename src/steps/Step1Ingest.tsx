@@ -191,7 +191,7 @@ export function Step1Ingest() {
     transcriptionMode === "local"
       ? `On this computer${
           sidecar.health ? ` · ${acceleration.transcription === "gpu" ? "GPU" : "CPU"}` : ""
-        } · ${whisper.model || "model not chosen"}`
+        } · ${whisper.model.trim() ? whisper.model : "downloads on first transcription"}`
       : sttConnection.baseUrl && (sttConnection.apiKey || sttConnection.dedicated)
         ? `${sttServiceLabel} · ${cloudStt.model || "model not set"}`
         : `${sttServiceLabel} — not set up`;

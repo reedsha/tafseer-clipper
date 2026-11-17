@@ -269,54 +269,18 @@ const DEFAULT_PRESETS: StylePreset[] = [
   ),
 ];
 
-const DEFAULT_PROMPT_PRESETS: PromptPreset[] = [
-  {
-    id: "prompt-tiktok-hooks",
-    name: "60s Emotional Hooks for TikTok",
-    description: "Hook-first vertical moments for TikTok, Reels and Shorts.",
-    prompt: [
-      "You are a senior Islamic-studies video editor cutting Thai Tafseer lectures into vertical",
-      "TikTok, Reels and Shorts. Pick self-contained, emotionally resonant moments: a Quranic",
-      "verse with its Thai explanation, a moving story of the Prophets, or a heartfelt reminder.",
-      "The opening three seconds must land a hook, the clip must end on a complete thought, and",
-      "Arabic recitation must stay intact from start to finish. Prefer one idea per clip; skip",
-      "admin, audio checks and repeated filler.",
-    ].join(" "),
-    minDuration: 35,
-    maxDuration: 75,
-    maxClips: 8,
-  },
-  {
-    id: "prompt-fiqh-qa",
-    name: "3–5 Min Fiqh Q&A for YouTube",
-    description: "Full question-and-answer rulings for long-form YouTube.",
-    prompt: [
-      "You are a senior Islamic-studies video editor preparing YouTube excerpts from a Thai",
-      "Tafseer lecture. Select practical Fiqh questions and their complete answers: the question",
-      "must be audible, the reasoning complete, and the ruling clear. Keep the full exchange in",
-      "one clip, never split a ruling across clips, and keep any Arabic dalil together with the",
-      "Thai explanation it supports. Skip tangents and repeated examples.",
-    ].join(" "),
-    minDuration: 180,
-    maxDuration: 300,
-    maxClips: 5,
-  },
-  {
-    id: "prompt-prophets",
-    name: "Stories of the Prophets",
-    description: "Complete narrative beats with the lesson intact.",
-    prompt: [
-      "You are a senior Islamic-studies video editor selecting story-driven segments from a Thai",
-      "Tafseer lecture. Find a complete narrative beat from the stories of the Prophets: a scene,",
-      "its turning point, and the lesson drawn from it. Start at the scene's opening, end on the",
-      "lesson, and never cut a Quranic recitation or a hadith mid-sentence. Prefer vivid,",
-      "self-contained moments over commentary about the lecture itself.",
-    ].join(" "),
-    minDuration: 60,
-    maxDuration: 180,
-    maxClips: 6,
-  },
-];
+// No built-in clip-brief presets: the brief is the user's own editorial brief,
+// seeded empty. Users can still save their own presets from the prompt drawer.
+const DEFAULT_PROMPT_PRESETS: PromptPreset[] = [];
+
+// Built-in ids shipped by earlier builds. Drop them from persisted settings so
+// the removed defaults disappear for returning users too, without touching any
+// presets the user actually created.
+const LEGACY_BUILTIN_PROMPT_PRESET_IDS = new Set([
+  "prompt-tiktok-hooks",
+  "prompt-fiqh-qa",
+  "prompt-prophets",
+]);
 
 const DEFAULT_GLOSSARY: GlossaryEntry[] = [
   { id: "glossary-1", find: "อัลเลาะห์", replace: "อัลลอฮฺ", enabled: true },
@@ -354,7 +318,10 @@ const DEFAULT_DATA: SettingsData = {
     arabicModel: "",
   },
   whisper: {
-    model: "large-v3-turbo",
+    // No model is present on a fresh install — the sidecar downloads one on
+    // first transcription using its own backend default. Do not claim a model
+    // the machine does not have yet.
+    model: "",
     computeType: "int8",
     autoUnload: true,
     initialPrompt: DEFAULT_WHISPER_PROMPT,
@@ -517,6 +484,7 @@ function coercePromptPresets(value: unknown, fallback: PromptPreset[]): PromptPr
     const name = asString(item.name, "");
     const prompt = asString(item.prompt, "");
     if (!id || !name || !prompt.trim()) continue;
+    if (LEGACY_BUILTIN_PROMPT_PRESET_IDS.has(id)) continue;
     const minDuration = Math.max(5, asNumber(item.minDuration, 15));
     const maxDuration = Math.max(minDuration + 1, asNumber(item.maxDuration, 90));
     presets.push({
@@ -693,6 +661,16 @@ function pickSettingsData(state: SettingsState): SettingsData {
 
 let healthRequestInFlight = false;
 
+/* A freshly spawned sidecar needs a few seconds to unpack/import before its
+   loopback socket accepts connections. The first /health verdict is given a
+   bounded retry window while the UI stays "checking" (so the startup gate
+   keeps the splash up). Without this, a cold start flashes a false "Engine
+   not responding" that self-heals on the next 15 s poll with no user action. */
+const BOOT_GRACE_MS = 15_000;
+const BOOT_RETRY_MS = 1_500;
+let bootRetryDeadline = 0;
+let bootRetryTimer: number | null = null;
+
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
@@ -842,6 +820,12 @@ export const useSettingsStore = create<SettingsState>()(
       refreshHealth: async (options) => {
         if (healthRequestInFlight) return;
         healthRequestInFlight = true;
+        // Only the very first verdict (no health ever received) gets the boot
+        // grace period. Once we have answered once, an offline verdict is real.
+        const isStartup = get().sidecar.health === null && get().sidecar.checkedAt === null;
+        if (isStartup && bootRetryDeadline === 0) {
+          bootRetryDeadline = Date.now() + BOOT_GRACE_MS;
+        }
         // A background poll (every 15 s) must not repaint the status LED as
         // "checking" — that made the header dot flicker amber once per tick.
         const background = options?.background === true && get().sidecar.health !== null;
@@ -856,6 +840,11 @@ export const useSettingsStore = create<SettingsState>()(
             refresh: options?.force === true,
             ollamaBaseUrl: get().ollama.baseUrl,
           });
+          bootRetryDeadline = 0;
+          if (bootRetryTimer !== null) {
+            window.clearTimeout(bootRetryTimer);
+            bootRetryTimer = null;
+          }
           set({
             sidecar: {
               status: "online",
@@ -865,6 +854,19 @@ export const useSettingsStore = create<SettingsState>()(
             },
           });
         } catch (error) {
+          // Cold start: the sidecar is probably still starting up. Keep the
+          // startup gate closed and retry shortly instead of publishing a
+          // terminal "offline" that would self-heal seconds later anyway.
+          if (isStartup && Date.now() < bootRetryDeadline) {
+            if (bootRetryTimer === null) {
+              bootRetryTimer = window.setTimeout(() => {
+                bootRetryTimer = null;
+                void get().refreshHealth({ force: options?.force === true });
+              }, BOOT_RETRY_MS);
+            }
+            return;
+          }
+          bootRetryDeadline = 0;
           set({
             sidecar: {
               status: "offline",
