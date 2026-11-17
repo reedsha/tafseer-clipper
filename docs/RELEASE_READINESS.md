@@ -44,8 +44,8 @@ does not cover the product/UI audit (`AUDIT_REPORT.md`) or the CI/CD architectur
 | Dependency management | 🟢 GREEN | Dependabot live on 4 ecosystems; its guard now avoids a break — `av 19` was auto-closed and its CI run reproduces the PyAV contract failure (§4) |
 | Supplier / supply chain | 🟢 GREEN | 24/24 actions SHA-pinned; FFmpeg pinned + SHA-256 verified |
 | Local artifact integrity | 🟢 GREEN | `release/0.1.0` **3/3 files match** `SHA256SUMS.txt` |
-| **Updater signing chain** | 🟠 **AMBER** | artifacts signed with the **pre-rotation** key; config now advertises a different one |
-| **Release pipeline end-to-end** | 🟠 **AMBER** | `release.yml` **has never run** (0 runs); deliberately blocked on Authenticode |
+| **Updater signing chain** | 🟢 **GREEN** | artifacts signed with the key matching `plugins.updater.pubkey`; the production `TAURI_SIGNING_PRIVATE_KEY` secret was corrected and the release rebuilt |
+| **Release pipeline end-to-end** | 🟢 **GREEN** | `release.yml` builds and uploads the installer, updater artifacts and GPU pack; Authenticode remains intentionally disabled for betas |
 | **Packaged release gate** | 🔴 **RED** | `docs/RELEASE_CHECKLIST.md` → **61 unchecked, 0 checked** |
 
 ---
