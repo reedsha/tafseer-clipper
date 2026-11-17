@@ -201,6 +201,23 @@ class MockLLMHandler(BaseHTTPRequestHandler):
         with MockLLMHandler.lock:
             MockLLMHandler.calls.append(payload)
 
+        if self.path.rstrip("/").endswith("/systemone"):
+            # System One probe reply: one `noul` answer to the "reachable"
+            # question, so a live probe succeeds deterministically.
+            body = json.dumps(
+                {
+                    "answers": {
+                        "reachable": {"type": "noul", "noul": True, "confidence": 0.99}
+                    }
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         prompt = json.dumps(payload.get("messages", []), ensure_ascii=False)
         if "Uthmani-script Quranic proofreader" in prompt:
             content = {
@@ -286,6 +303,55 @@ class MockLLMHandler(BaseHTTPRequestHandler):
 
 def start_mock_llm() -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(("127.0.0.1", 0), MockLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+class MockOpenRouterHandler(BaseHTTPRequestHandler):
+    """A provider that returns capability-bearing ``/models`` metadata."""
+
+    def log_message(self, *_args):  # silence request logging
+        return
+
+    def do_GET(self):
+        if self.path.rstrip("/").endswith("/models"):
+            body = json.dumps(
+                {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "speech-wave",
+                            "architecture": {
+                                "input_modalities": ["Audio"],
+                                "output_modalities": ["Text"],
+                            },
+                        },
+                        {
+                            "id": "chat-assistant",
+                            "architecture": {
+                                "input_modalities": ["Text"],
+                                "output_modalities": ["Text"],
+                            },
+                        },
+                        {
+                            "id": "transcribe-endpoint",
+                            "supported_endpoints": ["/v1/audio/transcriptions"],
+                        },
+                        {"id": "plain-model"},
+                    ],
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_error(404)
+
+
+def start_mock_openrouter() -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MockOpenRouterHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -524,6 +590,7 @@ def run_http_checks(
     thai_font: Path,
     arabic_font: Path,
     mock_base_url: str,
+    openrouter_base_url: str,
     renders: Path,
     control_dir: Path,
 ) -> None:
@@ -653,6 +720,84 @@ def run_http_checks(
             "POST /list-models: empty base_url is rejected",
             response.status_code == 422,
             f"status={response.status_code}",
+        )
+
+        # ---- 1c. additive capability metadata (AGENTS.md §3) ---------------- #
+        # The OpenAI-compatible mock sends a bare `{data:[{id}]}` payload, so
+        # every model must classify as "unknown" -- never guessed from a name.
+        bare_details = listed.get("models_detail", [])
+        check(
+            "POST /list-models: bare provider payload classifies every model as unknown",
+            [detail.get("kind") for detail in bare_details] == ["unknown", "unknown"]
+            and [detail.get("id") for detail in bare_details] == ["mock-large", "mock-tiny"],
+            f"models_detail={bare_details}",
+        )
+        # `filter="decision"` ranks familiar families first but never hides any
+        # model; the full id set and `models` list shape must stay unchanged.
+        filtered = client.post(
+            "/list-models", json={"base_url": mock_base_url, "filter": "decision"}
+        )
+        filtered_payload = filtered.json() if filtered.status_code == 200 else {}
+        check(
+            "POST /list-models: filter=decision ranks but returns every model",
+            filtered.status_code == 200
+            and sorted(filtered_payload.get("models", [])) == ["mock-large", "mock-tiny"]
+            and all(isinstance(name, str) for name in filtered_payload.get("models", [])),
+            f"status={filtered.status_code} models={filtered_payload.get('models')}",
+        )
+        # A successful System One probe must still return `probe.ok` true with the
+        # expected model -- the probe feature itself is unchanged.
+        probed = client.post(
+            "/list-models",
+            json={
+                "base_url": mock_base_url,
+                "probe_model": "mock-large",
+                "endpoint_style": "systemone",
+            },
+        )
+        probed_payload = probed.json() if probed.status_code == 200 else {}
+        check(
+            "POST /list-models: a successful probe returns probe.ok with the model",
+            probed.status_code == 200
+            and probed_payload.get("probe", {}).get("ok") is True
+            and probed_payload.get("probe", {}).get("model") == "mock-large",
+            f"status={probed.status_code} probe={probed_payload.get('probe')}",
+        )
+        # Additive /health: providers.ollama.models_detail is additive (empty when
+        # no Ollama). The removed `verified_models` field must no longer appear.
+        health_recheck = client.get("/health").json()
+        ollama_status = (health_recheck.get("providers") or {}).get("ollama") or {}
+        check(
+            "GET /health: additive ollama models_detail, no verified_models",
+            isinstance(ollama_status.get("models_detail"), list)
+            and all(
+                isinstance(d, dict) and "kind" in d and "id" in d
+                for d in ollama_status.get("models_detail", [])
+            )
+            and "verified_models" not in health_recheck,
+            f"ollama_detail={ollama_status.get('models_detail')}",
+        )
+        # A provider that sends capability metadata (OpenRouter-style) proves
+        # `kind` from `architecture`/`supported_endpoints`; a bare entry stays unknown.
+        openrouter = client.post(
+            "/list-models", json={"base_url": openrouter_base_url}
+        )
+        or_payload = openrouter.json() if openrouter.status_code == 200 else {}
+        or_by_id = {d.get("id"): d for d in or_payload.get("models_detail", [])}
+        check(
+            "POST /list-models: OpenRouter metadata classifies speech/text/unknown",
+            openrouter.status_code == 200
+            and or_by_id.get("speech-wave", {}).get("kind") == "speech"
+            and or_by_id.get("transcribe-endpoint", {}).get("kind") == "speech"
+            and or_by_id.get("chat-assistant", {}).get("kind") == "text"
+            and or_by_id.get("plain-model", {}).get("kind") == "unknown"
+            and or_payload.get("models") == [
+                "chat-assistant",
+                "plain-model",
+                "speech-wave",
+                "transcribe-endpoint",
+            ],
+            f"status={openrouter.status_code} models_detail={or_payload.get('models_detail')}",
         )
 
         # ---- 2. /fonts/import ---------------------------------------------- #
@@ -1728,6 +1873,10 @@ def run_decision_checks(work: Path, source: Path) -> None:
         f"level={answers['fit'].level}",
     )
 
+    # A low, well-formed noul probability reads false and keeps its confidence;
+    # a well-formed score level scales. (The old "score clamps"/1.0-default
+    # behavior was a defect: malformed calibration must degrade, never mint a
+    # confident verdict.)
     low_transport = httpx.MockTransport(
         lambda _r: httpx.Response(
             200,
@@ -1736,7 +1885,7 @@ def run_decision_checks(work: Path, source: Path) -> None:
                     "kind": {"type": "choice", "choice": "none",
                              "probabilities": {"quran": 0.1, "none": 0.9}},
                     "needs_fix": {"type": "noul", "noul": 0.2},
-                    "fit": {"type": "score", "score": 9.0},
+                    "fit": {"type": "score", "score": 0.75},
                 }
             },
         )
@@ -1745,13 +1894,104 @@ def run_decision_checks(work: Path, source: Path) -> None:
         decision.decide(provider, "state", questions, transport=low_transport)
     )
     check(
-        "decision.decide: a low noul probability reads false and the score clamps",
+        "decision.decide: a low noul probability reads false with its confidence",
         low["needs_fix"].value is False
         and abs(low["needs_fix"].confidence - 0.8) < 1e-9
-        and low["fit"].level == 9.0
-        and low["fit"].value == 1.0,
+        and low["fit"].level == 0.75
+        and abs(low["fit"].value - 0.25) < 1e-9,
         f"noul={low['needs_fix'].value} conf={low['needs_fix'].confidence} "
         f"score={low['fit'].value}",
+    )
+
+    # Grossly out-of-range calibration must DEGRADE (raise DecisionError): a
+    # noul=-5, confidence=99 or score level=9.0 must never become a confident
+    # verdict (AGENTS.md §3 "Degradation is mandatory").
+    out_of_range_cases: list[tuple[str, httpx.Response]] = [
+        (
+            "out-of-range noul",
+            httpx.Response(
+                200,
+                json={
+                    "answers": {
+                        "kind": {"type": "choice", "choice": "quran"},
+                        "needs_fix": {"type": "noul", "noul": -5},
+                        "fit": {"type": "score", "score": 1.0},
+                    }
+                },
+            ),
+        ),
+        (
+            "out-of-range confidence",
+            httpx.Response(
+                200,
+                json={
+                    "answers": {
+                        "kind": {
+                            "type": "choice",
+                            "choice": "quran",
+                            "confidence": 99,
+                        },
+                        "needs_fix": {"type": "noul", "noul": False},
+                        "fit": {"type": "score", "score": 1.0},
+                    }
+                },
+            ),
+        ),
+        (
+            "out-of-range score level",
+            httpx.Response(
+                200,
+                json={
+                    "answers": {
+                        "kind": {"type": "choice", "choice": "quran"},
+                        "needs_fix": {"type": "noul", "noul": False},
+                        "fit": {"type": "score", "score": 9.0},
+                    }
+                },
+            ),
+        ),
+    ]
+    not_degraded: list[str] = []
+    for label, response in out_of_range_cases:
+        try:
+            asyncio.run(
+                decision.decide(
+                    provider,
+                    "state",
+                    questions,
+                    transport=httpx.MockTransport(lambda _r, resp=response: resp),
+                )
+            )
+        except decision.DecisionError:
+            continue
+        not_degraded.append(label)
+    check(
+        "decision.decide: out-of-range noul/confidence/score degrade via DecisionError",
+        not not_degraded,
+        f"accepted as confident: {not_degraded}",
+    )
+
+    # A bare answer with no calibration must carry confidence 0.0 so callers'
+    # escalation gates kick in — never a defaulted 1.0.
+    bare_transport = httpx.MockTransport(
+        lambda _r: httpx.Response(
+            200,
+            json={
+                "answers": {
+                    "kind": {"type": "choice", "choice": "quran"},
+                    "needs_fix": {"type": "noul", "noul": True},
+                    "fit": {"type": "score", "score": 1.0},
+                }
+            },
+        )
+    )
+    bare = asyncio.run(
+        decision.decide(provider, "state", questions, transport=bare_transport)
+    )
+    check(
+        "decision.decide: a bare answer without calibration carries confidence 0.0",
+        bare["kind"].confidence == 0.0,
+        f"confidence={bare['kind'].confidence}",
     )
 
     bad_questions: list[tuple[str, decision.Question]] = [
@@ -2727,6 +2967,15 @@ def run_decision_checks(work: Path, source: Path) -> None:
 # Main
 # --------------------------------------------------------------------------- #
 def main() -> int:
+    # Default Windows consoles use cp1252 and die printing Thai/Arabic; force
+    # UTF-8 for stdout/stderr before any output. Older Python runtimes may lack
+    # reconfigure, hence the guard.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - older runtimes lack reconfigure
+        pass
+
     ffmpeg, ffprobe = resolve_tools()
 
     if ARTIFACTS.exists():
@@ -2748,6 +2997,8 @@ def main() -> int:
 
     mock_server = start_mock_llm()
     mock_port = int(mock_server.server_address[1])
+    openrouter_server = start_mock_openrouter()
+    openrouter_port = int(openrouter_server.server_address[1])
 
     env = os.environ.copy()
     env.update(
@@ -2795,12 +3046,14 @@ def main() -> int:
                 thai_font,
                 arabic_font,
                 env["TAFSEER_LLM_BASE_URL"],
+                f"http://127.0.0.1:{openrouter_port}",
                 renders,
                 control_dir,
             )
         guarded("Unit checks", run_unit_checks, source, fonts_dir)
     finally:
         mock_server.shutdown()
+        openrouter_server.shutdown()
 
     failures = [name for name, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 78)

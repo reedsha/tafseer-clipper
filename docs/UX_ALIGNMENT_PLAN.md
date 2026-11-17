@@ -405,6 +405,10 @@ Also update `AGENTS.md` "Current phase" line to mention the UX alignment work.
     gpt-4.1-mini`, `Fastest — gpt-4.1-nano`, `Custom…` (free text stays — codenames are
     unavoidable for unified APIs; placeholder: `Paste the model name from your AI service`).
   - `Check connection` (existing) with copy `Connected — the model answered.`
+  - Model pickers (cloud speech-to-text, text/chat, and the Step 2 Ollama list) filter by real
+    provider metadata, with an **Other models** escape hatch for `unknown` so no model is silently
+    unreachable; the decision picker lists familiar judgment models by name and offers a
+    custom-model input for others.
 - **6.3.3 `[M]`** Ollama card states, driven by `/health`:
   - Detected + models → dropdown of installed models (no free-text ids), fit badge attached.
   - Detected, no models → `Ollama is installed but has no AI models yet` + **[Install a recommended

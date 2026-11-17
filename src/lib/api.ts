@@ -236,6 +236,8 @@ export interface OllamaProviderStatus {
   models: string[];
   /** Decision-capable model ids found on the server (additive). */
   decision_models?: string[];
+  /** Additive: per-model capability metadata for the installed models. */
+  models_detail?: ModelDetail[] | null;
 }
 
 /** Whisper models already downloaded on this machine; absent on older sidecars. */
@@ -305,10 +307,22 @@ export interface ModelProbeResult {
   format?: string | null;
 }
 
+/** Capability classification a sidecar reports for a single model id. */
+export type ModelKind = "speech" | "text" | "unknown";
+
+export interface ModelDetail {
+  id: string;
+  kind: ModelKind;
+  /** Optional note (device/class) that led to the classification. */
+  evidence?: string | null;
+}
+
 export interface ListModelsResponse {
   models: string[];
   /** Additive: present only when the request asked for a live probe. */
   probe?: ModelProbeResult | null;
+  /** Additive: per-model capability metadata from the sidecar. */
+  models_detail?: ModelDetail[] | null;
 }
 
 /**

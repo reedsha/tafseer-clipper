@@ -20,7 +20,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
   SelectContent,
@@ -30,7 +29,7 @@ import {
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
-import { listModels } from "@/lib/api";
+import { listModels, type ModelDetail, type ModelKind } from "@/lib/api";
 import { coerceToRange, NUMERIC_LIMITS } from "@/lib/settingsLimits";
 import type { Resolution } from "@/lib/projectTypes";
 import type { ArabicStyle, StylePreset, ThaiStyle } from "@/store/settingsStore";
@@ -522,7 +521,12 @@ export function updaterStatusText(status: {
  * both reported by `GET /health`). A "Custom…" escape hatch accepts any model
  * name the fetched or scanned list does not know yet.
  */
-const cloudModelCache = new Map<string, string[]>();
+interface CloudCacheEntry {
+  models: string[];
+  details: ModelDetail[] | null;
+}
+
+const cloudModelCache = new Map<string, CloudCacheEntry>();
 
 export type ModelSelectSource = "cloud" | "ollama" | "whisper-local";
 export type ModelCapabilityFilter = "transcribe" | "text" | "decision";
@@ -537,9 +541,10 @@ const TRANSCRIPTION_MODEL_PATTERN =
   /whisper|transcri|\basr\b|\bspeech\b|\bstt\b|\b(?:tiny|base|small|medium|large)-v\d/i;
 
 /**
- * Mirrors `backend/main.py::_DECISION_MODEL_PATTERN`. This only *ranks* familiar
- * decision families first — a new family will not match the pattern, so it must
- * never be used to hide a model from the picker.
+ * Mirrors `backend/main.py::_DECISION_MODEL_PATTERN`. The decision picker
+ * narrows by this name pattern: only familiar decision-family ids are offered,
+ * and non-matching ids are hidden. The "Custom model name…" free-text input is
+ * the escape hatch for models with unfamiliar names.
  */
 const DECISION_MODEL_PATTERN =
   /jev|decider|tev|laya|kev|nimble|strands-decider|systemone|system-one/i;
@@ -554,16 +559,46 @@ function filterModels(
 ): string[] {
   if (!filter) return names;
   if (filter === "decision") {
-    // Rank, never hide: model names cannot prove a capability.
-    return [...names].sort(
-      (a, b) =>
-        Number(DECISION_MODEL_PATTERN.test(b)) -
-        Number(DECISION_MODEL_PATTERN.test(a)),
-    );
+    // Deliberate name-based narrowing: only familiar decision-family names are
+    // offered. A model with an unfamiliar name cannot be proven capable by its
+    // name alone, so it is hidden — the "Custom model name…" input below is the
+    // escape hatch for those cases.
+    return names.filter((name) => DECISION_MODEL_PATTERN.test(name));
   }
   return names.filter((name) =>
     filter === "transcribe" ? isTranscriptionModel(name) : !isTranscriptionModel(name),
   );
+}
+
+/**
+ * Group the fetched model ids by capability for the picker. Transcribe/text
+ * filters classify from the sidecar's `models_detail` metadata when present;
+ * unknown-kind models are never silently dropped and surface in an "Other
+ * models" expandable row. When no metadata at all is available (older sidecar)
+ * we fall back to today's name-based heuristic and hide nothing. Decision
+ * narrows strictly by name (see filterModels) and produces no "Other" group —
+ * non-matching names are hidden, not bucketed.
+ */
+function buildModelGroups(
+  names: string[],
+  filter: ModelCapabilityFilter | undefined,
+  detailById: Map<string, ModelKind>,
+  hasDetailMeta: boolean,
+): { main: string[]; unknown: string[] } {
+  if (!filter) return { main: [...names], unknown: [] };
+  if (filter === "decision") return { main: filterModels(names, "decision"), unknown: [] };
+  if (hasDetailMeta) {
+    const wanted = filter === "transcribe" ? "speech" : "text";
+    const main: string[] = [];
+    const unknown: string[] = [];
+    for (const name of names) {
+      const kind = detailById.get(name);
+      if (kind === wanted) main.push(name);
+      else if (kind === "unknown" || kind === undefined) unknown.push(name);
+    }
+    return { main, unknown };
+  }
+  return { main: filterModels(names, filter), unknown: [] };
 }
 
 export function ModelSelect({
@@ -600,13 +635,14 @@ export function ModelSelect({
   // of the key too.
   const cacheKey = `${baseUrl}\u0000${apiKey}\u0000${filter ?? ""}`;
 
-  const [fetched, setFetched] = useState<string[] | null>(() =>
+  const [fetched, setFetched] = useState<CloudCacheEntry | null>(() =>
     source === "cloud" ? (cloudModelCache.get(cacheKey) ?? null) : null,
   );
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [custom, setCustom] = useState(false);
   const [open, setOpen] = useState(false);
+  const [showOthers, setShowOthers] = useState(false);
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -626,8 +662,12 @@ export function ModelSelect({
       signal,
     )
       .then((result) => {
-        cloudModelCache.set(cacheKey, result.models);
-        setFetched(result.models);
+        const entry: CloudCacheEntry = {
+          models: result.models,
+          details: result.models_detail ?? null,
+        };
+        cloudModelCache.set(cacheKey, entry);
+        setFetched(entry);
       })
       .catch((error: unknown) => {
         if (signal.aborted) return;
@@ -665,21 +705,39 @@ export function ModelSelect({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [source, cloudReady, baseUrl, apiKey, cacheKey]);
 
+  const cloudEntry = source === "cloud" ? fetched : null;
+
   const allModels =
     source === "ollama"
       ? (health?.providers?.ollama?.models ?? [])
       : source === "whisper-local"
         ? (health?.providers?.whisper_local?.models ?? [])
-        : (fetched ?? []);
+        : (cloudEntry?.models ?? []);
 
-  const models = filterModels(allModels, filter);
-  // Keep the current selection visible even when the capability filter hides it.
-  const options =
-    value.trim() !== "" && allModels.includes(value) && !models.includes(value)
-      ? [value, ...models]
-      : models;
+  const detailSource =
+    source === "ollama"
+      ? (health?.providers?.ollama?.models_detail ?? null)
+      : source === "cloud"
+        ? (cloudEntry?.details ?? null)
+        : null;
+  const hasDetailMeta = Array.isArray(detailSource) && detailSource.length > 0;
+  const detailById = new Map<string, ModelKind>();
+  for (const detail of detailSource ?? []) {
+    if (detail && typeof detail.id === "string") detailById.set(detail.id, detail.kind);
+  }
+
+  const groups = buildModelGroups(allModels, filter, detailById, hasDetailMeta);
+  let main = groups.main;
+  let unknown = groups.unknown;
+  // Keep the current selection visible even when the filters hide it.
+  if (value.trim() !== "" && allModels.includes(value) && !main.includes(value)) {
+    main = [value, ...main];
+  }
+
   const search = query.trim().toLowerCase();
-  const matches = search ? options.filter((name) => name.toLowerCase().includes(search)) : options;
+  const mainMatches = search ? main.filter((name) => name.toLowerCase().includes(search)) : main;
+  const otherMatches = search ? unknown.filter((name) => name.toLowerCase().includes(search)) : unknown;
+  const totalVisible = main.length + unknown.length;
   const valueKnown = allModels.includes(value);
   const showCustomInput = custom || (value.trim() !== "" && !valueKnown);
 
@@ -733,7 +791,7 @@ export function ModelSelect({
             Try again
           </Button>
         </div>
-      ) : models.length === 0 ? (
+      ) : totalVisible === 0 ? (
         <div className="space-y-2 rounded-md border border-border bg-card/40 px-3 py-2.5">
           <p className="text-[11px] leading-relaxed text-muted-foreground">
             {source === "whisper-local"
@@ -744,7 +802,7 @@ export function ModelSelect({
                   ? filter === "transcribe"
                     ? "None of these models look like speech-to-text models. Type the exact name below if your provider names them differently."
                     : filter === "decision"
-                      ? "None of these models look like fast-judgment models. Type the exact name below if your service names them differently."
+                      ? "No decision-style models found — type the exact name below."
                       : "All of these models look like speech-to-text models. Type the exact name below if your provider names them differently."
                   : "The service did not report any models."}
           </p>
@@ -790,7 +848,8 @@ export function ModelSelect({
               </PopoverTrigger>
               <PopoverContent
                 align="start"
-                className="w-[var(--radix-popover-trigger-width)] p-0"
+                collisionPadding={12}
+                className="max-h-(--radix-popover-content-available-height) w-[var(--radix-popover-trigger-width)] overflow-hidden p-0"
                 onOpenAutoFocus={(event) => {
                   event.preventDefault();
                   requestAnimationFrame(() => searchRef.current?.focus());
@@ -810,39 +869,103 @@ export function ModelSelect({
                     />
                   </div>
                 </div>
-                <ScrollArea className="max-h-60">
+                {/* A plain scroll container gives a definite cap that actually
+                    scrolls. The shadcn ScrollArea Root only had max-height with
+                    overflow:visible, so its size-full viewport grew to the full
+                    list and the options painted outside the popover with no
+                    way to reach them. */}
+                <div className="max-h-60 overflow-y-auto overscroll-contain">
                   <div className="p-1">
-                    {matches.length === 0 ? (
+                    {mainMatches.length === 0 && unknown.length === 0 ? (
                       <p className="px-2 py-3 text-center text-[11px] text-muted-foreground">
                         {search
                           ? `No models match “${query.trim()}”.`
                           : "No models to choose from."}
                       </p>
                     ) : (
-                      <div role="listbox" aria-label={label}>
-                        {matches.map((model) => (
-                          <button
-                            key={model}
-                            type="button"
-                            role="option"
-                            aria-selected={model === value}
-                            onClick={() => {
-                              setCustom(false);
-                              onChange(model);
-                              setOpen(false);
-                            }}
-                            className={cn(
-                              "flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground",
-                              model === value && "bg-accent/60",
-                            )}
-                          >
-                            <span className="truncate">{model}</span>
-                            {model === value ? (
-                              <CheckIcon className="size-3.5 shrink-0" />
+                      <>
+                        {mainMatches.length > 0 ? (
+                          <div role="listbox" aria-label={label}>
+                            {mainMatches.map((model) => (
+                              <button
+                                key={model}
+                                type="button"
+                                role="option"
+                                aria-selected={model === value}
+                                onClick={() => {
+                                  setCustom(false);
+                                  onChange(model);
+                                  setOpen(false);
+                                }}
+                                className={cn(
+                                  "flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground",
+                                  model === value && "bg-accent/60",
+                                )}
+                              >
+                                <span className="truncate">{model}</span>
+                                {model === value ? (
+                                  <CheckIcon className="size-3.5 shrink-0" />
+                                ) : null}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                        {unknown.length > 0 ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => setShowOthers((current) => !current)}
+                              aria-expanded={showOthers}
+                              aria-label={`Other models (${unknown.length})`}
+                              className="mt-1 flex w-full items-center justify-between gap-2 rounded-sm border-t border-border px-2 py-1.5 text-left text-xs text-muted-foreground outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground"
+                            >
+                              <span>Other models ({unknown.length})</span>
+                              <ChevronDownIcon
+                                className={cn(
+                                  "size-3.5 transition-transform",
+                                  showOthers && "rotate-180",
+                                )}
+                              />
+                            </button>
+                            {showOthers ? (
+                              <div
+                                role="listbox"
+                                aria-label={`Other models for ${label}`}
+                                className="pt-1"
+                              >
+                                {otherMatches.length > 0 ? (
+                                  otherMatches.map((model) => (
+                                    <button
+                                      key={model}
+                                      type="button"
+                                      role="option"
+                                      aria-selected={model === value}
+                                      onClick={() => {
+                                        setCustom(false);
+                                        onChange(model);
+                                        setOpen(false);
+                                      }}
+                                      className={cn(
+                                        "flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground",
+                                        model === value && "bg-accent/60",
+                                      )}
+                                    >
+                                      <span className="truncate">{model}</span>
+                                      {model === value ? (
+                                        <CheckIcon className="size-3.5 shrink-0" />
+                                      ) : null}
+                                    </button>
+                                  ))
+                                ) : (
+                                  <p className="px-2 py-1.5 text-center text-[11px] text-muted-foreground">
+                                    No other models match “{query.trim()}”.
+                                  </p>
+                                )}
+                              </div>
                             ) : null}
-                          </button>
-                        ))}
-                      </div>
+                          </>
+                        ) : null}
+                      </>
                     )}
                     <button
                       type="button"
@@ -855,7 +978,7 @@ export function ModelSelect({
                       Custom model name…
                     </button>
                   </div>
-                </ScrollArea>
+                </div>
               </PopoverContent>
             </Popover>
             <Button

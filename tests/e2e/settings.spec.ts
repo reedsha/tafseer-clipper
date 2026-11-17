@@ -413,7 +413,9 @@ test.describe("fast judgments", () => {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          // `unrelated-llm` is a generative-only id: the picker must hide it.
+          // `unrelated-llm` is a generative-only id: the decision picker
+          // filters strictly by the familiar decision-family name pattern, so
+          // this model is deliberately excluded from the list.
           models: ["jev-fast", "nimble-decider", "unrelated-llm"],
           probe: probe
             ? {
@@ -448,6 +450,8 @@ test.describe("fast judgments", () => {
     const listbox = page.getByRole("listbox", { name: "Arabic triage model" });
     await expect(listbox.getByRole("option", { name: "jev-fast" })).toBeVisible();
     await expect(listbox.getByRole("option", { name: "nimble-decider" })).toBeVisible();
+    // The decision picker filters strictly by the familiar decision-family name
+    // pattern, so the generative-only id is deliberately absent.
     await expect(listbox.getByRole("option", { name: "unrelated-llm" })).toHaveCount(0);
     await listbox.getByRole("option", { name: "jev-fast" }).click();
 
@@ -470,7 +474,280 @@ test.describe("fast judgments", () => {
       enabled: true,
       mode: "cloud",
       model: "jev-fast",
+      format: "auto",
+      endpointUrl: "",
     });
+  });
+});
+
+test.describe("model selector overflow", () => {
+  test("a long model list scrolls inside a popover that stays on screen", async ({ page }) => {
+    // A ready cloud connection so the decision picker fetches from /list-models.
+    await page.addInitScript(() => {
+      if (window.location.protocol !== "http:") return;
+      window.localStorage.setItem(
+        "tafseer.settings.v1",
+        JSON.stringify({
+          state: {
+            analysisMode: "cloud",
+            cloud: {
+              baseUrl: "https://models.example/v1",
+              apiKey: "test-key",
+              model: "",
+              timeout: 120,
+            },
+          },
+          version: 2,
+        }),
+      );
+    });
+
+    const manyModels = Array.from(
+      { length: 120 },
+      // Decision pickers filter by the familiar name pattern, so the fake ids
+      // must match it or the picker renders its "no decision models" state.
+      (_, index) => `jev-model-${String(index).padStart(3, "0")}`,
+    );
+    await page.route("**/list-models", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ models: manyModels }),
+      });
+    });
+
+    await page.goto("/");
+    await openSettingsSection(page, "Fast judgments");
+    await page.getByRole("button", { name: "Arabic triage model", exact: true }).click();
+
+    const popover = page.locator('[data-slot="popover-content"]');
+    const scrollBox = popover.locator('[class~="max-h-60"]');
+    const listbox = page.getByRole("listbox", { name: "Arabic triage model" });
+
+    // Every model is still offered — the picker never truncates the list.
+    await expect(listbox.getByRole("option")).toHaveCount(manyModels.length);
+
+    // The list is capped, scrolls, and the popover clips anything past the cap.
+    // (A ScrollArea root with only max-height has overflow:visible and a
+    // size-full viewport that grows to the whole list — the options then paint
+    // outside the popover with no way to scroll to them.)
+    await expect(scrollBox).toHaveCSS("overflow-y", "auto");
+    await expect(popover).toHaveCSS("overflow", "hidden");
+    const sizes = await scrollBox.evaluate((el) => ({
+      client: el.clientHeight,
+      scroll: el.scrollHeight,
+    }));
+    expect(sizes.client).toBeGreaterThan(0);
+    expect(sizes.client).toBeLessThanOrEqual(240);
+    expect(sizes.scroll).toBeGreaterThan(sizes.client);
+    // Scrolling actually moves the list, so every offered model is reachable.
+    const scrolled = await scrollBox.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+      return el.scrollTop;
+    });
+    expect(scrolled).toBeGreaterThan(0);
+
+    // The whole popover, search field included, fits within the viewport.
+    const viewport = page.viewportSize();
+    const box = await popover.boundingBox();
+    expect(box).not.toBeNull();
+    if (box && viewport) {
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+    }
+  });
+});
+
+test.describe("model-type filtering", () => {
+  /** A ready cloud connection so /list-models is fetched through the sidecar. */
+  const CLOUD_READY = {
+    state: {
+      analysisMode: "cloud",
+      cloud: {
+        baseUrl: "https://models.example/v1",
+        apiKey: "test-key",
+        model: "mock-model",
+        timeout: 120,
+      },
+    },
+    version: 2,
+  };
+
+  async function seedCloud(page: Page) {
+    await page.addInitScript((seed) => {
+      if (window.location.protocol !== "http:") return;
+      window.localStorage.setItem("tafseer.settings.v1", JSON.stringify(seed));
+    }, CLOUD_READY);
+  }
+
+  test("speech-only filtering hides text models and gates unknown ones behind Other models", async ({
+    page,
+  }) => {
+    await seedCloud(page);
+    await page.route("**/list-models", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          models: ["whisper-large", "gpt-chat", "mystery-x"],
+          models_detail: [
+            { id: "whisper-large", kind: "speech" },
+            { id: "gpt-chat", kind: "text" },
+            { id: "mystery-x", kind: "unknown" },
+          ],
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await openStepConfig(page, 1, "Upload");
+    await page
+      .getByRole("group", { name: "Speech-to-text engine" })
+      .getByRole("button", { name: "AI service (cloud)" })
+      .click();
+
+    await page.getByRole("button", { name: "Cloud speech-to-text model", exact: true }).click();
+    const listbox = page.getByRole("listbox", { name: "Cloud speech-to-text model" });
+    await expect(listbox.getByRole("option", { name: "whisper-large" })).toBeVisible();
+    await expect(listbox.getByRole("option", { name: "gpt-chat" })).toHaveCount(0);
+
+    const other = page.getByRole("button", { name: /Other models/ });
+    await expect(other).toBeVisible();
+    await expect(other).toContainText("1");
+    await other.click();
+    await expect(listbox.getByRole("option", { name: "mystery-x" })).toBeVisible();
+  });
+
+  test("text-only filtering with Ollama hides embedding models behind Other models", async ({
+    page,
+  }) => {
+    // The Ollama model list comes from /health, not /list-models. A full
+    // payload (not just the Ollama block) is injected so the startup gate's
+    // first verdict still resolves to "online" and the wizard releases. If the
+    // gate ever rejects injected health, drop the Ollama half of this test and
+    // keep only the cloud text picker with a mocked /list-models.
+    const seed = {
+      state: {
+        analysisMode: "local",
+        ollama: { model: "" },
+        cloud: CLOUD_READY.state.cloud,
+      },
+      version: 2,
+    };
+    await page.addInitScript((value) => {
+      if (window.location.protocol !== "http:") return;
+      window.localStorage.setItem("tafseer.settings.v1", JSON.stringify(value));
+    }, seed);
+    await page.route("**/health*", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "ok",
+          version: "0.1.0-test",
+          cuda_available: false,
+          nvenc_available: false,
+          vram_mb: 0,
+          ffmpeg_available: true,
+          ffmpeg_path: null,
+          ffprobe_available: true,
+          fonts_dir: "",
+          work_dir: "",
+          disk_cache_bytes: 0,
+          whisper: { model: "", loaded: false, device: "cpu", compute_type: "int8" },
+          providers: {
+            ollama: {
+              detected: true,
+              url: "http://127.0.0.1:11434",
+              models: ["chat-model", "embedding-model"],
+              models_detail: [
+                { id: "chat-model", kind: "text" },
+                { id: "embedding-model", kind: "unknown" },
+              ],
+            },
+          },
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await openStepConfig(page, 2, "Find Clips");
+
+    await page.getByRole("button", { name: "Local AI model", exact: true }).click();
+    const listbox = page.getByRole("listbox", { name: "Local AI model" });
+    await expect(listbox.getByRole("option", { name: "chat-model" })).toBeVisible();
+    await expect(listbox.getByRole("option", { name: "embedding-model" })).toHaveCount(0);
+
+    const other = page.getByRole("button", { name: /Other models/ });
+    await expect(other).toBeVisible();
+    await expect(other).toContainText("1");
+    await other.click();
+    await expect(listbox.getByRole("option", { name: "embedding-model" })).toBeVisible();
+  });
+
+  test("decision name filtering keeps familiar families and drops unrelated ids", async ({
+    page,
+  }) => {
+    await seedCloud(page);
+    await page.route("**/list-models", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          models: ["jev-fast", "nimble-decider", "unrelated-llm"],
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await openSettingsSection(page, "Fast judgments");
+
+    await page.getByRole("switch", { name: "Arabic triage fast judgments" }).click();
+    const modelTrigger = page.getByRole("button", { name: "Arabic triage model", exact: true });
+    await modelTrigger.click();
+
+    const listbox = page.getByRole("listbox", { name: "Arabic triage model" });
+    await expect(listbox.getByRole("option", { name: "jev-fast" })).toBeVisible();
+    await expect(listbox.getByRole("option", { name: "nimble-decider" })).toBeVisible();
+    // The generative-only id fails the familiar decision-family name pattern.
+    await expect(listbox.getByRole("option", { name: "unrelated-llm" })).toHaveCount(0);
+    // The escape hatch still lets the user type any custom name: the button
+    // opens a free-text field where an unfamiliar id stays reachable by typing
+    // the exact name (the sanctioned escape, not silent suppression).
+    await page.getByRole("button", { name: /Custom model name/ }).click();
+    const customInput = page.getByLabel("Arabic triage model (custom)");
+    await expect(customInput).toBeVisible();
+    await customInput.fill("unrelated-llm");
+    await expect(
+      page.getByRole("button", { name: "Arabic triage model", exact: true }),
+    ).toContainText("unrelated-llm");
+  });
+
+  test("no-metadata fallback keeps today's speech-filter regex behavior", async ({ page }) => {
+    await seedCloud(page);
+    await page.route("**/list-models", async (route) => {
+      // Bare `models` with no `models_detail`: the old name-regex
+      // classification must still apply — no regression.
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          models: ["whisper-large", "gpt-chat", "mystery-x"],
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await openStepConfig(page, 1, "Upload");
+    await page
+      .getByRole("group", { name: "Speech-to-text engine" })
+      .getByRole("button", { name: "AI service (cloud)" })
+      .click();
+
+    await page.getByRole("button", { name: "Cloud speech-to-text model", exact: true }).click();
+    const listbox = page.getByRole("listbox", { name: "Cloud speech-to-text model" });
+    await expect(listbox.getByRole("option", { name: "whisper-large" })).toBeVisible();
+    await expect(listbox.getByRole("option", { name: "gpt-chat" })).toHaveCount(0);
   });
 });
 

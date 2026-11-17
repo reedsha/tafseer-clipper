@@ -226,6 +226,19 @@ class AccelerationStatus(BaseModel):
     reason: str | None = None
 
 
+class ModelDetail(BaseModel):
+    """One model's capability classification, from provider metadata (additive).
+
+    ``kind`` is proven by provider metadata, never guessed from a bare name
+    (AGENTS.md §3). ``evidence`` is a short human-readable description of what
+    proved the classification, else ``None``.
+    """
+
+    id: str
+    kind: Literal["speech", "text", "unknown"]
+    evidence: str | None = None
+
+
 class OllamaProviderStatus(BaseModel):
     detected: bool = False
     url: str | None = None
@@ -233,6 +246,9 @@ class OllamaProviderStatus(BaseModel):
     #: Additive: installed decision-capable models (System One tier). Empty on
     #: Ollama builds older than 0.35, which have no ``/v1/systemone`` route.
     decision_models: list[str] = Field(default_factory=list)
+    #: Additive: per-model capability classification from ``/api/show`` metadata
+    #: (AGENTS.md §3). Sorted by id, one entry per id in ``models``.
+    models_detail: list[ModelDetail] = Field(default_factory=list)
 
 
 class WhisperLocalStatus(BaseModel):
@@ -1042,6 +1058,17 @@ _DECISION_MODEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+#: Conservative speech/transcription name hints used only as a last-resort
+#: classification, and only when the provider actually emits capability metadata
+#: (a bare name is never trusted; AGENTS.md §3).
+_SPEECH_NAME_PATTERN = re.compile(
+    r"whisper|transcri|asr|\bstt\b|speech", re.IGNORECASE
+)
+
+#: Per-model ``/api/show`` calls inside the Ollama probe; slightly larger than the
+#: daemon scan so a cold first load of a model does not time out.
+OLLAMA_API_SHOW_TIMEOUT_SECONDS = OLLAMA_PROBE_TIMEOUT_SECONDS + 1.0
+
 _ollama_cache: tuple[float, str, OllamaProviderStatus] | None = None
 _ollama_lock = threading.Lock()
 _ollama_version_cache: tuple[float, str, str | None] | None = None
@@ -1103,6 +1130,52 @@ def _probe_ollama_version(root: str, *, force: bool = False) -> str | None:
     return version
 
 
+def _ollama_model_detail(model: str, root: str) -> ModelDetail:
+    """Classify one Ollama model via its native ``/api/show`` metadata.
+
+    Runs inside the cached probe path so repeated ``/health`` calls do not
+    re-fetch. ``chat``/``completion`` capabilities prove text chat; an
+    embedding-only model is not text-chat and is reported ``unknown`` (so it can
+    be hidden); anything unreadable degrades to ``unknown``. Detection must never
+    fail ``/health`` (AGENTS.md §3).
+    """
+    try:
+        # Ollama's documented form is POST /api/show {"model": ...}. Older
+        # servers also accept GET with ?name=/?model=, so fall back to those
+        # before giving up — a failed probe must only degrade to "unknown".
+        response = httpx.post(
+            f"{root}/api/show",
+            json={"model": model},
+            timeout=OLLAMA_API_SHOW_TIMEOUT_SECONDS,
+        )
+        if response.status_code != 200:
+            response = httpx.get(
+                f"{root}/api/show",
+                params={"name": model},
+                timeout=OLLAMA_API_SHOW_TIMEOUT_SECONDS,
+            )
+        if response.status_code != 200:
+            response = httpx.get(
+                f"{root}/api/show",
+                params={"model": model},
+                timeout=OLLAMA_API_SHOW_TIMEOUT_SECONDS,
+            )
+        if response.status_code != 200:
+            return ModelDetail(id=model, kind="unknown", evidence="probe failed")
+        payload = response.json()
+    except Exception:  # noqa: BLE001 - detection must never fail /health
+        return ModelDetail(id=model, kind="unknown", evidence="probe failed")
+    capabilities = payload.get("capabilities") if isinstance(payload, dict) else None
+    if isinstance(capabilities, list):
+        caps = {str(item).lower() for item in capabilities}
+        if "chat" in caps or "completion" in caps:
+            return ModelDetail(id=model, kind="text", evidence="capabilities=chat/completion")
+        if "embedding" in caps:
+            return ModelDetail(id=model, kind="unknown", evidence="capabilities=embedding")
+    # vision-only, missing, or unreadable capabilities -> unknown.
+    return ModelDetail(id=model, kind="unknown")
+
+
 def _probe_ollama(
     base_url: str | None = None, *, force: bool = False
 ) -> OllamaProviderStatus:
@@ -1139,12 +1212,17 @@ def _probe_ollama(
                     name = entry.get("name") if isinstance(entry, dict) else None
                     if isinstance(name, str) and name and _is_chat_capable_model(name):
                         names.append(name)
+            model_names = sorted(set(names))
             status = OllamaProviderStatus(
                 detected=True,
                 url=root,
-                models=sorted(set(names)),
+                models=model_names,
                 decision_models=sorted(
-                    {name for name in names if _is_decision_model(name)}
+                    {name for name in model_names if _is_decision_model(name)}
+                ),
+                models_detail=sorted(
+                    (_ollama_model_detail(name, root) for name in model_names),
+                    key=lambda detail: detail.id,
                 ),
             )
     except Exception:  # noqa: BLE001 - detection must never fail /health
@@ -1382,6 +1460,9 @@ class ListModelResponse(BaseModel):
     models: list[str] = Field(default_factory=list)
     #: Additive: present only when the request asked for a live probe.
     probe: ModelProbeResult | None = None
+    #: Additive: per-model capability classification from the provider; sorted by
+    #: id, one entry per id in ``models`` (AGENTS.md §3).
+    models_detail: list[ModelDetail] = Field(default_factory=list)
 
 
 def _extract_model_ids(payload: Any) -> list[str]:
@@ -1400,6 +1481,91 @@ def _extract_model_ids(payload: Any) -> list[str]:
     return sorted(set(names))
 
 
+def _payload_emits_metadata(payload: Any) -> bool:
+    """True when the provider's reply carries any capability-metadata keys."""
+    keys = ("architecture", "supported_endpoints", "capabilities")
+    if isinstance(payload, dict):
+        if any(key in payload for key in keys):
+            return True
+        entries = payload.get("data")
+        if isinstance(entries, list):
+            for entry in entries:
+                if isinstance(entry, dict) and any(key in entry for key in keys):
+                    return True
+    return False
+
+
+def _classify_model_entry(
+    mid: str, entry: dict, allow_name_hint: bool
+) -> ModelDetail:
+    """Classify one raw ``/models`` entry into a :class:`ModelDetail`."""
+    architecture = entry.get("architecture")
+    if isinstance(architecture, dict):
+        input_modalities = architecture.get("input_modalities")
+        output_modalities = architecture.get("output_modalities")
+        if isinstance(input_modalities, list) and "Audio" in input_modalities:
+            return ModelDetail(id=mid, kind="speech", evidence="input_modalities=Audio")
+        if isinstance(output_modalities, list) and "Text" in output_modalities:
+            audio_only = (
+                isinstance(input_modalities, list)
+                and bool(input_modalities)
+                and set(map(str, input_modalities)) <= {"Audio"}
+            )
+            if not audio_only:
+                return ModelDetail(id=mid, kind="text", evidence="output_modalities=Text")
+
+    endpoints = entry.get("supported_endpoints")
+    if isinstance(endpoints, list):
+        flat = [str(item) for item in endpoints]
+        if any("audio_transcriptions" in item for item in flat):
+            return ModelDetail(
+                id=mid, kind="speech", evidence="supported_endpoints=audio_transcriptions"
+            )
+        if any("chat/completions" in item for item in flat):
+            return ModelDetail(
+                id=mid, kind="text", evidence="supported_endpoints=chat/completions"
+            )
+
+    capabilities = entry.get("capabilities")
+    if isinstance(capabilities, list):
+        caps = {str(item).lower() for item in capabilities}
+        if "chat" in caps or "completion" in caps:
+            return ModelDetail(id=mid, kind="text", evidence="capabilities=chat/completion")
+        if "embedding" in caps:
+            return ModelDetail(id=mid, kind="unknown", evidence="capabilities=embedding")
+
+    # Conservative last-resort speech hint, only when the provider emits
+    # capability metadata at all; a bare name is never trusted (AGENTS.md §3).
+    if allow_name_hint and _SPEECH_NAME_PATTERN.search(mid):
+        return ModelDetail(id=mid, kind="speech", evidence="name_hint=speech")
+
+    return ModelDetail(id=mid, kind="unknown")
+
+
+def _extract_model_details(payload: Any) -> list[ModelDetail]:
+    """Classify raw provider ``/models`` entries into additive capability records.
+
+    One ``ModelDetail`` per id, sorted by id to match ``models``. A provider that
+    sends no capability metadata at all (e.g. a plain OpenAI ``/models``) yields
+    ``kind="unknown"`` for every entry -- never guessed from a bare name
+    (AGENTS.md §3).
+    """
+    entries: Any = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        return []
+    allow_name_hint = _payload_emits_metadata(payload)
+    details: dict[str, ModelDetail] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("id") or entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        key = name.strip()
+        details[key] = _classify_model_entry(key, entry, allow_name_hint)
+    return sorted(details.values(), key=lambda detail: detail.id)
+
+
 @app.post(
     "/list-models",
     response_model=ListModelResponse,
@@ -1414,7 +1580,7 @@ async def list_models(body: ListModelRequest) -> ListModelResponse:
     provider's raw error body.
     """
 
-    def work() -> list[str]:
+    def work() -> tuple[list[str], Any]:
         base_url = body.base_url.strip().rstrip("/")
         headers = {"Authorization": f"Bearer {body.api_key}"} if body.api_key else {}
         try:
@@ -1440,18 +1606,21 @@ async def list_models(body: ListModelRequest) -> ListModelResponse:
                 ),
             )
         try:
-            return _extract_model_ids(response.json())
+            payload = response.json()
         except ValueError as exc:
             raise HTTPException(
                 status_code=502,
                 detail="The AI service returned an unexpected model list format.",
             ) from exc
+        return _extract_model_ids(payload), payload
 
-    models = await run_in_threadpool(work)
+    models, raw_payload = await run_in_threadpool(work)
     if body.filter == "decision":
         # A name heuristic must never hide a model: a new decision family will
         # not match today's pattern. Rank the familiar ones first, keep them all.
         models = sorted(models, key=lambda name: (not _is_decision_model(name), name))
+
+    details = _extract_model_details(raw_payload)
 
     probe: ModelProbeResult | None = None
     if body.probe_model:
@@ -1486,7 +1655,11 @@ async def list_models(body: ListModelRequest) -> ListModelResponse:
                     ok=False, model=body.probe_model, detail=str(exc)
                 )
 
-    return ListModelResponse(models=models, probe=probe)
+    return ListModelResponse(
+        models=models,
+        probe=probe,
+        models_detail=details,
+    )
 
 
 # --------------------------------------------------------------------------- #

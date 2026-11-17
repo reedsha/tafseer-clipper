@@ -129,6 +129,7 @@ export function Step3Subtitles() {
   const caretRef = useRef<{ cueId: string; field: CueField; offset: number } | null>(null);
   const cancelVerifyAllRef = useRef(false);
   const verifyAllRunningRef = useRef(false);
+  const verifyAllAbortRef = useRef<AbortController | null>(null);
   const healedSeedRef = useRef<string | null>(null);
   const seekKeyRef = useRef<string | null>(null);
 
@@ -948,29 +949,35 @@ export function Step3Subtitles() {
     );
     verifyAllRunningRef.current = true;
     cancelVerifyAllRef.current = false;
+    const controller = new AbortController();
+    verifyAllAbortRef.current = controller;
     setVerifyAll({ done: 0, total: targets.length });
     let corrected = 0;
     let failed = 0;
     let checked = 0;
+    let status: "done" | "failed" | "cancelled" = "done";
     // One request per clip keeps the round-trips at 1–3 instead of one per line
     // (docs/DECISION_MODELS_PLAN.md §5); 64 is the sidecar's batch ceiling.
     const BATCH = 64;
 
     try {
       for (let offset = 0; offset < targets.length; offset += BATCH) {
-        if (cancelVerifyAllRef.current) break;
+        if (controller.signal.aborted || cancelVerifyAllRef.current) break;
         const chunk = targets.slice(offset, offset + BATCH);
         setVerifying(chunk[0]?.id ?? null);
         try {
-          const result = await verifyArabicBatch({
-            lines: chunk.map((cue) => ({
-              arabic_text: cue.arabic.trim(),
-              context_thai: cue.thai.replace(/\n/g, " "),
-              cue_id: cue.id,
-            })),
-            provider: buildProviderFor(settings),
-            decision_provider: decisionProvider,
-          });
+          const result = await verifyArabicBatch(
+            {
+              lines: chunk.map((cue) => ({
+                arabic_text: cue.arabic.trim(),
+                context_thai: cue.thai.replace(/\n/g, " "),
+                cue_id: cue.id,
+              })),
+              provider: buildProviderFor(settings),
+              decision_provider: decisionProvider,
+            },
+            { signal: controller.signal },
+          );
           const byCue = new Map(
             result.lines
               .filter((line) => line.cue_id)
@@ -991,6 +998,10 @@ export function Step3Subtitles() {
           }
           checked += chunk.length;
         } catch {
+          if (controller.signal.aborted) {
+            status = "cancelled";
+            break;
+          }
           failed += chunk.length;
         }
         setVerifyAll((current) =>
@@ -999,27 +1010,36 @@ export function Step3Subtitles() {
             : current,
         );
       }
+
+      if (controller.signal.aborted || cancelVerifyAllRef.current) {
+        status = "cancelled";
+      } else if (failed > 0) {
+        status = "failed";
+      }
+    } catch {
+      // An unexpected error (a malformed batch reply, a store write) must not
+      // strand the running activity or the verifying state — report as failed.
+      status = "failed";
     } finally {
       verifyAllRunningRef.current = false;
+      verifyAllAbortRef.current = null;
+      setVerifying(null);
+      setVerifyAll(null);
+      useAiActivityStore.getState().finish(activityId, status);
     }
 
-    setVerifying(null);
-    setVerifyAll(null);
-    if (cancelVerifyAllRef.current) {
-      useAiActivityStore.getState().finish(activityId, "cancelled");
+    if (status === "cancelled") {
       toast("Arabic check stopped", {
         description: `${checked} line${checked === 1 ? "" : "s"} checked.`,
       });
       return;
     }
-    if (failed > 0) {
-      useAiActivityStore.getState().finish(activityId, "failed");
+    if (status === "failed") {
       toast.error(`Checked ${checked} of ${targets.length} lines`, {
         description: `${failed} line${failed === 1 ? "" : "s"} could not be checked.`,
       });
       return;
     }
-    useAiActivityStore.getState().finish(activityId, "done");
     toast.success("Arabic checked", {
       description: `${targets.length} line${targets.length === 1 ? "" : "s"} · ${corrected} corrected.`,
     });
@@ -1029,6 +1049,7 @@ export function Step3Subtitles() {
   useEffect(
     () => () => {
       cancelVerifyAllRef.current = true;
+      verifyAllAbortRef.current?.abort();
     },
     [],
   );

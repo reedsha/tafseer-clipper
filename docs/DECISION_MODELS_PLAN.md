@@ -28,7 +28,7 @@ Every stage degrades gracefully: **with no decision model configured, every endp
 
 ## 2. Decision slots
 
-Each slot is independently configurable in Settings (cloud/local toggle + model picker filtered to decision-capable models).
+Each slot is independently configurable in Settings (cloud/local toggle + a model picker that filters by familiar decision-family **name**; unfamiliar names are not listed but remain reachable via the free-text custom-model input, and the live probe validates on the Settings "Test" button).
 
 | Slot ID | Where used | Question type | Escalates to |
 |---|---|---|---|
@@ -81,7 +81,7 @@ The client is the foundation; its contract is fixed before anything calls it.
 ### 1B. Provider plumbing (mid-tier)
 
 - Additive request field `decision_provider: {mode, base_url, api_key, model, endpoint_style}` on `/extract-and-transcribe`, `/discover-clips`, `/verify-arabic` (optional; absence = legacy behavior).
-- `/health` gains additive `providers.ollama.decision_models` and `decision_endpoint` (Ollama ≥ 0.35 required — detect, never assume). `/list-models` and `ModelSelect` gain `filter="decision"` (capability regex `jev|decider|tev|laya|kev|nimble|strands-decider|…`, backed by a live probe), matching the existing filter pattern in `src/components/config/shared.tsx:536-551`.
+- `/health` gains additive `providers.ollama.decision_models`, `decision_endpoint` (Ollama ≥ 0.35 required — detect, never assume), and `models_detail`. `/list-models` and `ModelSelect` gain `filter="decision"`, which filters the picker by familiar decision-family **name**; unfamiliar ids are not listed but remain reachable via the free-text custom-model input, and the live probe validates on the Settings "Test" button. Hiding is an explicit UI choice, never silent suppression, and never blocks degradation. It matches the existing filter pattern in `src/components/config/shared.tsx:536-551`.
 *Acceptance:* a request carrying `decision_provider` reaches `decide()`; one without behaves byte-for-byte like today; `test_phase1_e2e.py` stays green and grows fallback cases.
 
 ### 1C. Settings tab (mid-tier)

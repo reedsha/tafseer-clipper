@@ -355,8 +355,18 @@ def _as_number(value: Any, *, field_name: str) -> float:
     return number
 
 
+#: Tiny float-noise tolerance for unit-range values. Gross out-of-range values
+#: are rejected so a malformed reply degrades instead of becoming confident.
+_UNIT_EPSILON = 1e-9
+
+
 def _as_unit_float(value: Any, *, field_name: str) -> float:
-    return min(1.0, max(0.0, _as_number(value, field_name=field_name)))
+    number = _as_number(value, field_name=field_name)
+    if number < -_UNIT_EPSILON or number > 1.0 + _UNIT_EPSILON:
+        raise DecisionError(
+            f"Decision answer '{field_name}' is out of range [0, 1]: {number}"
+        )
+    return min(1.0, max(0.0, number))
 
 
 def _probabilities(value: Any) -> dict[str, float]:
@@ -440,22 +450,26 @@ def _parse_answer(name: str, question: Question, entry: Any) -> Answer:
         # The provider returns the probability-weighted level, numbered from 0.
         level = _as_number(entry.get("score"), field_name=f"{name}.score")
         levels = len(question.criteria) if isinstance(question.criteria, list) else 0
-        if levels >= 2 and 0.0 <= level <= levels - 1:
-            score = level / (levels - 1)
-        else:
-            # Already normalised (or no levels to scale against).
-            score = level
-        score = min(1.0, max(0.0, score))
-        implied_confidence = max(probabilities.values(), default=None)
+        if levels < 2:
+            raise DecisionError(
+                f"Score answer '{name}' has no level scale to normalize against."
+            )
+        if level < -_UNIT_EPSILON or level > (levels - 1) + _UNIT_EPSILON:
+            raise DecisionError(
+                f"Score answer '{name}' level {level} is out of range "
+                f"[0, {levels - 1}]."
+            )
+        score = min(1.0, max(0.0, level / (levels - 1)))
+        implied_confidence = None
 
     if "confidence" in entry:
         confidence = _as_unit_float(entry.get("confidence"), field_name=f"{name}.confidence")
-    elif expected == "choice" and probabilities:
-        confidence = probabilities.get(choice, 0.0)
     elif implied_confidence is not None:
         confidence = implied_confidence
     else:
-        confidence = 1.0
+        # Bare answer without calibration: confidence 0.0 so callers' escalation
+        # gates fall back to the generative model (AGENTS.md §3).
+        confidence = 0.0
 
     return Answer(
         name=name,
@@ -534,7 +548,8 @@ def _parse_decisions_answer(name: str, question: Question, entry: Any) -> Answer
             raise DecisionError(
                 f"Choice answer '{name}' returned a label absent from its probabilities."
             )
-        implied_confidence = probabilities.get(choice, 0.0)
+        # Confidence comes only from an explicit "confidence" field; a bare
+        # choice without calibration falls through to confidence 0.0 below.
     elif question.type == "noul":
         probability = _as_unit_float(
             entry.get("probability"), field_name=f"{name}.probability"
@@ -551,12 +566,17 @@ def _parse_decisions_answer(name: str, question: Question, entry: Any) -> Answer
         # Same contract as System One: a probability-weighted level index.
         level = _as_number(entry.get("score"), field_name=f"{name}.score")
         levels = len(question.criteria) if isinstance(question.criteria, list) else 0
-        if levels >= 2 and 0.0 <= level <= levels - 1:
-            score = level / (levels - 1)
-        else:
-            score = level
-        score = min(1.0, max(0.0, score))
-        implied_confidence = max(probabilities.values(), default=0.0)
+        if levels < 2:
+            raise DecisionError(
+                f"Score answer '{name}' has no level scale to normalize against."
+            )
+        if level < -_UNIT_EPSILON or level > (levels - 1) + _UNIT_EPSILON:
+            raise DecisionError(
+                f"Score answer '{name}' level {level} is out of range "
+                f"[0, {levels - 1}]."
+            )
+        score = min(1.0, max(0.0, level / (levels - 1)))
+        implied_confidence = None
 
     if "confidence" in entry:
         confidence = _as_unit_float(
@@ -565,7 +585,9 @@ def _parse_decisions_answer(name: str, question: Question, entry: Any) -> Answer
     elif implied_confidence is not None:
         confidence = implied_confidence
     else:
-        confidence = 1.0
+        # Bare answer without calibration: confidence 0.0 so callers' escalation
+        # gates fall back to the generative model (AGENTS.md §3).
+        confidence = 0.0
 
     return Answer(
         name=name,

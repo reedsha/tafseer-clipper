@@ -435,6 +435,7 @@ function Stage2Config() {
             <ModelSelect
               source="ollama"
               label="Local AI model"
+              filter="text"
               value={ollama.model}
               onChange={(value) => updateOllama({ model: value })}
             />

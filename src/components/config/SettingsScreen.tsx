@@ -544,7 +544,7 @@ function JudgmentsSection() {
 
               <Field
                 label="Model"
-                hint="Fast-judgment models appear first; every model is still listed"
+                hint="Only familiar fast-judgment models are listed. Type the exact name below if yours isn't shown."
               >
                 <ModelSelect
                   source={config.mode === "local" ? "ollama" : "cloud"}
@@ -554,7 +554,6 @@ function JudgmentsSection() {
                   label={`${slot.title} model`}
                 />
               </Field>
-
               <Dialog>
                 <DialogTrigger asChild>
                   <Button
