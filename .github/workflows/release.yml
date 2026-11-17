@@ -152,7 +152,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
         run: |
-          gh api --method POST "repos/${{ github.repository }}/releases/$env:RELEASE_ID/assets?name=SHA256SUMS.txt" `
+          # Release-asset uploads live on uploads.github.com (api.github.com
+          # 404s this route) — see the release's own upload_url field.
+          gh api --method POST "https://uploads.github.com/repos/${{ github.repository }}/releases/$env:RELEASE_ID/assets?name=SHA256SUMS.txt" `
             --header "Content-Type: application/octet-stream" --input SHA256SUMS.txt
           if ($LASTEXITCODE -ne 0) { throw "Failed to upload SHA256SUMS.txt" }
 
@@ -180,7 +182,7 @@ jobs:
           $assets += @(Get-Item "dist\accel\accel-manifest.json")
           foreach ($asset in $assets) {
             $name = [System.Uri]::EscapeDataString($asset.Name)
-            gh api --method POST "repos/${{ github.repository }}/releases/$env:RELEASE_ID/assets?name=$name" `
+            gh api --method POST "https://uploads.github.com/repos/${{ github.repository }}/releases/$env:RELEASE_ID/assets?name=$name" `
               --header "Content-Type: application/octet-stream" `
               --input $asset.FullName
             if ($LASTEXITCODE -ne 0) { throw "Failed to upload $($asset.Name)" }
