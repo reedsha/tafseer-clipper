@@ -144,7 +144,11 @@ $manifest = [ordered]@{
     files      = $files
 }
 $manifestPath = Join-Path $OutDir "accel-manifest.json"
-($manifest | ConvertTo-Json -Depth 5) | Set-Content $manifestPath -Encoding utf8
+# UTF-8 without BOM on purpose: the Tauri shell parses the manifest with
+# serde_json, which rejects a leading BOM ("expected value at line 1 column 1").
+# `Set-Content -Encoding utf8` writes a BOM under Windows PowerShell 5.1.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5), $utf8NoBom)
 
 if ($Zip) {
     Step "Creating archive"
