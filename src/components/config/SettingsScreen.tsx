@@ -42,7 +42,6 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import {
   Select,
@@ -504,13 +503,13 @@ function JudgmentsSection() {
   return (
     <Section
       title="Fast judgments"
-      description="Optional small models for quick yes/no and ranking decisions. Turn one on to make that step faster; if it is off or unreachable, the step falls back to the way it works today."
+      description="Small models for quick yes/no and ranking decisions. Each step uses its configured model automatically; if no model is set or the service is unreachable, that step quietly falls back to the way it works today."
     >
       <div className="space-y-3">
         {DECISION_SLOTS.map((slot) => {
           const config = decisionSlots[slot.id];
           const probe = probes[slot.id];
-          const needsModel = config.enabled && !config.model.trim();
+          const needsModel = !config.model.trim();
           return (
             <div
               key={slot.id}
@@ -523,11 +522,6 @@ function JudgmentsSection() {
                     {slot.hint}
                   </p>
                 </div>
-                <Switch
-                  checked={config.enabled}
-                  onCheckedChange={(enabled) => updateDecisionSlot(slot.id, { enabled })}
-                  aria-label={`${slot.title} fast judgments`}
-                />
               </div>
               <p className="text-[11px] leading-relaxed text-muted-foreground">
                 {slot.description}
@@ -536,7 +530,6 @@ function JudgmentsSection() {
               <SegmentedToggle<DecisionSlotMode>
                 label={`Where ${slot.title} runs`}
                 value={config.mode}
-                disabled={!config.enabled}
                 options={[
                   { value: "local", label: "This computer" },
                   { value: "cloud", label: "Your AI account" },
@@ -627,7 +620,7 @@ function JudgmentsSection() {
                   variant="outline"
                   size="sm"
                   className="gap-1.5"
-                  disabled={!config.enabled || probe.status === "running"}
+                  disabled={needsModel || probe.status === "running"}
                   onClick={() => void test(slot.id)}
                 >
                   {probe.status === "running" ? (
@@ -639,7 +632,7 @@ function JudgmentsSection() {
                 </Button>
                 {needsModel ? (
                   <span className="text-[11px] text-status-warning">
-                    Choose a model to switch this on.
+                    No model chosen yet — this step uses the standard path.
                   </span>
                 ) : probe.status === "idle" ? (
                   <span className="text-[11px] text-muted-foreground">

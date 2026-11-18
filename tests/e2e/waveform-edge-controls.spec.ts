@@ -112,6 +112,15 @@ test.describe("Step 2 waveform edge controls", () => {
     await expect(page.getByRole("heading", { name: "Find Clips configuration" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Change model" })).toHaveCount(0);
     await expect(page.getByText("Finding model", { exact: true })).toBeVisible();
+
+    // The engine toggle moved here from Step 1's AI setup card; Step 3 inherits
+    // whatever this selects.
+    const engine = page.getByRole("group", { name: "Clip finding engine" });
+    await expect(engine).toBeVisible();
+    await expect(engine.getByRole("button", { name: "Your AI account" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 
   test("edge buttons grow and trim the clip shown by the waveform", async ({ page }) => {

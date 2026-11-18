@@ -76,11 +76,14 @@ export type DecisionSlotMode = "local" | "cloud";
 export type DecisionFormat = "auto" | "systemone" | "decisions";
 
 /**
- * One fast-judgment slot. `enabled: false` (or an empty model) means the step
- * keeps today's path; the connection address and key are never duplicated here
- * — they are reused from `ollama` / `cloud`.
+ * One fast-judgment slot. Judgments are always on: the `enabled` field is kept
+ * so older settings backups still load, but coercion forces it to `true` — an
+ * empty model (or an unreachable service) is what makes a step use its standard
+ * path. The connection address and key are never duplicated here; they are
+ * reused from `ollama` / `cloud`.
  */
 export interface DecisionSlotSettings {
+  /** Always `true`; retained only for backward-compatible settings backups. */
   enabled: boolean;
   mode: DecisionSlotMode;
   model: string;
@@ -312,9 +315,9 @@ const DEFAULT_GLOSSARY: GlossaryEntry[] = [
  * generative paths exactly as they are until the editor picks a model.
  */
 const DEFAULT_DECISION_SLOTS: DecisionSlots = {
-  analysis: { enabled: false, mode: "local", model: "", format: "auto", endpointUrl: "" },
-  clip_scoring: { enabled: false, mode: "cloud", model: "", format: "auto", endpointUrl: "" },
-  verify_triage: { enabled: false, mode: "cloud", model: "", format: "auto", endpointUrl: "" },
+  analysis: { enabled: true, mode: "local", model: "", format: "auto", endpointUrl: "" },
+  clip_scoring: { enabled: true, mode: "cloud", model: "", format: "auto", endpointUrl: "" },
+  verify_triage: { enabled: true, mode: "cloud", model: "", format: "auto", endpointUrl: "" },
 };
 
 const DEFAULT_DATA: SettingsData = {
@@ -542,7 +545,9 @@ function coerceDecisionSlots(value: unknown): DecisionSlots {
     const raw = value[id];
     if (!isRecord(raw)) continue;
     slots[id] = {
-      enabled: asBoolean(raw.enabled, slots[id].enabled),
+      // Judgments are always on. Old backups stored `enabled: false`; forcing
+      // it here makes those snapshots use the new behaviour on next launch.
+      enabled: true,
       mode: raw.mode === "local" || raw.mode === "cloud" ? raw.mode : slots[id].mode,
       model: asString(raw.model, slots[id].model).trim(),
       format: asDecisionFormat(

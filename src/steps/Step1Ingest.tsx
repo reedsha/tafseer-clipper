@@ -17,15 +17,13 @@ import {
   FolderOpen,
   Info,
   Loader2,
-  Settings2,
 } from "lucide-react";
 import { cn } from "cn";
 
 import { AiActivityLine } from "@/components/AiActivityLine";
-import { PromptDrawer } from "@/components/PromptDrawer";
 import { GpuInlineHint } from "@/components/GpuAcceleration";
+import { PromptDrawer } from "@/components/PromptDrawer";
 import { InlineError } from "@/components/InlineError";
-import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { SidecarStatusDot, SIDECAR_STATUS_LABEL } from "@/components/SidecarStatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -70,7 +68,7 @@ import {
 } from "@/lib/providers";
 import { useAiActivityStore } from "@/store/aiActivityStore";
 import { useProjectStore } from "@/store/projectStore";
-import { useSettingsStore, type EngineMode } from "@/store/settingsStore";
+import { useSettingsStore } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
 
 /* -------------------------------------------------------------------------- */
@@ -82,26 +80,21 @@ export function Step1Ingest() {
   const setStep = useProjectStore((state) => state.setStep);
 
   const transcriptionMode = useSettingsStore((state) => state.transcriptionMode);
-  const analysisMode = useSettingsStore((state) => state.analysisMode);
   const cloud = useSettingsStore((state) => state.cloud);
   const cloudStt = useSettingsStore((state) => state.cloudStt);
-  const ollama = useSettingsStore((state) => state.ollama);
   const whisper = useSettingsStore((state) => state.whisper);
+  const updateWhisper = useSettingsStore((state) => state.updateWhisper);
   const promptPresets = useSettingsStore((state) => state.promptPresets);
   const sidecar = useSettingsStore((state) => state.sidecar);
   const aiEntries = useAiActivityStore((state) => state.entries);
   const activeTranscription =
     aiEntries.find((entry) => entry.task === "transcription" && entry.status === "running") ??
     aiEntries.find((entry) => entry.task === "transcription");
-  const setTranscriptionMode = useSettingsStore((state) => state.setTranscriptionMode);
-  const setAnalysisMode = useSettingsStore((state) => state.setAnalysisMode);
   const refreshHealth = useSettingsStore((state) => state.refreshHealth);
 
   /** Where Cloud STT will actually upload: a dedicated speech service, or the
       shared AI connection when no separate one is configured. */
   const sttConnection = resolveSttConnection({ transcriptionMode, cloud, cloudStt });
-
-  const openSettings = useUiStore((state) => state.openSettings);
 
   const [dragging, setDragging] = useState(false);
   const { t } = useI18n();
@@ -183,15 +176,6 @@ export function Step1Ingest() {
       : sttConnection.baseUrl && (sttConnection.apiKey || sttConnection.dedicated)
         ? `${sttServiceLabel} · ${cloudStt.model || "model not set"}`
         : `${sttServiceLabel} — not set up`;
-
-  const analysisDetail =
-    analysisMode === "cloud"
-      ? cloud.model && cloud.apiKey
-        ? `Your AI account · ${cloud.model}`
-        : "Your AI account — not set up"
-      : ollama.model
-        ? `This computer · ${ollama.model}`
-        : "This computer — no model chosen";
 
   const ensureProject = useCallback((): ProjectData => {
     const current = useProjectStore.getState().project;
@@ -786,6 +770,15 @@ export function Step1Ingest() {
                     <span className="truncate">{transcriptionDetail}</span>
                   </div>
 
+                  {transcriptionMode === "local" ? (
+                    <div className="mt-2 space-y-1.5">
+                      <p className="text-xs leading-relaxed text-muted-foreground/80">
+                        {t("step1.transcribe.downloadNote")}
+                      </p>
+                      <GpuInlineHint summary={acceleration} />
+                    </div>
+                  ) : null}
+
                   {sidecar.status === "offline" ? (
                     <InlineError
                       className="mt-2"
@@ -921,88 +914,28 @@ export function Step1Ingest() {
               ) : null}
 
               <section className="rounded-lg border border-border bg-card/40 p-4">
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div className="space-y-0.5">
-                    <h2 className="text-[13px] font-medium text-foreground">
-                      {t("step1.ai.title")}
-                    </h2>
-                    <p className="text-xs leading-relaxed text-muted-foreground">
-                      {t("step1.ai.description")}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label="Open AI connection settings"
-                      onClick={() => openSettings("connection")}
-                    >
-                      <Settings2 className="size-3.5" />
-                    </Button>
-                  </div>
+                <div className="space-y-0.5">
+                  <Label
+                    htmlFor="transcription-vocabulary"
+                    className="text-[13px] font-medium text-foreground"
+                  >
+                    Transcription vocabulary hint
+                  </Label>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    Words the recognizer should expect when a Thai lecture switches to Arabic —
+                    for example อัลลอฮฺ, อัลกุรอาน, ซูเราะฮฺ. This is a hint, not a command: it nudges
+                    spelling without changing what was said. It applies to both transcription
+                    engines when the service accepts a prompt.
+                  </p>
                 </div>
-
-                <div className="mt-3 space-y-3">
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <Label className="text-[11px] text-muted-foreground">Transcription</Label>
-                      <span className="min-w-0 truncate text-[11px] text-muted-foreground/80">
-                        {transcriptionDetail}
-                      </span>
-                    </div>
-                    <SegmentedToggle<EngineMode>
-                      label="Transcription engine"
-                      value={transcriptionMode}
-                      options={[
-                        { value: "local", label: "This computer" },
-                        { value: "cloud", label: "Your AI account" },
-                      ]}
-                      onChange={setTranscriptionMode}
-                      disabled={busy}
-                    />
-                    {transcriptionMode === "local" ? (
-                      <div className="space-y-1.5">
-                        <p className="text-xs leading-relaxed text-muted-foreground/80">
-                          {t("step1.ai.downloadNote")}
-                        </p>
-                        <GpuInlineHint summary={acceleration} />
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <Label className="text-[11px] text-muted-foreground">Topic analysis</Label>
-                      <span className="min-w-0 truncate text-[11px] text-muted-foreground/80">
-                        {analysisDetail}
-                      </span>
-                    </div>
-                    <SegmentedToggle<EngineMode>
-                      label="Topic analysis engine"
-                      value={analysisMode}
-                      options={[
-                        { value: "local", label: "This computer" },
-                        { value: "cloud", label: "Your AI account" },
-                      ]}
-                      onChange={setAnalysisMode}
-                      disabled={busy}
-                    />
-                  </div>
-                </div>
-
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  className="mt-3 gap-1 text-muted-foreground"
-                  onClick={() => openSettings()}
-                >
-                  {t("step1.ai.change")}
-                </Button>
-
-                <p className="mt-3 text-xs leading-relaxed text-muted-foreground/80">
-                  The API key and server address live in Settings; models, the transcription
-                  prompt and the glossary live in each step&rsquo;s configuration.
-                </p>
+                <Textarea
+                  id="transcription-vocabulary"
+                  value={whisper.initialPrompt}
+                  onChange={(event) => updateWhisper({ initialPrompt: event.target.value })}
+                  rows={5}
+                  spellCheck={false}
+                  className="mt-2 resize-y font-mono text-xs leading-relaxed"
+                />
               </section>
             </aside>
           </div>

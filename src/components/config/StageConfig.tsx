@@ -31,7 +31,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
 import { GpuStatusLine } from "@/components/GpuAcceleration";
 import { FitBadge } from "@/components/FitBadge";
 import { SegmentedToggle } from "@/components/SegmentedToggle";
@@ -48,7 +47,7 @@ import { describeProviderGap, resolveSttConnection, whisperFitSentence } from "@
 import type { HardwareTier } from "@/lib/api";
 import { NUMERIC_LIMITS } from "@/lib/settingsLimits";
 import { useProjectStore } from "@/store/projectStore";
-import { useSettingsStore } from "@/store/settingsStore";
+import { useSettingsStore, type EngineMode } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
 import { cn } from "cn";
 
@@ -69,8 +68,8 @@ import {
 } from "@/components/config/shared";
 
 const STAGE_DESCRIPTIONS: Record<WizardStep, string> = {
-  1: "Speech-to-text engine, model and vocabulary. Changes save automatically.",
-  2: "Clip finding uses the model chosen below, plus the cut buffer. Changes save automatically.",
+  1: "Speech-to-text engine and model. Changes save automatically.",
+  2: "Clip finding engine, model and cut buffer. Changes save automatically.",
   3: "Fonts, Arabic and Thai typography, style presets, and Arabic verification. Changes save automatically.",
   4: "File names, subtitles and export defaults. Changes save automatically.",
 };
@@ -296,22 +295,6 @@ function Stage1Config() {
       <Separator />
 
       <Section
-        title="Whisper Arabic hint"
-        description="Editable initial_prompt vocabulary that improves Thai-to-Arabic code-switching accuracy."
-      >
-        <Textarea
-          value={whisper.initialPrompt}
-          onChange={(event) => updateWhisper({ initialPrompt: event.target.value })}
-          rows={7}
-          spellCheck={false}
-          aria-label="Whisper Arabic hint"
-          className="font-mono text-xs leading-relaxed"
-        />
-      </Section>
-
-      <Separator />
-
-      <Section
         title="Thai–Arabic spelling glossary"
         description="Applied automatically after transcription to fix common spelling variants."
       >
@@ -396,6 +379,7 @@ function GapNote() {
 
 function Stage2Config() {
   const analysisMode = useSettingsStore((state) => state.analysisMode);
+  const setAnalysisMode = useSettingsStore((state) => state.setAnalysisMode);
   const cloud = useSettingsStore((state) => state.cloud);
   const ollama = useSettingsStore((state) => state.ollama);
   const updateCloud = useSettingsStore((state) => state.updateCloud);
@@ -409,8 +393,17 @@ function Stage2Config() {
     <>
       <Section
         title="AI model"
-        description="The model that reads the transcript and proposes clips. Changing it applies to the next search."
+        description="Clip finding engine and model. Changing the model applies to the next search; Step 3 can inherit the same choice."
       >
+        <SegmentedToggle<EngineMode>
+          label="Clip finding engine"
+          value={analysisMode}
+          options={[
+            { value: "local", label: "This computer" },
+            { value: "cloud", label: "Your AI account" },
+          ]}
+          onChange={setAnalysisMode}
+        />
         <Field label="Finding model" hint={engineLabel}>
           {analysisMode === "cloud" ? (
             <ModelSelect
@@ -902,8 +895,8 @@ function Stage3Config() {
         />
         {verificationProvider.mode === "inherit" ? (
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            Uses the same AI model chosen for clip finding. Change it in the Find Clips
-            configuration.
+            Uses the same engine and model chosen for clip finding. Change them in the
+            Find Clips configuration.
           </p>
         ) : (
           <Field

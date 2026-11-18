@@ -210,8 +210,8 @@ test.describe("settings affordances", () => {
   test("each screen warns about the missing piece it owns", async ({ page }) => {
     await goToWorkspace(page);
 
-    // Engine routing is always visible on Step 1; each screen owns the warning
-    // for the piece it configures.
+    // Each configuration screen owns its engine toggle and the warning for the
+    // piece it configures.
     // Defaults: cloud analysis with no key/model yet → the clip-finding
     // configuration names the first missing field.
     await openStepConfig(page, 2, "Find Clips");
@@ -222,13 +222,13 @@ test.describe("settings affordances", () => {
     await expect(page.getByText(/Not set up yet: add the API key/)).toBeVisible();
 
     await page.getByRole("button", { name: "Back to app" }).click();
+    await openStepConfig(page, 2, "Find Clips");
     await page
-      .getByRole("group", { name: "Topic analysis engine" })
+      .getByRole("group", { name: "Clip finding engine" })
       .getByRole("button", { name: "This computer" })
       .click();
 
     // Routing to Ollama without a model must warn before Step 2 fails.
-    await openStepConfig(page, 2, "Find Clips");
     await expect(page.getByText(/won't work until you choose a model/)).toBeVisible();
   });
 
@@ -391,7 +391,7 @@ test.describe("settings affordances", () => {
 });
 
 test.describe("fast judgments", () => {
-  test("a slot stays off until enabled, filters the model list and probes on demand", async ({
+  test("fast judgments are always on, filter the model list and probe on demand", async ({
     page,
   }) => {
     // A ready cloud connection, so the decision pickers fetch their list through
@@ -443,17 +443,17 @@ test.describe("fast judgments", () => {
     await goToWorkspace(page);
     await openSettingsSection(page, "Fast judgments");
 
-    const toggle = page.getByRole("switch", {
-      name: "Arabic triage fast judgments",
-    });
     const probeButton = page.getByRole("button", { name: "Test", exact: true }).last();
 
-    await expect(toggle).not.toBeChecked();
+    // Judgments cannot be turned off. With no model chosen the step explains
+    // the fallback, and Test waits until there is something to test.
+    await expect(
+      page.getByRole("switch", { name: "Arabic triage fast judgments" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByText("No model chosen yet — this step uses the standard path.").first(),
+    ).toBeVisible();
     await expect(probeButton).toBeDisabled();
-
-    await toggle.click();
-    // Enabled but empty: the screen asks for a model instead of guessing one.
-    await expect(page.getByText("Choose a model to switch this on.")).toBeVisible();
 
     await page
       .getByRole("button", { name: "Arabic triage model", exact: true })
@@ -713,7 +713,6 @@ test.describe("model-type filtering", () => {
     await goToWorkspace(page);
     await openSettingsSection(page, "Fast judgments");
 
-    await page.getByRole("switch", { name: "Arabic triage fast judgments" }).click();
     const modelTrigger = page.getByRole("button", { name: "Arabic triage model", exact: true });
     await modelTrigger.click();
 

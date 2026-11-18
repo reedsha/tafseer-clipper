@@ -117,6 +117,12 @@ test.describe("app shell", () => {
     ).toBeVisible();
     await expect(page.getByText(/1\.5 GB/)).toBeVisible();
 
+    // The AI setup card is gone; its vocabulary hint now lives on this screen.
+    await expect(page.getByRole("heading", { name: "AI setup" })).toHaveCount(0);
+    await expect(
+      page.getByRole("textbox", { name: "Transcription vocabulary hint" }),
+    ).toBeVisible();
+
     // The hint names GPU/CPU capability only — never a product line, and the
     // CPU fallback is always stated. Either the GPU is ready or the CPU path
     // is spelled out, depending on the machine running the suite.

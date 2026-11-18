@@ -60,7 +60,7 @@ export interface DecisionActivitySlice {
 
 /**
  * Provenance for a step whose first pass is a fast-judgment model. `null` when
- * the slot is off and the step keeps its generative/today's route.
+ * no model is configured and the step keeps its generative/today's route.
  */
 export function decisionActivityFor(
   settings: DecisionActivitySlice,
@@ -68,7 +68,7 @@ export function decisionActivityFor(
 ): { model: string; backend: AiBackend; detail: string } | null {
   const config = settings.decisionSlots[slot];
   const model = config.model.trim();
-  if (!config.enabled || !model) return null;
+  if (!model) return null;
   return {
     model,
     backend: config.mode === "local" ? "local" : "cloud",
