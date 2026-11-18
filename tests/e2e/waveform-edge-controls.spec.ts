@@ -51,9 +51,12 @@ test.describe("Step 2 waveform edge controls", () => {
       .click();
     await expect(page.getByRole("heading", { name: "Find clips" })).toBeVisible();
 
-    // The normal-editor affordances are gone.
+    // The normal-editor affordances are gone, and the model selector is no
+    // longer on the wizard screen — it belongs to the Find Clips config.
     await expect(page.getByRole("button", { name: /Focus clip|Fit lecture/ })).toHaveCount(0);
     await expect(page.getByText("drag the shaded region to trim")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Change finding model" })).toHaveCount(0);
+    await expect(page.getByText("Finding model", { exact: true })).toHaveCount(0);
 
     // Step settings live in the Cut in / Cut out section with distinct defaults.
     await expect(page.getByText("Edge step size")).toBeVisible();
@@ -100,6 +103,15 @@ test.describe("Step 2 waveform edge controls", () => {
     await expect(keyStep).toHaveValue("5");
     await page.keyboard.press("Shift+ArrowLeft");
     await expect(trimTime(page, "Cut in", "0:05.0")).toBeVisible();
+
+    // The selector is available where the stage is configured instead.
+    await page
+      .getByRole("navigation", { name: "Wizard steps" })
+      .getByRole("button", { name: "Step 2 configuration" })
+      .click();
+    await expect(page.getByRole("heading", { name: "Find Clips configuration" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Change model" })).toHaveCount(0);
+    await expect(page.getByText("Finding model", { exact: true })).toBeVisible();
   });
 
   test("edge buttons grow and trim the clip shown by the waveform", async ({ page }) => {

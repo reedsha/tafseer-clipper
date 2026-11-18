@@ -684,7 +684,6 @@ test.describe("model-type filtering", () => {
     await goToWorkspace(page);
     await openStepConfig(page, 2, "Find Clips");
 
-    await page.getByRole("button", { name: "Change clip finding model" }).click();
     await page.getByRole("button", { name: "Local AI model", exact: true }).click();
     const listbox = page.getByRole("listbox", { name: "Local AI model" });
     await expect(listbox.getByRole("option", { name: "chat-model" })).toBeVisible();

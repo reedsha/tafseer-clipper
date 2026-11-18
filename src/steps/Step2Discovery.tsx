@@ -33,7 +33,6 @@ import { cn } from "cn";
 
 import { AiActivityLine } from "@/components/AiActivityLine";
 import { TimeFlow } from "@/components/TimeFlow";
-import { ModelSelect } from "@/components/config/shared";
 import { InlineError } from "@/components/InlineError";
 import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { VideoPlayer, type VideoPlayerHandle } from "@/components/VideoPlayer";
@@ -329,11 +328,6 @@ export function Step2Discovery() {
 
   const editor = useSettingsStore((state) => state.editor);
   const updateEditor = useSettingsStore((state) => state.updateEditor);
-  const analysisMode = useSettingsStore((state) => state.analysisMode);
-  const cloudModel = useSettingsStore((state) => state.cloud.model);
-  const localModel = useSettingsStore((state) => state.ollama.model);
-  const updateCloud = useSettingsStore((state) => state.updateCloud);
-  const updateOllama = useSettingsStore((state) => state.updateOllama);
   const aiEntries = useAiActivityStore((state) => state.entries);
   const activeDiscovery =
     aiEntries.find((entry) => entry.task === "clip-finding" && entry.status === "running") ??
@@ -344,7 +338,6 @@ export function Step2Discovery() {
   const [refinement, setRefinement] = useState("");
   const [refindMode, setRefindMode] = useState<RefindMode>("reroll");
   const [pendingReplaceAll, setPendingReplaceAll] = useState(false);
-  const [modelOpen, setModelOpen] = useState(false);
   const [minDraft, setMinDraft] = useState(
     String(project?.discovery.minDuration ?? DEFAULT_DISCOVERY_SETTINGS.minDuration),
   );
@@ -1011,28 +1004,6 @@ export function Step2Discovery() {
               <span className="text-[10px] text-muted-foreground">Set up, then Start</span>
             </div>
 
-            <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-card/30 px-2.5 py-1.5">
-              <div className="min-w-0">
-                <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                  Finding model
-                </p>
-                <p className="truncate text-xs text-foreground">
-                  {analysisMode === "cloud"
-                    ? cloudModel || "No cloud model chosen"
-                    : localModel || "No local model chosen"}
-                </p>
-              </div>
-              <Button
-                variant="ghost"
-                size="xs"
-                aria-label="Change finding model"
-                disabled={status === "running"}
-                onClick={() => setModelOpen(true)}
-              >
-                Change
-              </Button>
-            </div>
-
             <div className="flex items-end gap-2">
               <div className="min-w-0 flex-1 space-y-1">
                 <Label htmlFor="clip-min-seconds" className="text-[10px] text-muted-foreground">
@@ -1410,47 +1381,6 @@ export function Step2Discovery() {
           </Button>
         </div>
       </footer>
-
-      <Dialog
-        open={modelOpen}
-        onOpenChange={(open) => {
-          if (!open) setModelOpen(false);
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Finding model</DialogTitle>
-            <DialogDescription>
-              Used to read the transcript and propose clips. The engine is chosen on the Upload
-              screen; changing the model here applies to the next search.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="py-2">
-            {analysisMode === "cloud" ? (
-              <ModelSelect
-                source="cloud"
-                label="Cloud AI model"
-                filter="text"
-                value={cloudModel}
-                onChange={(value) => updateCloud({ model: value })}
-              />
-            ) : (
-              <ModelSelect
-                source="ollama"
-                label="Local AI model"
-                filter="text"
-                value={localModel}
-                onChange={(value) => updateOllama({ model: value })}
-              />
-            )}
-          </div>
-          <DialogFooter>
-            <Button size="sm" onClick={() => setModelOpen(false)}>
-              Done
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       <Dialog
         open={pendingReplaceAll}
