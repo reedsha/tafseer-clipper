@@ -84,82 +84,87 @@ export function StepperHeader() {
       {/* The rule the active stage tab sits on (and visually erases). */}
       <div aria-hidden className="absolute inset-x-0 bottom-0 h-px bg-border" />
 
-      <nav aria-label="Wizard steps" className="relative flex h-full items-end gap-1.5">
-        {STEPS.map((step) => {
-          const active = currentStep === step;
-          const done = stepCompletion(step, project, renderDoneForProject);
-          const disabled = project === null && step !== 1;
-          return (
-            <div
-              key={step}
-              className={cn(
-                "flex items-center gap-0.5 rounded-t-lg border border-b-0 px-1",
-                active
-                  ? "border-border bg-background"
-                  : "border-transparent hover:bg-accent/30",
-              )}
-            >
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  // Clicking a stage always leaves configuration mode and
-                  // shows that stage.
-                  closeConfig();
-                  setStep(step);
-                }}
-                disabled={disabled}
-                aria-current={active ? "step" : undefined}
-                aria-label={`${step}. ${STEP_LABELS[step]}${done ? ", complete" : ""}`}
+      {/* No session yet: keep the chrome (engine status, AI activity, Settings)
+          but hide the step tabs — there is nothing to step through until a
+          session is opened or created. */}
+      {project ? (
+        <nav aria-label="Wizard steps" className="relative flex h-full items-end gap-1.5">
+          {STEPS.map((step) => {
+            const active = currentStep === step;
+            const done = stepCompletion(step, project, renderDoneForProject);
+            const disabled = project === null && step !== 1;
+            return (
+              <div
+                key={step}
                 className={cn(
-                  "h-auto gap-2.5 px-4 py-2 text-xs font-normal hover:bg-transparent",
+                  "flex items-center gap-0.5 rounded-t-lg border border-b-0 px-1",
                   active
-                    ? "text-foreground hover:bg-transparent"
-                    : "text-muted-foreground hover:text-foreground",
+                    ? "border-border bg-background"
+                    : "border-transparent hover:bg-accent/30",
                 )}
               >
-                <span
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    // Clicking a stage always leaves configuration mode and
+                    // shows that stage.
+                    closeConfig();
+                    setStep(step);
+                  }}
+                  disabled={disabled}
+                  aria-current={active ? "step" : undefined}
+                  aria-label={`${step}. ${STEP_LABELS[step]}${done ? ", complete" : ""}`}
                   className={cn(
-                    "flex size-5 items-center justify-center rounded-full border text-[10px] tabular-nums",
+                    "h-auto gap-2.5 px-4 py-2 text-xs font-normal hover:bg-transparent",
                     active
-                      ? "border-ring/50 bg-secondary text-foreground"
-                      : done
-                        ? "border-border bg-secondary/60 text-foreground"
-                        : "border-border text-muted-foreground",
+                      ? "text-foreground hover:bg-transparent"
+                      : "text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  {done ? <Check className="size-3" /> : step}
-                </span>
-                <span className="whitespace-nowrap">
-                  {step}. {STEP_LABELS[step]}
-                </span>
-              </Button>
-              <Separator orientation="vertical" className={cn("h-4", !active && "opacity-50")} />
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label={`Step ${step} configuration`}
-                    onClick={() => openConfig(step)}
+                  <span
                     className={cn(
-                      "mr-1 hover:text-foreground",
-                      active ? "text-muted-foreground" : "text-muted-foreground/70",
+                      "flex size-5 items-center justify-center rounded-full border text-[10px] tabular-nums",
+                      active
+                        ? "border-ring/50 bg-secondary text-foreground"
+                        : done
+                          ? "border-border bg-secondary/60 text-foreground"
+                          : "border-border text-muted-foreground",
                     )}
                   >
-                    <Settings2 className="size-3.5" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" className="text-xs">
-                  {STEP_LABELS[step]} configuration
-                </TooltipContent>
-              </Tooltip>
-            </div>
-          );
-        })}
-      </nav>
+                    {done ? <Check className="size-3" /> : step}
+                  </span>
+                  <span className="whitespace-nowrap">
+                    {step}. {STEP_LABELS[step]}
+                  </span>
+                </Button>
+                <Separator orientation="vertical" className={cn("h-4", !active && "opacity-50")} />
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label={`Step ${step} configuration`}
+                      onClick={() => openConfig(step)}
+                      className={cn(
+                        "mr-1 hover:text-foreground",
+                        active ? "text-muted-foreground" : "text-muted-foreground/70",
+                      )}
+                    >
+                      <Settings2 className="size-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="text-xs">
+                    {STEP_LABELS[step]} configuration
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+            );
+          })}
+        </nav>
+      ) : null}
 
       <div className="relative ml-auto flex items-center gap-1.5">
         <Popover open={aiActivityOpen} onOpenChange={setAiActivityOpen}>

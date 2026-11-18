@@ -4,6 +4,7 @@ import { Toaster, toast } from "sonner";
 import { CommandMenu } from "@/components/CommandMenu";
 import { SettingsScreen } from "@/components/config/SettingsScreen";
 import { StageConfig } from "@/components/config/StageConfig";
+import { SessionLanding } from "@/components/SessionLanding";
 import { SessionsSidebar } from "@/components/SessionsSidebar";
 import { StartupGate } from "@/components/StartupGate";
 import { StepperHeader } from "@/components/StepperHeader";
@@ -37,6 +38,15 @@ export default function App() {
   const refreshHealth = useSettingsStore((state) => state.refreshHealth);
   const settingsOpen = useUiStore((state) => state.settingsOpen);
   const configStep = useUiStore((state) => state.configStep);
+  const closeConfig = useUiStore((state) => state.closeConfig);
+  const project = useProjectStore((state) => state.project);
+
+  // Deleting the open session clears `project`, which drops the user onto the
+  // landing screen. A stage configuration from that session must not linger on
+  // top of it when a new session is created later.
+  useEffect(() => {
+    if (!project) closeConfig();
+  }, [project, closeConfig]);
 
   useEffect(() => {
     void refreshHealth();
@@ -83,14 +93,23 @@ export default function App() {
         <div className="flex min-w-0 flex-1 flex-col">
           <StepperHeader />
           <main className="min-h-0 flex-1 overflow-hidden">
-            {/* A stage configuration replaces only the content area: the recent
-                bar and stepper stay in place and the stages stay clickable. The
-                step stays mounted underneath (hidden) so anything running — a
-                transcription, a render — is never interrupted. */}
-            <div className={cn("h-full", configStep !== null && "hidden")}>
-              <Workspace />
-            </div>
-            {configStep !== null ? <StageConfig step={configStep} /> : null}
+            {project ? (
+              <>
+                {/* A stage configuration replaces only the content area: the recent
+                    bar and stepper stay in place and the stages stay clickable. The
+                    step stays mounted underneath (hidden) so anything running — a
+                    transcription, a render — is never interrupted. */}
+                <div className={cn("h-full", configStep !== null && "hidden")}>
+                  <Workspace />
+                </div>
+                {configStep !== null ? <StageConfig step={configStep} /> : null}
+              </>
+            ) : (
+              /* No session: the landing screen replaces the wizard. The header
+                 keeps its chrome (engine status, AI activity, Settings) and
+                 StepperHeader hides the step tabs until a session exists. */
+              <SessionLanding />
+            )}
           </main>
         </div>
 

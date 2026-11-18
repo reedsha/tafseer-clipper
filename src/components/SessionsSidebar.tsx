@@ -172,8 +172,9 @@ export function SessionsSidebar() {
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
         {recentProjects.length === 0 ? (
           <p className="px-2 py-6 text-center text-[11px] leading-relaxed text-muted-foreground">
-            No sessions yet. Import a lecture on Step 1 to begin — every lecture is
-            auto-saved here so you can resume without re-transcribing.
+            No sessions yet. Choose “Create new session” on the start screen to
+            begin — every lecture is auto-saved here so you can resume without
+            re-transcribing.
           </p>
         ) : (
           <ul className="space-y-1">
@@ -357,7 +358,8 @@ export function SessionsSidebar() {
                   </span>{" "}
                   and its auto-save snapshot (.tafseer) will be deleted. The
                   original video and any clips you already exported are not
-                  affected.
+                  affected. If this is the open session, you'll return to the
+                  start screen.
                 </>
               ) : null}
             </AlertDialogDescription>

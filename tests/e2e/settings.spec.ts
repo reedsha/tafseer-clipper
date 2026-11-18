@@ -12,6 +12,8 @@
 
 import { expect, test, type Page } from "@playwright/test";
 
+import { ensureSession, goToWorkspace } from "./navigation";
+
 /** Open the full-page Settings screen and jump to a sidebar section. */
 async function openSettingsSection(page: Page, section: string) {
   const configBack = page.getByRole("button", { name: "Back", exact: true });
@@ -61,7 +63,7 @@ test.describe("settings persistence edges", () => {
   test("import snaps out-of-range numbers to slider bounds and labels a custom interval", async ({
     page,
   }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await openSettingsSection(page, "Backup & reset");
 
     await page
@@ -89,13 +91,16 @@ test.describe("settings persistence edges", () => {
   });
 
   test("a glossary pair with only the replacement typed survives a restart", async ({ page }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await openStepConfig(page, 1, "Upload");
 
     await page.getByRole("button", { name: "Add pair" }).click();
     await page.getByLabel("Replace with").last().fill("ทดสอบ");
 
     await page.reload();
+    // The open project is not persisted: a reload lands on the no-session
+    // screen, so start a session again before opening the stage config.
+    await ensureSession(page);
     await openStepConfig(page, 1, "Upload");
 
     await expect(page.getByLabel("Replace with").last()).toHaveValue("ทดสอบ");
@@ -104,10 +109,16 @@ test.describe("settings persistence edges", () => {
   });
 
   test("renaming a preset requires a new, non-empty name", async ({ page }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await openStepConfig(page, 3, "Subtitles");
 
-    await page.getByRole("button", { name: /^Rename / }).first().click();
+    // Scope to the configuration pane: the sidebar also has per-session
+    // "Rename …" buttons once a session exists.
+    await page
+      .getByRole("main")
+      .getByRole("button", { name: /^Rename / })
+      .first()
+      .click();
     const nameInput = page.getByPlaceholder("Preset name");
     const renameButton = page.getByRole("button", { name: "Rename", exact: true });
 
@@ -127,7 +138,7 @@ test.describe("configuration screens", () => {
   test("a configuration screen swaps only the content area; the stepper stays live", async ({
     page,
   }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
 
     await openStepConfig(page, 1, "Upload");
     // The configuration is up, but the chrome (sessions sidebar + stepper) is
@@ -154,7 +165,7 @@ test.describe("configuration screens", () => {
   });
 
   test("the Settings sidebar jumps straight to each section", async ({ page }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await page.getByRole("button", { name: "Open settings" }).click();
 
     for (const section of [
@@ -181,7 +192,7 @@ test.describe("configuration screens", () => {
 
 test.describe("settings affordances", () => {
   test("filename templates flag placeholders the sidecar will not resolve", async ({ page }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await openStepConfig(page, 4, "Export");
 
     const template = page.getByLabel("Filename template");
@@ -197,7 +208,7 @@ test.describe("settings affordances", () => {
   });
 
   test("each screen warns about the missing piece it owns", async ({ page }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
 
     // Engine routing is always visible on Step 1; each screen owns the warning
     // for the piece it configures.
@@ -222,7 +233,7 @@ test.describe("settings affordances", () => {
   });
 
   test("cloud speech-to-text can use its own service without touching chat", async ({ page }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await openStepConfig(page, 1, "Upload");
 
     // Cloud mode defaults to the shared AI connection, so no extra credential
@@ -247,7 +258,7 @@ test.describe("settings affordances", () => {
   });
 
   test("the Ollama address is editable so a non-default port can be found", async ({ page }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await openSettingsSection(page, "AI connection");
 
     const address = page.getByLabel("Ollama server address");
@@ -259,7 +270,7 @@ test.describe("settings affordances", () => {
   });
 
   test("Test connection lists models without spending a generation", async ({ page }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await openSettingsSection(page, "AI connection");
     await page.getByLabel("AI connection server address").fill("https://models.example/v1");
     await page.getByLabel("Cloud API key", { exact: true }).fill("test-key");
@@ -290,7 +301,7 @@ test.describe("settings affordances", () => {
   test("editing the live style marks the active preset modified and updates it", async ({
     page,
   }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await openStepConfig(page, 3, "Subtitles");
 
     const slider = page.getByRole("slider", { name: "Arabic font size" });
@@ -316,7 +327,7 @@ test.describe("settings affordances", () => {
   test("a slider read-out accepts an exact typed value and snaps it into range", async ({
     page,
   }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await openStepConfig(page, 3, "Subtitles");
 
     const trigger = page.getByRole("button", {
@@ -351,7 +362,7 @@ test.describe("settings affordances", () => {
   test("Thai line wrapping sits with the Thai style and flags an overflowing pair", async ({
     page,
   }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await openStepConfig(page, 3, "Subtitles");
 
     // Max chars per line belongs to the Thai defaults, next to the font size it
@@ -429,7 +440,7 @@ test.describe("fast judgments", () => {
       });
     });
 
-    await page.goto("/");
+    await goToWorkspace(page);
     await openSettingsSection(page, "Fast judgments");
 
     const toggle = page.getByRole("switch", {
@@ -516,7 +527,7 @@ test.describe("model selector overflow", () => {
       });
     });
 
-    await page.goto("/");
+    await goToWorkspace(page);
     await openSettingsSection(page, "Fast judgments");
     await page.getByRole("button", { name: "Arabic triage model", exact: true }).click();
 
@@ -599,7 +610,7 @@ test.describe("model-type filtering", () => {
       });
     });
 
-    await page.goto("/");
+    await goToWorkspace(page);
     await openStepConfig(page, 1, "Upload");
     await page
       .getByRole("group", { name: "Speech-to-text engine" })
@@ -670,7 +681,7 @@ test.describe("model-type filtering", () => {
       });
     });
 
-    await page.goto("/");
+    await goToWorkspace(page);
     await openStepConfig(page, 2, "Find Clips");
 
     await page.getByRole("button", { name: "Local AI model", exact: true }).click();
@@ -699,7 +710,7 @@ test.describe("model-type filtering", () => {
       });
     });
 
-    await page.goto("/");
+    await goToWorkspace(page);
     await openSettingsSection(page, "Fast judgments");
 
     await page.getByRole("switch", { name: "Arabic triage fast judgments" }).click();
@@ -737,7 +748,7 @@ test.describe("model-type filtering", () => {
       });
     });
 
-    await page.goto("/");
+    await goToWorkspace(page);
     await openStepConfig(page, 1, "Upload");
     await page
       .getByRole("group", { name: "Speech-to-text engine" })
@@ -753,6 +764,8 @@ test.describe("model-type filtering", () => {
 
 test.describe("sessions sidebar", () => {
   test("creates a session, renames it inline and collapses", async ({ page }) => {
+    // This test owns the cold start: it creates the first session itself via
+    // the sidebar, so it must not go through the landing helper.
     await page.goto("/");
     const sidebar = page.getByRole("complementary", { name: "Sessions" });
     await expect(sidebar).toBeVisible();

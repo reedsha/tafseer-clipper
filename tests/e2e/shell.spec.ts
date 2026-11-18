@@ -7,9 +7,12 @@
 
 import { expect, test } from "@playwright/test";
 
+import { PROJECT_NAME, seedResumableProject } from "./fixtures";
+import { goToWorkspace } from "./navigation";
+
 test.describe("app shell", () => {
   test("loads the header, stepper and a live sidecar", async ({ page }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
 
     await expect(page.getByRole("heading", { name: "Add your lecture" })).toBeVisible();
 
@@ -38,7 +41,7 @@ test.describe("app shell", () => {
   test("Settings is a full page with a sidebar and working diagnostics", async ({ page }) => {
     // Clipboard writes are granted so "Copy diagnostics" can succeed headlessly.
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-    await page.goto("/");
+    await goToWorkspace(page);
 
     await page.getByRole("button", { name: "Open settings" }).click();
 
@@ -69,7 +72,7 @@ test.describe("app shell", () => {
   });
 
   test("Ctrl+K opens and closes the command palette", async ({ page }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await expect(page.getByRole("button", { name: "Engine ready" })).toBeVisible({
       timeout: 30_000,
     });
@@ -86,7 +89,7 @@ test.describe("app shell", () => {
   });
 
   test("recent AI activity is reachable from the header and the palette", async ({ page }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await expect(page.getByRole("button", { name: "Engine ready" })).toBeVisible({
       timeout: 30_000,
     });
@@ -107,7 +110,7 @@ test.describe("app shell", () => {
   test("Step 1 shows the dropzone and the hardware-agnostic acceleration hint", async ({
     page,
   }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
 
     await expect(
       page.getByRole("button", { name: "Drop a lecture video or browse" }),
@@ -125,7 +128,7 @@ test.describe("app shell", () => {
   test("Settings exposes the GPU acceleration section and stays vendor-neutral", async ({
     page,
   }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
 
     await page.getByRole("button", { name: "Open settings" }).click();
     await page.getByRole("button", { name: "GPU acceleration", exact: true }).click();
@@ -142,7 +145,7 @@ test.describe("app shell", () => {
   });
 
   test("interface language switches the add-lecture screen to Thai", async ({ page }) => {
-    await page.goto("/");
+    await goToWorkspace(page);
     await expect(page.getByRole("heading", { name: "Add your lecture" })).toBeVisible();
 
     await page.getByRole("button", { name: "Open settings" }).click();
@@ -152,5 +155,37 @@ test.describe("app shell", () => {
     await page.getByRole("button", { name: "Back to app" }).click();
 
     await expect(page.getByRole("heading", { name: "เพิ่มบทบรรยายของคุณ" })).toBeVisible();
+  });
+});
+
+test.describe("no-session start screen", () => {
+  test("a cold start offers open or create instead of the upload wizard", async ({ page }) => {
+    await page.goto("/");
+
+    await expect(page.getByRole("heading", { name: "You're not in a session" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Create new session" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Open a .tafseer file…" })).toBeVisible();
+    // No meaningless steps until a session exists, but the header chrome stays.
+    await expect(page.getByRole("navigation", { name: "Wizard steps" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Open settings" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Engine ready" })).toBeVisible({
+      timeout: 30_000,
+    });
+  });
+
+  test("create enters the wizard; a recent session can be resumed inline", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("main").getByRole("button", { name: "Create new session" }).click();
+    await expect(page.getByRole("heading", { name: "Add your lecture" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Wizard steps" })).toBeVisible();
+
+    await seedResumableProject(page);
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "You're not in a session" })).toBeVisible();
+    await page
+      .getByRole("main")
+      .getByRole("button", { name: new RegExp(PROJECT_NAME) })
+      .click();
+    await expect(page.getByRole("heading", { name: "Find clips" })).toBeVisible();
   });
 });
