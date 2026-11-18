@@ -11,6 +11,13 @@ Conventional Commit into `main`, and a `chore(release): vX.Y.Z` pull request
 appears that bumps every version anchor and regenerates this file. Merging that
 pull request creates the `vX.Y.Z` tag and starts the Windows release build.
 
+## [0.1.5-beta](https://github.com/reedsha/tafseer-clipper/compare/v0.1.4-beta...v0.1.5-beta) (2026-11-18)
+
+
+### Features
+
+* add an explicit no-session start screen ([2610b13](https://github.com/reedsha/tafseer-clipper/commit/2610b13d2cca08bbff80fadd8d1fe17678d52a62))
+
 ## [0.1.4-beta](https://github.com/reedsha/tafseer-clipper/compare/v0.1.3-beta...v0.1.4-beta) (2026-11-18)
 
 
