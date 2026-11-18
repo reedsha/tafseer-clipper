@@ -5,8 +5,8 @@
  * completion.
  *
  * Only external work is mocked (render). `/health` and the app itself are real;
- * `/discover-clips` is never called because the seeded project already has two
- * clips, so Step 2 does not auto-discover.
+ * `/discover-clips` is never called because Step 2 is user-triggered and the
+ * seeded project already has two clips.
  */
 
 import { expect, test } from "@playwright/test";

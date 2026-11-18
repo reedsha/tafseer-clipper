@@ -10,7 +10,6 @@ import {
 import NumberFlow from "@number-flow/react";
 import { toast } from "sonner";
 import {
-  AlertTriangle,
   Captions,
   CheckCircle2,
   ChevronRight,
@@ -66,7 +65,6 @@ import { DEFAULT_DISCOVERY_SETTINGS, type ProjectData, type TranscriptData } fro
 import {
   buildDecisionProviderFor,
   buildProviderFor,
-  describeProviderGap,
   describeSttGap,
   resolveSttConnection,
 } from "@/lib/providers";
@@ -78,16 +76,6 @@ import { useUiStore } from "@/store/uiStore";
 /* -------------------------------------------------------------------------- */
 /* Step 1                                                                      */
 /* -------------------------------------------------------------------------- */
-
-/**
- * One sentence for the provider-gap warning, shared by the inline Step 1
- * warning and the pre-flight toast so the two can never drift back into
- * contradictory copy ("clip discovery needs the key" while blocking
- * transcription).
- */
-function analysisGapMessage(gap: string): string {
-  return `Clip finding needs an AI connection first (${gap}). Set it up and transcription starts right away.`;
-}
 
 export function Step1Ingest() {
   const project = useProjectStore((state) => state.project);
@@ -204,12 +192,6 @@ export function Step1Ingest() {
       : ollama.model
         ? `This computer · ${ollama.model}`
         : "This computer — no model chosen";
-
-  /** Missing provider field that would block Step 2 discovery, if any. */
-  const analysisGap =
-    analysisMode === "cloud"
-      ? describeProviderGap({ analysisMode, ollama, cloud })
-      : null;
 
   const ensureProject = useCallback((): ProjectData => {
     const current = useProjectStore.getState().project;
@@ -446,24 +428,6 @@ export function Step1Ingest() {
         }
         return;
       }
-    }
-
-    // Pre-flight the Step 2 reasoning provider too: without a key/model the
-    // discovery call can only fail after the whole lecture has been
-    // transcribed, so catch it before Whisper starts.
-    const analysisGap = describeProviderGap(settings);
-    if (settings.analysisMode === "cloud" && analysisGap) {
-      toast.error("Clip finding isn't set up yet", {
-        description: analysisGapMessage(analysisGap),
-      });
-      // The missing field picks the screen: the AI model lives in the Find
-      // Clips configuration, the connection (key / address) in Settings.
-      if (analysisGap.includes("AI model")) {
-        useUiStore.getState().openConfig(2);
-      } else {
-        useUiStore.getState().openSettings("connection");
-      }
-      return;
     }
 
     const route = aiRouteFor(settings, "transcription");
@@ -781,9 +745,6 @@ export function Step1Ingest() {
                   </p>
                   <div className="mt-2 space-y-1">
                     {activeTranscription ? <AiActivityLine entry={activeTranscription} /> : null}
-                    <p className="text-xs leading-relaxed text-muted-foreground">
-                      AI analysis · {analysisDetail}
-                    </p>
                   </div>
                   <div className="mt-3 flex items-center justify-between gap-3">
                     <span className="text-xs tabular-nums text-muted-foreground">
@@ -1029,30 +990,11 @@ export function Step1Ingest() {
                   </div>
                 </div>
 
-                {analysisMode === "cloud" && analysisGap ? (
-                  <p className="mt-3 flex items-start gap-1.5 text-xs leading-relaxed text-status-warning">
-                    <AlertTriangle className="mt-0.5 size-3 shrink-0" />
-                    <span className="flex-1">{analysisGapMessage(analysisGap)}</span>
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      className="h-5 shrink-0 text-status-warning"
-                      onClick={() =>
-                        openSettings(analysisGap.includes("AI model") ? "connection" : undefined)
-                      }
-                    >
-                      Fix
-                    </Button>
-                  </p>
-                ) : null}
-
                 <Button
                   variant="ghost"
                   size="xs"
                   className="mt-3 gap-1 text-muted-foreground"
-                  onClick={() =>
-                    openSettings(analysisGap?.includes("AI model") ? "connection" : undefined)
-                  }
+                  onClick={() => openSettings()}
                 >
                   {t("step1.ai.change")}
                 </Button>

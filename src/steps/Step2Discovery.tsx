@@ -33,11 +33,22 @@ import { cn } from "cn";
 
 import { AiActivityLine } from "@/components/AiActivityLine";
 import { TimeFlow } from "@/components/TimeFlow";
+import { ModelSelect } from "@/components/config/shared";
 import { InlineError } from "@/components/InlineError";
+import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { VideoPlayer, type VideoPlayerHandle } from "@/components/VideoPlayer";
 import { WaveformBar } from "@/components/WaveformBar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
@@ -53,14 +64,21 @@ import {
 } from "@/lib/clipMath";
 import { toMediaSrc } from "@/lib/media";
 import { formatClock } from "@/lib/format";
-import type { ProjectClip, ProjectData } from "@/lib/projectTypes";
-import { buildDecisionProviderFor, buildProviderFor } from "@/lib/providers";
+import { DEFAULT_DISCOVERY_SETTINGS, type ProjectClip, type ProjectData } from "@/lib/projectTypes";
+import { buildDecisionProviderFor, buildProviderFor, describeProviderGap } from "@/lib/providers";
+import { DISCOVERY_LIMITS } from "@/lib/settingsLimits";
 import { useAiActivityStore } from "@/store/aiActivityStore";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore } from "@/store/settingsStore";
+import { useUiStore } from "@/store/uiStore";
 
-type DiscoveryMode = "initial" | "reroll";
+type DiscoveryMode = "initial" | "reroll" | "replace";
 type CutEdge = "start" | "end";
+type RefindMode = "reroll" | "replace";
+
+/** One click / one Shift+arrow on the trim edge adds this many seconds. */
+const EDGE_BUTTON_STEP = 5;
+const EDGE_KEY_STEP = 0.2;
 
 /** Playback-rate ladder for the J/K/L shuttle (1× = normal speed). */
 const SHUTTLE_RATES = [0.25, 0.5, 1, 1.5, 2, 3, 4] as const;
@@ -311,6 +329,11 @@ export function Step2Discovery() {
 
   const editor = useSettingsStore((state) => state.editor);
   const updateEditor = useSettingsStore((state) => state.updateEditor);
+  const analysisMode = useSettingsStore((state) => state.analysisMode);
+  const cloudModel = useSettingsStore((state) => state.cloud.model);
+  const localModel = useSettingsStore((state) => state.ollama.model);
+  const updateCloud = useSettingsStore((state) => state.updateCloud);
+  const updateOllama = useSettingsStore((state) => state.updateOllama);
   const aiEntries = useAiActivityStore((state) => state.entries);
   const activeDiscovery =
     aiEntries.find((entry) => entry.task === "clip-finding" && entry.status === "running") ??
@@ -319,6 +342,15 @@ export function Step2Discovery() {
   const [status, setStatus] = useState<"idle" | "running" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
   const [refinement, setRefinement] = useState("");
+  const [refindMode, setRefindMode] = useState<RefindMode>("reroll");
+  const [pendingReplaceAll, setPendingReplaceAll] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [minDraft, setMinDraft] = useState(
+    String(project?.discovery.minDuration ?? DEFAULT_DISCOVERY_SETTINGS.minDuration),
+  );
+  const [maxDraft, setMaxDraft] = useState(
+    String(project?.discovery.maxDuration ?? DEFAULT_DISCOVERY_SETTINGS.maxDuration),
+  );
   const [activeEdge, setActiveEdge] = useState<CutEdge>("start");
   const [bufferDraft, setBufferDraft] = useState(editor.cutBufferSeconds);
   const [playhead, setPlayhead] = useState(0);
@@ -327,7 +359,6 @@ export function Step2Discovery() {
   const videoRef = useRef<VideoPlayerHandle>(null);
   const requestRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
-  const autoRunKeyRef = useRef<string | null>(null);
   const lastProjectIdRef = useRef<string | null>(project?.id ?? null);
 
   const clips = project?.clips ?? [];
@@ -347,8 +378,8 @@ export function Step2Discovery() {
   }, []);
 
   // Switching projects while a discovery call is in flight must not apply the
-  // old proposals to the newly opened lecture. The id ref also keeps React
-  // StrictMode's double effect setup from aborting the first auto-discovery.
+  // old proposals to the newly opened lecture. Discovery itself is always
+  // user-triggered, so a resumed session never starts an LLM call on its own.
   useEffect(() => {
     const nextId = project?.id ?? null;
     if (lastProjectIdRef.current === nextId) return;
@@ -364,6 +395,13 @@ export function Step2Discovery() {
   useEffect(() => {
     setBufferDraft(editor.cutBufferSeconds);
   }, [editor.cutBufferSeconds]);
+
+  useEffect(() => {
+    setMinDraft(String(project?.discovery.minDuration ?? DEFAULT_DISCOVERY_SETTINGS.minDuration));
+    setMaxDraft(String(project?.discovery.maxDuration ?? DEFAULT_DISCOVERY_SETTINGS.maxDuration));
+    setRefindMode("reroll");
+    setPendingReplaceAll(false);
+  }, [project?.id]);
 
   useEffect(() => {
     if (!project) return;
@@ -427,6 +465,21 @@ export function Step2Discovery() {
       return;
     }
     const settings = useSettingsStore.getState();
+    // The provider belongs to the action it unblocks: transcription no longer
+    // checks this, so clicking Start is where a missing connection is reported.
+    // A clip-scoring decision slot can still serve a run without a writing
+    // model (the backend falls back to neutral titles), so don't block then.
+    const providerGap = describeProviderGap(settings);
+    const decisionSlot = buildDecisionProviderFor(settings, "clip_scoring");
+    if (providerGap && !decisionSlot) {
+      toast.error("Clip finding isn't set up yet", {
+        description: `Add ${providerGap} in the Find Clips configuration or AI connection settings, then try again.`,
+      });
+      if (providerGap.includes("AI model")) useUiStore.getState().openConfig(2);
+      else useUiStore.getState().openSettings("connection");
+      return;
+    }
+    const replaceAll = mode === "replace";
     const decisionRoute = decisionActivityFor(settings, "clip_scoring");
     const activityId = useAiActivityStore.getState().start(
       decisionRoute
@@ -450,15 +503,17 @@ export function Step2Discovery() {
           base_prompt: current.basePrompt,
           session_guide: current.sessionGuide,
           refinement_note: note.trim(),
-          excluded_ranges: approvedRanges,
+          excluded_ranges: replaceAll ? [] : approvedRanges,
           max_clips: current.discovery.maxClips,
           min_duration: current.discovery.minDuration,
           max_duration: current.discovery.maxDuration,
           language: settings.editor.language || "th",
-          provider: buildProviderFor(settings),
-          decision_provider: buildDecisionProviderFor(settings, "clip_scoring"),
-          approved_exemplars: exemplarsFor(current, true),
-          rejected_exemplars: exemplarsFor(current, false),
+          provider: buildProviderFor(settings, "discovery"),
+          decision_provider: decisionSlot,
+          // "Start over" is a clean search: no old clip is kept or used as
+          // feedback, and their subtitle tracks are cleared below.
+          approved_exemplars: replaceAll ? [] : exemplarsFor(current, true),
+          rejected_exemplars: replaceAll ? [] : exemplarsFor(current, false),
         },
         { signal: controller.signal },
       );
@@ -473,7 +528,7 @@ export function Step2Discovery() {
       const latest = useProjectStore.getState().project;
       if (!latest) return;
       const latestSettings = useSettingsStore.getState();
-      const approved = latest.clips.filter((clip) => clip.approved);
+      const approved = replaceAll ? [] : latest.clips.filter((clip) => clip.approved);
       const proposals = result.clips
         .map((proposal, index) =>
           proposalToClip(
@@ -494,17 +549,29 @@ export function Step2Discovery() {
 
       const merged = [...approved, ...proposals].sort((a, b) => a.start - b.start);
       useProjectStore.getState().setClips(merged);
+      if (replaceAll) {
+        // Old clip ids are gone, so their cue tracks must go too — otherwise
+        // Step 3 opens with orphaned subtitles nobody can see or edit.
+        useProjectStore.getState().updateProject({ subtitles: {}, selectedClipId: null });
+      }
       if (note.trim()) setRefinement("");
 
-      toast.success(mode === "reroll" ? "More clips found" : "Clip proposals ready", {
-        description: `${proposals.length} new clip${proposals.length === 1 ? "" : "s"}${
-          result.excluded_ranges_applied > 0
-            ? ` — ${result.excluded_ranges_applied} approved clip${
-                result.excluded_ranges_applied === 1 ? " was" : "s were"
-              } kept`
-            : ""
-        }`,
-      });
+      toast.success(
+        mode === "replace"
+          ? "Started over with new clips"
+          : mode === "reroll"
+            ? "More clips found"
+            : "Clip proposals ready",
+        {
+          description: `${proposals.length} new clip${proposals.length === 1 ? "" : "s"}${
+            !replaceAll && result.excluded_ranges_applied > 0
+              ? ` — ${result.excluded_ranges_applied} approved clip${
+                  result.excluded_ranges_applied === 1 ? " was" : "s were"
+                } kept`
+              : ""
+          }`,
+        },
+      );
       if (proposals.length === 0) {
         toast("No new clips", {
           description: "Add a note about what to look for and search again.",
@@ -532,14 +599,6 @@ export function Step2Discovery() {
     }
   }, []);
 
-  useEffect(() => {
-    if (!project?.transcriptId || project.clips.length > 0) return;
-    const key = `${project.id}:${project.transcriptId}`;
-    if (autoRunKeyRef.current === key) return;
-    autoRunKeyRef.current = key;
-    void runDiscovery("initial", "");
-  }, [project?.id, project?.transcriptId, project?.clips.length, runDiscovery]);
-
   const nudgeEdge = useCallback((edge: CutEdge, delta: number) => {
     const current = useProjectStore.getState().project;
     if (!current) return;
@@ -561,6 +620,39 @@ export function Step2Discovery() {
       return;
     }
     // User-driven nudges keep the drag exact: no 1 s AI-proposal minimum.
+    const normalized = normalizeSpeechRange(nextSpeechStart, nextSpeechEnd, current.duration, 0);
+    if (!normalized) return;
+    useProjectStore.getState().updateClip(clip.id, {
+      speechStart: normalized.start,
+      speechEnd: normalized.end,
+      start: cut.start,
+      end: cut.end,
+    });
+  }, []);
+
+  /**
+   * Pull more of the lecture into the selected clip at one edge. Like the
+   * nudge path, the raw speech bounds are the source of truth and the cut is
+   * recomputed through the current buffer, so the change stays reversible.
+   */
+  const extendEdge = useCallback((edge: CutEdge, seconds: number) => {
+    const current = useProjectStore.getState().project;
+    if (!current) return;
+    const clip =
+      current.clips.find((item) => item.id === current.selectedClipId) ?? current.clips[0];
+    if (!clip) return;
+    const maxTime = current.duration;
+    const nextSpeechStart =
+      edge === "start" ? Math.max(0, clip.speechStart - seconds) : clip.speechStart;
+    const nextSpeechEnd =
+      edge === "end" ? (maxTime == null ? clip.speechEnd + seconds : Math.min(maxTime, clip.speechEnd + seconds)) : clip.speechEnd;
+    const settings = useSettingsStore.getState();
+    const cut = applyCutBuffer(nextSpeechStart, nextSpeechEnd, {
+      duration: current.duration,
+      buffer: settings.editor.cutBufferSeconds,
+      autoPad: settings.editor.autoPad,
+    });
+    if (cut.end - cut.start < MIN_RENDERABLE_CLIP_SECONDS) return;
     const normalized = normalizeSpeechRange(nextSpeechStart, nextSpeechEnd, current.duration, 0);
     if (!normalized) return;
     useProjectStore.getState().updateClip(clip.id, {
@@ -685,11 +777,16 @@ export function Step2Discovery() {
           break;
         case "ArrowLeft":
           event.preventDefault();
-          nudgeEdge(activeEdge, -0.2);
+          // Shift+arrow extends that edge; plain arrow nudges the active edge.
+          // Key repeat is intentionally left on so holding the key extends
+          // continuously.
+          if (event.shiftKey) extendEdge("start", EDGE_KEY_STEP);
+          else nudgeEdge(activeEdge, -0.2);
           break;
         case "ArrowRight":
           event.preventDefault();
-          nudgeEdge(activeEdge, 0.2);
+          if (event.shiftKey) extendEdge("end", EDGE_KEY_STEP);
+          else nudgeEdge(activeEdge, 0.2);
           break;
         default:
           break;
@@ -697,7 +794,7 @@ export function Step2Discovery() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeEdge, nudgeEdge, pauseShuttle, shuttle]);
+  }, [activeEdge, extendEdge, nudgeEdge, pauseShuttle, shuttle]);
 
   function handleApprove(clip: ProjectClip) {
     approveClip(clip.id, !clip.approved);
@@ -715,7 +812,46 @@ export function Step2Discovery() {
   }
 
   function handleRetry() {
-    void runDiscovery(approvedCount > 0 ? "reroll" : "initial", refinement);
+    void runDiscovery(clips.length > 0 ? refindMode : "initial", refinement);
+  }
+
+  function startSearch() {
+    if (status === "running") return;
+    if (refindMode === "replace" && clips.length > 0) {
+      setPendingReplaceAll(true);
+      return;
+    }
+    void runDiscovery(clips.length > 0 ? refindMode : "initial", refinement);
+  }
+
+  function commitDuration() {
+    const current = useProjectStore.getState().project;
+    if (!current) return;
+    const rawMin = minDraft.trim() === "" ? Number.NaN : Number(minDraft);
+    const rawMax = maxDraft.trim() === "" ? Number.NaN : Number(maxDraft);
+    const min = Math.min(
+      DISCOVERY_LIMITS.minDuration.max,
+      Math.max(DISCOVERY_LIMITS.minDuration.min, Math.round(rawMin)),
+    );
+    const max = Math.min(
+      DISCOVERY_LIMITS.maxDuration.max,
+      Math.max(DISCOVERY_LIMITS.maxDuration.min, Math.round(rawMax)),
+    );
+    if (!Number.isFinite(rawMin) || !Number.isFinite(rawMax) || max <= min) {
+      toast.error("Clip length needs a valid range", {
+        description: "The maximum must be greater than the minimum.",
+      });
+      setMinDraft(String(current.discovery.minDuration));
+      setMaxDraft(String(current.discovery.maxDuration));
+      return;
+    }
+    if (min !== current.discovery.minDuration || max !== current.discovery.maxDuration) {
+      useProjectStore.getState().updateProject({
+        discovery: { ...current.discovery, minDuration: min, maxDuration: max },
+      });
+    }
+    setMinDraft(String(min));
+    setMaxDraft(String(max));
   }
 
   if (!project) {
@@ -850,9 +986,7 @@ export function Step2Discovery() {
                   size="sm"
                   className="mt-1 gap-1.5"
                   disabled={status === "running"}
-                  onClick={() =>
-                    void runDiscovery(approvedCount > 0 ? "reroll" : "initial", refinement)
-                  }
+                  onClick={startSearch}
                 >
                   {status === "running" ? (
                     <Loader2 className="size-3.5 animate-spin" />
@@ -881,28 +1015,102 @@ export function Step2Discovery() {
 
           <div className="shrink-0 space-y-2 border-t border-border bg-card/20 px-3 py-3">
             <div className="flex items-center justify-between gap-2">
-              <Label htmlFor="refinement-note" className="text-[11px] font-medium text-foreground/90">
-                What to look for next
-              </Label>
-              <span className="text-[10px] text-muted-foreground">used in the next search</span>
+              <h2 className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                Search setup
+              </h2>
+              <span className="text-[10px] text-muted-foreground">Set up, then Start</span>
             </div>
-            <Textarea
-              id="refinement-note"
-              value={refinement}
-              onChange={(event) => setRefinement(event.target.value)}
-              rows={2}
-              placeholder="Search the second half for shorter 60-second reminders"
-              className="resize-y text-xs leading-relaxed"
-              disabled={status === "running"}
-            />
-            <Button
-              className="w-full gap-2"
-              size="sm"
-              disabled={status === "running"}
-              onClick={() =>
-                void runDiscovery(approvedCount > 0 ? "reroll" : "initial", refinement)
-              }
-            >
+
+            <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-card/30 px-2.5 py-1.5">
+              <div className="min-w-0">
+                <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                  Finding model
+                </p>
+                <p className="truncate text-xs text-foreground">
+                  {analysisMode === "cloud"
+                    ? cloudModel || "No cloud model chosen"
+                    : localModel || "No local model chosen"}
+                </p>
+              </div>
+              <Button
+                variant="ghost"
+                size="xs"
+                aria-label="Change finding model"
+                disabled={status === "running"}
+                onClick={() => setModelOpen(true)}
+              >
+                Change
+              </Button>
+            </div>
+
+            <div className="flex items-end gap-2">
+              <div className="min-w-0 flex-1 space-y-1">
+                <Label htmlFor="clip-min-seconds" className="text-[10px] text-muted-foreground">
+                  Shortest (s)
+                </Label>
+                <Input
+                  id="clip-min-seconds"
+                  type="number"
+                  inputMode="numeric"
+                  min={DISCOVERY_LIMITS.minDuration.min}
+                  max={DISCOVERY_LIMITS.minDuration.max}
+                  step={DISCOVERY_LIMITS.minDuration.step}
+                  value={minDraft}
+                  onChange={(event) => setMinDraft(event.target.value)}
+                  onBlur={commitDuration}
+                  disabled={status === "running"}
+                  className="h-8 text-xs"
+                />
+              </div>
+              <div className="min-w-0 flex-1 space-y-1">
+                <Label htmlFor="clip-max-seconds" className="text-[10px] text-muted-foreground">
+                  Longest (s)
+                </Label>
+                <Input
+                  id="clip-max-seconds"
+                  type="number"
+                  inputMode="numeric"
+                  min={DISCOVERY_LIMITS.maxDuration.min}
+                  max={DISCOVERY_LIMITS.maxDuration.max}
+                  step={DISCOVERY_LIMITS.maxDuration.step}
+                  value={maxDraft}
+                  onChange={(event) => setMaxDraft(event.target.value)}
+                  onBlur={commitDuration}
+                  disabled={status === "running"}
+                  className="h-8 text-xs"
+                />
+              </div>
+            </div>
+
+            {clips.length > 0 ? (
+              <SegmentedToggle<RefindMode>
+                label="Re-find mode"
+                value={refindMode}
+                options={[
+                  { value: "reroll", label: "Find more" },
+                  { value: "replace", label: "Start over" },
+                ]}
+                onChange={setRefindMode}
+                disabled={status === "running"}
+              />
+            ) : null}
+
+            <div className="space-y-1">
+              <Label htmlFor="refinement-note" className="text-[11px] font-medium text-foreground/90">
+                Additional instructions for this search
+              </Label>
+              <Textarea
+                id="refinement-note"
+                value={refinement}
+                onChange={(event) => setRefinement(event.target.value)}
+                rows={2}
+                placeholder="Search the second half for shorter 60-second reminders"
+                className="resize-y text-xs leading-relaxed"
+                disabled={status === "running"}
+              />
+            </div>
+
+            <Button className="w-full gap-2" size="sm" disabled={status === "running"} onClick={startSearch}>
               {status === "running" ? (
                 <Loader2 className="size-3.5 animate-spin" />
               ) : (
@@ -910,22 +1118,26 @@ export function Step2Discovery() {
               )}
               {status === "running"
                 ? "Looking for more moments…"
-                : approvedCount > 0
-                  ? "Find more clips (keeps approved)"
-                  : "Find clips"}
+                : clips.length === 0
+                  ? "Find clips"
+                  : refindMode === "replace"
+                    ? "Start over with new clips"
+                    : "Find more clips"}
             </Button>
             <div className="flex items-center justify-between gap-2">
               <p className="text-[10px] leading-relaxed text-muted-foreground">
-                {approvedCount > 0
-                  ? `${approvedCount} approved clip${approvedCount === 1 ? "" : "s"} will be kept in the next search.`
-                  : "Approve clips to keep them out of the next search."}
+                {clips.length === 0
+                  ? "Approve clips to keep them out of the next search."
+                  : refindMode === "replace"
+                    ? `All ${clips.length} clips and their subtitles will be replaced.`
+                    : approvedCount > 0
+                      ? `${approvedCount} approved clip${
+                          approvedCount === 1 ? "" : "s"
+                        } will be kept; unapproved ones are dropped.`
+                      : "Unapproved clips are dropped from the next search."}
               </p>
               {status === "running" ? (
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  onClick={() => requestRef.current?.abort()}
-                >
+                <Button variant="ghost" size="xs" onClick={() => requestRef.current?.abort()}>
                   Cancel
                 </Button>
               ) : null}
@@ -1015,6 +1227,7 @@ export function Step2Discovery() {
                   videoRef.current?.seekTo(seconds);
                 }}
                 onTrimCommit={handleTrimCommit}
+                onExtend={(edge) => extendEdge(edge, EDGE_BUTTON_STEP)}
               />
             </div>
 
@@ -1098,8 +1311,7 @@ export function Step2Discovery() {
                     suffix="×"
                     format={{ maximumFractionDigits: 2 }}
                   />
-                  ) · J slower, then rewind · ←/→ nudge{" "}
-                  {activeEdge === "start" ? "cut in" : "cut out"} 0.2 s
+                  ) · J slower, then rewind · ←/→ nudge 0.2 s · Shift+←/Shift+→ extend 0.2 s
                 </p>
               </div>
             ) : (
@@ -1134,6 +1346,78 @@ export function Step2Discovery() {
           </Button>
         </div>
       </footer>
+
+      <Dialog
+        open={modelOpen}
+        onOpenChange={(open) => {
+          if (!open) setModelOpen(false);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Finding model</DialogTitle>
+            <DialogDescription>
+              Used to read the transcript and propose clips. The engine is chosen on the Upload
+              screen; changing the model here applies to the next search.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-2">
+            {analysisMode === "cloud" ? (
+              <ModelSelect
+                source="cloud"
+                label="Cloud AI model"
+                filter="text"
+                value={cloudModel}
+                onChange={(value) => updateCloud({ model: value })}
+              />
+            ) : (
+              <ModelSelect
+                source="ollama"
+                label="Local AI model"
+                filter="text"
+                value={localModel}
+                onChange={(value) => updateOllama({ model: value })}
+              />
+            )}
+          </div>
+          <DialogFooter>
+            <Button size="sm" onClick={() => setModelOpen(false)}>
+              Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pendingReplaceAll}
+        onOpenChange={(open) => {
+          if (!open) setPendingReplaceAll(false);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Start over with a fresh search?</DialogTitle>
+            <DialogDescription>
+              All {clips.length} clips — including approved ones — and their subtitle tracks will be
+              removed. The new search uses the clip length and instructions you set here.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setPendingReplaceAll(false)}>
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                setPendingReplaceAll(false);
+                void runDiscovery("replace", refinement);
+              }}
+            >
+              Start over
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

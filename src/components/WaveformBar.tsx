@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
 import RegionsPlugin, { type Region } from "wavesurfer.js/plugins/regions";
-import { AlertTriangle, AudioLines, Maximize2, ScanSearch } from "lucide-react";
+import { AlertTriangle, AudioLines, Maximize2, Plus, ScanSearch } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { clamp, formatClock } from "@/lib/format";
 
 const REGION_ID = "step2-cut";
+const EDGE_BUTTON_SIZE = 24; // matches the icon-xs Button footprint
+const EDGE_MIN_GAP = 40; // keep the two edge buttons clickable when the clip is narrow
 
 function cssVar(name: string, fallback: string): string {
   if (typeof window === "undefined") return fallback;
@@ -30,6 +32,12 @@ export interface WaveformBarProps {
   playhead: number;
   onSeek: (seconds: number) => void;
   onTrimCommit: (range: { start: number; end: number }) => void;
+  /**
+   * When provided, renders two small "+" buttons at the selected clip's trim
+   * edges (cut-in / cut-out). Left calls onExtend("start"), right calls
+   * onExtend("end"). Omit or leave undefined to hide them.
+   */
+  onExtend?: (edge: "start" | "end") => void;
 }
 
 /**
@@ -46,11 +54,13 @@ export function WaveformBar({
   playhead,
   onSeek,
   onTrimCommit,
+  onExtend,
 }: WaveformBarProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
   const regionsRef = useRef<ReturnType<typeof RegionsPlugin.create> | null>(null);
   const regionRef = useRef<Region | null>(null);
+  const loadTokenRef = useRef(0);
   const onSeekRef = useRef(onSeek);
   const onTrimRef = useRef(onTrimCommit);
   const playheadRef = useRef(playhead);
@@ -59,7 +69,7 @@ export function WaveformBar({
 
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [focus, setFocus] = useState(true);
+  const [focus, setFocus] = useState(false);
 
   useEffect(() => {
     onSeekRef.current = onSeek;
@@ -81,38 +91,39 @@ export function WaveformBar({
     durationRef.current = duration;
   }, [duration]);
 
+  const highlightRegion = useCallback(() => {
+    const el = regionRef.current?.element;
+    if (!el) return;
+    const ring = cssVar("--ring", "#707a82");
+    el.style.outline = `1px solid ${ring}`;
+    el.style.outlineOffset = "-1px";
+  }, []);
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const regions = RegionsPlugin.create();
-    const initialPeaks = peaksRef.current;
-    const knownDuration = durationRef.current;
-    // Rendering from precomputed peaks avoids decoding the whole WAV extract
-    // (a multi-hour 16 kHz PCM file can be hundreds of MB) in WebView2.
-    const precomputedPeaks: number[][] | null =
-      Array.isArray(initialPeaks) && initialPeaks.length > 0 && knownDuration > 0
-        ? [initialPeaks]
-        : null;
+    // Deliberately no peaks/duration here: the effect below is the only loader,
+    // so there is no internal load racing the explicit load() call.
     const wavesurfer = WaveSurfer.create({
       container,
       height: 72,
       waveColor: cssVar("--border", "#262b2f"),
       progressColor: cssVar("--ring", "#707a82"),
       cursorColor: cssVar("--foreground", "#e7e9ea"),
-      cursorWidth: 1,
+      cursorWidth: 2,
       barWidth: 2,
       barGap: 1,
       barRadius: 1,
       normalize: true,
       interact: true,
-      dragToSeek: false,
+      dragToSeek: true,
       hideScrollbar: true,
       fillParent: true,
       minPxPerSec: 0,
       sampleRate: 4000,
       plugins: [regions],
-      ...(precomputedPeaks ? { peaks: precomputedPeaks, duration: knownDuration } : {}),
     });
 
     wavesurferRef.current = wavesurfer;
@@ -126,11 +137,16 @@ export function WaveformBar({
         wavesurfer.setTime(clamp(playheadRef.current, 0, durationSeconds));
       }),
       wavesurfer.on("error", (loadError) => {
+        // Ignore errors from detached/destroyed instances (handles the dev
+        // StrictMode double-mount while so the stale instance never reports).
+        if (wavesurferRef.current !== wavesurfer) return;
         setReady(false);
         setError(loadError.message || "The audio extract could not be decoded.");
       }),
       wavesurfer.on("interaction", (seconds) => {
         onSeekRef.current(clamp(seconds, 0, wavesurfer.getDuration() || seconds));
+        // Click-to-select: make the trim region read as the active clip.
+        highlightRegion();
       }),
       regions.on("region-updated", (region) => {
         if (region.id !== REGION_ID) return;
@@ -140,13 +156,14 @@ export function WaveformBar({
 
     return () => {
       disposers.forEach((dispose) => dispose());
+      if (wavesurferRef.current !== wavesurfer) return;
       regionRef.current = null;
       regionsRef.current = null;
       wavesurferRef.current = null;
       wavesurfer.destroy();
       setReady(false);
     };
-  }, []);
+  }, [highlightRegion]);
 
   useEffect(() => {
     const wavesurfer = wavesurferRef.current;
@@ -154,6 +171,7 @@ export function WaveformBar({
     if (!audioUrl) {
       setReady(false);
       setError(null);
+      loadTokenRef.current += 1;
       wavesurfer.empty();
       return;
     }
@@ -162,7 +180,11 @@ export function WaveformBar({
     const channelData =
       peaks && peaks.length > 0 && duration > 0 ? [peaks] : undefined;
     const knownDuration = channelData ? duration : undefined;
+    const token = ++loadTokenRef.current;
     void wavesurfer.load(audioUrl, channelData, knownDuration).catch((loadError: unknown) => {
+      // A newer load()/empty() or a detached instance supersedes this attempt,
+      // so "suspended by a newer load call" and similar races are ignored.
+      if (loadTokenRef.current !== token || wavesurferRef.current !== wavesurfer) return;
       setReady(false);
       setError(
         loadError instanceof Error
@@ -206,7 +228,8 @@ export function WaveformBar({
       color: "color-mix(in oklab, var(--ring) 20%, transparent)",
       avoidOverlapping: false,
     });
-  }, [ready, clipStart, clipEnd, duration]);
+    highlightRegion();
+  }, [ready, clipStart, clipEnd, duration, highlightRegion]);
 
   useEffect(() => {
     const wavesurfer = wavesurferRef.current;
@@ -228,7 +251,10 @@ export function WaveformBar({
       wavesurfer.setScrollTime(Math.max(0, clipStart - clipLength * 0.35));
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [focus, ready, clipStart, clipEnd]);
+    // Re-center only when the user toggles focus ON. The view must not jump as
+    // the selection changes while focus stays enabled.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus, ready]);
 
   useEffect(() => {
     const wavesurfer = wavesurferRef.current;
@@ -238,6 +264,40 @@ export function WaveformBar({
   }, [playhead, ready, duration]);
 
   const unavailable = !audioUrl;
+
+  const computeEdgeX = (time: number): number | null => {
+    const wavesurfer = wavesurferRef.current;
+    if (!wavesurfer || !ready) return null;
+    const durationSeconds = wavesurfer.getDuration();
+    if (!durationSeconds) return null;
+    const width = wavesurfer.getWidth();
+    if (!width) return null;
+    const pxPerSec = wavesurfer.options.minPxPerSec || width / durationSeconds;
+    const scrollPixel = wavesurfer.getScroll() || 0;
+    return time * pxPerSec - scrollPixel;
+  };
+
+  const hasClip = ready && clipEnd > clipStart && clipStart >= 0;
+  const showEdgeButtons = Boolean(onExtend) && hasClip;
+
+  let startEdgeLeft: number | null = null;
+  let endEdgeLeft: number | null = null;
+  if (showEdgeButtons) {
+    const startX = computeEdgeX(clipStart);
+    const endX = computeEdgeX(clipEnd);
+    if (startX != null && endX != null) {
+      const waveWidth = wavesurferRef.current?.getWidth() || containerRef.current?.clientWidth || 640;
+      let leftX = startX - EDGE_BUTTON_SIZE / 2;
+      let rightX = endX + EDGE_BUTTON_SIZE / 2;
+      if (endX - startX < EDGE_MIN_GAP) {
+        const pad = (EDGE_MIN_GAP - (endX - startX)) / 2;
+        leftX = startX - EDGE_BUTTON_SIZE / 2 - pad;
+        rightX = endX + EDGE_BUTTON_SIZE / 2 + pad;
+      }
+      startEdgeLeft = clamp(leftX, 0, Math.max(0, waveWidth - EDGE_BUTTON_SIZE));
+      endEdgeLeft = clamp(rightX, 0, Math.max(0, waveWidth - EDGE_BUTTON_SIZE));
+    }
+  }
 
   return (
     <div className="space-y-1.5">
@@ -264,6 +324,42 @@ export function WaveformBar({
 
       <div className="relative overflow-hidden rounded-md border border-border bg-background/60">
         <div ref={containerRef} className="h-[72px] w-full" />
+        {startEdgeLeft != null && endEdgeLeft != null ? (
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon-xs"
+              className="absolute z-10 bg-background"
+              style={{ left: startEdgeLeft, top: "50%", transform: "translateY(-50%)" }}
+              aria-label="Extend clip earlier by 5 seconds"
+              onClick={(event) => {
+                event.stopPropagation();
+                onExtend?.("start");
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <Plus className="size-3" />
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon-xs"
+              className="absolute z-10 bg-background"
+              style={{ left: endEdgeLeft, top: "50%", transform: "translateY(-50%)" }}
+              aria-label="Extend clip later by 5 seconds"
+              onClick={(event) => {
+                event.stopPropagation();
+                onExtend?.("end");
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <Plus className="size-3" />
+            </Button>
+          </>
+        ) : null}
         {unavailable ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-background/50 px-3 text-center">
             <AudioLines className="size-4 text-muted-foreground" />
