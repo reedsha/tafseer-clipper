@@ -25,10 +25,46 @@ export interface ProviderSettingsSlice {
     model: string;
     timeout: number;
   };
+  /**
+   * Optional Step 3 override. When present, non-`inherit`, and holding a model,
+   * `buildProviderFor(settings, "verify")` uses this engine/model instead of
+   * the shared clip-finding model. Absent on older settings records.
+   */
+  verificationProvider?: { mode: "inherit" | "local" | "cloud"; model: string };
 }
 
 /** The `provider` override forwarded to `/discover-clips` or `/verify-arabic`. */
-export function buildProviderFor(settings: ProviderSettingsSlice): ProviderOverride {
+export function buildProviderFor(
+  settings: ProviderSettingsSlice,
+  task?: "discovery" | "verify",
+): ProviderOverride {
+  // Step 3 may run its Arabic check on a dedicated engine/model. The connection
+  // address and key are never duplicated here — they are reused from the saved
+  // `ollama`/`cloud` connections (AGENTS.md §3). No override, or `inherit`,
+  // falls through to the shared clip-finding model below.
+  if (task === "verify") {
+    const verification = settings.verificationProvider;
+    if (
+      verification &&
+      verification.mode !== "inherit" &&
+      verification.model.trim() !== ""
+    ) {
+      if (verification.mode === "local") {
+        return {
+          base_url: settings.ollama.baseUrl || null,
+          api_key: "",
+          model: verification.model.trim() || null,
+          timeout: settings.cloud.timeout || null,
+        };
+      }
+      return {
+        base_url: settings.cloud.baseUrl || null,
+        api_key: settings.cloud.apiKey || null,
+        model: verification.model.trim() || null,
+        timeout: settings.cloud.timeout || null,
+      };
+    }
+  }
   if (settings.analysisMode === "local") {
     return {
       base_url: settings.ollama.baseUrl || null,

@@ -70,8 +70,8 @@ import {
 
 const STAGE_DESCRIPTIONS: Record<WizardStep, string> = {
   1: "Speech-to-text engine, model and vocabulary. Changes save automatically.",
-  2: "The AI model that finds clips, and the cut buffer. Changes save automatically.",
-  3: "Fonts, Arabic and Thai typography, and style presets. Changes save automatically.",
+  2: "Clip finding uses the AI model saved in Settings, plus the cut buffer. Changes save automatically.",
+  3: "Fonts, Arabic and Thai typography, style presets, and Arabic verification. Changes save automatically.",
   4: "File names, subtitles and export defaults. Changes save automatically.",
 };
 
@@ -396,51 +396,38 @@ function GapNote() {
 
 function Stage2Config() {
   const analysisMode = useSettingsStore((state) => state.analysisMode);
-  const setAnalysisMode = useSettingsStore((state) => state.setAnalysisMode);
   const cloud = useSettingsStore((state) => state.cloud);
-  const updateCloud = useSettingsStore((state) => state.updateCloud);
   const ollama = useSettingsStore((state) => state.ollama);
+  const updateCloud = useSettingsStore((state) => state.updateCloud);
   const updateOllama = useSettingsStore((state) => state.updateOllama);
   const editor = useSettingsStore((state) => state.editor);
   const updateEditor = useSettingsStore((state) => state.updateEditor);
+  const [modelOpen, setModelOpen] = useState(false);
+
+  const engineLabel = analysisMode === "cloud" ? "AI service (cloud)" : "This computer";
+  const modelLabel = analysisMode === "cloud" ? cloud.model : ollama.model;
 
   return (
     <>
       <Section
         title="AI model"
-        description="The one AI model that finds clips in Step 2 and checks Arabic spelling in Step 3. Cloud mode fetches the model list live from the connection saved in Settings."
+        description="Clip finding runs on the AI model saved in Settings. The cut buffer below is edited here."
       >
-        <SegmentedToggle<"local" | "cloud">
-          label="AI engine"
-          value={analysisMode}
-          options={[
-            { value: "local", label: "This computer" },
-            { value: "cloud", label: "AI service (cloud)" },
-          ]}
-          onChange={setAnalysisMode}
-        />
-
-        {analysisMode === "cloud" ? (
-          <Field label="Cloud model" hint="Fetched from your connection">
-            <ModelSelect
-              source="cloud"
-              label="Cloud AI model"
-              filter="text"
-              value={cloud.model}
-              onChange={(value) => updateCloud({ model: value })}
-            />
-          </Field>
-        ) : (
-          <Field label="Model on this computer" hint="Installed Ollama models">
-            <ModelSelect
-              source="ollama"
-              label="Local AI model"
-              filter="text"
-              value={ollama.model}
-              onChange={(value) => updateOllama({ model: value })}
-            />
-          </Field>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-medium text-foreground">{engineLabel}</span>
+          <span className="text-xs text-muted-foreground">·</span>
+          <span className="truncate text-xs text-muted-foreground">
+            {modelLabel.trim() || "no model selected"}
+          </span>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          aria-label="Change clip finding model"
+          onClick={() => setModelOpen(true)}
+        >
+          Change model
+        </Button>
 
         {analysisMode === "local" && !ollama.model.trim() ? (
           <p className="text-[11px] leading-relaxed text-status-warning">
@@ -469,6 +456,42 @@ function Stage2Config() {
           step={NUMERIC_LIMITS.cutBufferSeconds.step}
         />
       </Section>
+
+      <Dialog open={modelOpen} onOpenChange={setModelOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Finding model</DialogTitle>
+            <DialogDescription>
+              The model that reads the transcript and proposes clips. The engine itself is chosen
+              on the Upload screen.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-2">
+            {analysisMode === "cloud" ? (
+              <ModelSelect
+                source="cloud"
+                label="Cloud AI model"
+                filter="text"
+                value={cloud.model}
+                onChange={(value) => updateCloud({ model: value })}
+              />
+            ) : (
+              <ModelSelect
+                source="ollama"
+                label="Local AI model"
+                filter="text"
+                value={ollama.model}
+                onChange={(value) => updateOllama({ model: value })}
+              />
+            )}
+          </div>
+          <DialogFooter>
+            <Button size="sm" onClick={() => setModelOpen(false)}>
+              Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
@@ -492,9 +515,10 @@ function Stage3Config() {
   const importedFonts = useSettingsStore((state) => state.importedFonts);
   const fontsDir = useSettingsStore((state) => state.fontsDir);
   const setImportedFonts = useSettingsStore((state) => state.setImportedFonts);
-  const analysisMode = useSettingsStore((state) => state.analysisMode);
   const editor = useSettingsStore((state) => state.editor);
   const updateEditor = useSettingsStore((state) => state.updateEditor);
+  const verificationProvider = useSettingsStore((state) => state.verificationProvider);
+  const updateVerificationProvider = useSettingsStore((state) => state.updateVerificationProvider);
 
   const fontInputRef = useRef<HTMLInputElement>(null);
   const [importingFonts, setImportingFonts] = useState(false);
@@ -898,13 +922,41 @@ function Stage3Config() {
 
       <Section
         title="Arabic verification"
-        description="Checks the Uthmani Quranic/Hadith spelling of each Arabic line in Step 3."
+        description="Checks the Uthmani Quranic/Hadith spelling of each Arabic line in Step 3. Used for Arabic spelling checks only and defaults to the Find Clips model."
       >
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          Verification runs with the same AI model chosen for clip finding (
-          {analysisMode === "cloud" ? "AI service (cloud)" : "this computer"}). Change it in
-          the Find Clips configuration.
-        </p>
+        <SegmentedToggle<"inherit" | "local" | "cloud">
+          label="Verification model"
+          value={verificationProvider.mode}
+          options={[
+            { value: "inherit", label: "Inherit" },
+            { value: "local", label: "This computer" },
+            { value: "cloud", label: "AI service" },
+          ]}
+          onChange={(mode) => updateVerificationProvider({ mode })}
+        />
+        {verificationProvider.mode === "inherit" ? (
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            Uses the same AI model chosen for clip finding. Change it in the Find Clips
+            configuration.
+          </p>
+        ) : (
+          <Field
+            label="Model"
+            hint={
+              verificationProvider.mode === "cloud"
+                ? "From your AI connection"
+                : "Installed Ollama models"
+            }
+          >
+            <ModelSelect
+              source={verificationProvider.mode === "cloud" ? "cloud" : "ollama"}
+              label="Arabic verification model"
+              filter="text"
+              value={verificationProvider.model}
+              onChange={(value) => updateVerificationProvider({ model: value })}
+            />
+          </Field>
+        )}
       </Section>
 
       {/* ----------------------------- Preset dialogs ----------------------------- */}

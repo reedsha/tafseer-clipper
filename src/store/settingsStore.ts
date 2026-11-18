@@ -14,6 +14,18 @@ import {
 
 export type EngineMode = "local" | "cloud";
 
+/**
+ * Where the Step 3 Arabic spelling check runs. `inherit` (the default) reuses
+ * the shared clip-finding model; otherwise a dedicated engine/model override is
+ * used for Arabic verification only.
+ */
+export type VerificationProviderMode = "inherit" | "local" | "cloud";
+
+export interface VerificationProviderSettings {
+  mode: VerificationProviderMode;
+  model: string;
+}
+
 /** Interface language; Thai entries may fall back to English until reviewed. */
 export type UiLanguage = "en" | "th";
 export type ComputeType = "int8" | "float16" | "float32";
@@ -161,6 +173,7 @@ export interface SettingsData {
   cloudStt: CloudSttSettings;
   whisper: WhisperSettings;
   decisionSlots: DecisionSlots;
+  verificationProvider: VerificationProviderSettings;
   arabic: ArabicStyle;
   thai: ThaiStyle;
   presets: StylePreset[];
@@ -184,6 +197,7 @@ export interface SettingsState extends SettingsData {
   updateCloudStt: (patch: Partial<CloudSttSettings>) => void;
   updateWhisper: (patch: Partial<WhisperSettings>) => void;
   updateDecisionSlot: (slot: DecisionSlotId, patch: Partial<DecisionSlotSettings>) => void;
+  updateVerificationProvider: (patch: Partial<VerificationProviderSettings>) => void;
   updateArabic: (patch: Partial<ArabicStyle>) => void;
   updateThai: (patch: Partial<ThaiStyle>) => void;
   updateEditor: (patch: Partial<EditorDefaults>) => void;
@@ -327,6 +341,7 @@ const DEFAULT_DATA: SettingsData = {
     initialPrompt: DEFAULT_WHISPER_PROMPT,
   },
   decisionSlots: structuredClone(DEFAULT_DECISION_SLOTS),
+  verificationProvider: { mode: "inherit", model: "" },
   arabic: { ...DEFAULT_ARABIC },
   thai: { ...DEFAULT_THAI },
   presets: DEFAULT_PRESETS.map((item) => ({
@@ -531,6 +546,16 @@ function coerceDecisionSlots(value: unknown): DecisionSlots {
   return slots;
 }
 
+function coerceVerificationProvider(value: unknown): VerificationProviderSettings {
+  const fallback = DEFAULT_DATA.verificationProvider;
+  if (!isRecord(value)) return { ...fallback };
+  const mode =
+    value.mode === "inherit" || value.mode === "local" || value.mode === "cloud"
+      ? value.mode
+      : fallback.mode;
+  return { mode, model: asString(value.model, fallback.model).trim() };
+}
+
 function coerceFonts(value: unknown): FontInfo[] {
   if (!Array.isArray(value)) return [];
   const fonts: FontInfo[] = [];
@@ -593,6 +618,7 @@ function coerceSettingsData(raw: unknown): SettingsData {
       initialPrompt: asString(whisper.initialPrompt, DEFAULT_DATA.whisper.initialPrompt),
     },
     decisionSlots: coerceDecisionSlots(raw.decisionSlots),
+    verificationProvider: coerceVerificationProvider(raw.verificationProvider),
     arabic: coerceArabic(raw.arabic, DEFAULT_DATA.arabic),
     thai: coerceThai(raw.thai, DEFAULT_DATA.thai),
     presets: coercePresets(raw.presets, DEFAULT_DATA.presets),
@@ -642,6 +668,7 @@ function pickSettingsData(state: SettingsState): SettingsData {
     cloudStt: state.cloudStt,
     whisper: state.whisper,
     decisionSlots: state.decisionSlots,
+    verificationProvider: state.verificationProvider,
     arabic: state.arabic,
     thai: state.thai,
     presets: state.presets,
@@ -692,6 +719,10 @@ export const useSettingsStore = create<SettingsState>()(
             ...state.decisionSlots,
             [slot]: { ...state.decisionSlots[slot], ...patch },
           },
+        })),
+      updateVerificationProvider: (patch) =>
+        set((state) => ({
+          verificationProvider: { ...state.verificationProvider, ...patch },
         })),
       updateArabic: (patch) => set((state) => ({ arabic: { ...state.arabic, ...patch } })),
       updateThai: (patch) => set((state) => ({ thai: { ...state.thai, ...patch } })),

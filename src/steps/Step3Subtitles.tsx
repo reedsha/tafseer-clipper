@@ -846,12 +846,19 @@ export function Step3Subtitles() {
         throw new Error("empty");
       }
       const settings = useSettingsStore.getState();
-      if (settings.analysisMode === "cloud" && !settings.cloud.model) {
+      const verificationOverrideConfigured =
+        settings.verificationProvider.mode !== "inherit" &&
+        settings.verificationProvider.model.trim() !== "";
+      const verifyProvider = buildProviderFor(settings, "verify");
+      if (!verifyProvider.model?.trim()) {
         toast.error("The Arabic checker isn't connected yet", {
-          description: "Choose a model in the Find Clips configuration.",
+          description: verificationOverrideConfigured
+            ? "Choose a model in the Subtitles configuration."
+            : "Choose a model in the Find Clips configuration.",
           action: {
             label: "Set up",
-            onClick: () => useUiStore.getState().openConfig(2),
+            onClick: () =>
+              useUiStore.getState().openConfig(verificationOverrideConfigured ? 3 : 2),
           },
         });
         throw new Error("not-configured");
@@ -867,7 +874,7 @@ export function Step3Subtitles() {
         result = await verifyArabic({
           arabic_text: arabicText,
           context_thai: cue.thai.replace(/\n/g, " "),
-          provider: buildProviderFor(settings),
+          provider: buildProviderFor(settings, "verify"),
         });
       } catch (error) {
         if (activityId) useAiActivityStore.getState().finish(activityId, "failed");
@@ -925,12 +932,19 @@ export function Step3Subtitles() {
   const handleVerifyAll = useCallback(async () => {
     if (!selectedClipId || verifyAllRunningRef.current) return;
     const settings = useSettingsStore.getState();
-    if (settings.analysisMode === "cloud" && !settings.cloud.model) {
+    const verificationOverrideConfigured =
+      settings.verificationProvider.mode !== "inherit" &&
+      settings.verificationProvider.model.trim() !== "";
+    const verifyProvider = buildProviderFor(settings, "verify");
+    if (!verifyProvider.model?.trim()) {
       toast.error("The Arabic checker isn't connected yet", {
-        description: "Choose a model in the Find Clips configuration.",
+        description: verificationOverrideConfigured
+          ? "Choose a model in the Subtitles configuration."
+          : "Choose a model in the Find Clips configuration.",
         action: {
           label: "Set up",
-          onClick: () => useUiStore.getState().openConfig(2),
+          onClick: () =>
+            useUiStore.getState().openConfig(verificationOverrideConfigured ? 3 : 2),
         },
       });
       return;
@@ -973,7 +987,7 @@ export function Step3Subtitles() {
                 context_thai: cue.thai.replace(/\n/g, " "),
                 cue_id: cue.id,
               })),
-              provider: buildProviderFor(settings),
+              provider: buildProviderFor(settings, "verify"),
               decision_provider: decisionProvider,
             },
             { signal: controller.signal },
