@@ -1,16 +1,16 @@
 """Frozen-sidecar smoke test for the packaged ``backend.exe`` (Phase 4).
 
-Run from the repository root after building the onefile sidecar::
+Run from the repository root after building the onedir sidecar::
 
-    .build-venv\\Scripts\\pyinstaller.exe --noconfirm --clean backend/build_sidecar.spec
+    .build-venv\\Scripts\\pyinstaller.exe --noconfirm --clean --distpath build/sidecar backend/build_sidecar.spec
     py -3.12 backend/smoke_frozen.py
 
 What it proves against the *real* PyInstaller build (not a source run):
 
-1. ``dist/backend.exe`` cold-starts and ``GET /health`` reports ``ok`` (the
-   measured cold-start seconds are printed).
+1. ``build/sidecar/backend/backend.exe`` cold-starts and ``GET /health``
+   reports ``ok`` (the measured cold-start seconds are printed).
 2. Frozen directories resolve under ``%LOCALAPPDATA%\\Tafseer Clipper`` - never
-   the onefile ``_MEIPASS`` extraction dir and never Program Files.
+   the read-only ``_internal`` resource folder and never Program Files.
 3. ``POST /fonts/import`` (multipart) persists the uploaded font under that user
    fonts dir and reports its family.
 4. ``POST /render-batch`` streams SSE (start/progress/clip_done/done) and writes
@@ -27,11 +27,9 @@ Exit code 0 means every check passed.  Temporary render/staging dirs are
 removed; the log file is deliberately kept - it is the support artifact this
 test exists to verify.
 
-Sandboxed-session note: if the workspace itself is write-sandboxed, launching
-``dist/backend.exe`` in place can fail with ``Could not create temporary
-directory`` because the onefile bootloader cannot write its ``%TEMP%\\_MEI...``
-extraction dir.  Copy the exe outside the sandbox and pass it with ``--exe``;
-the checks are identical.
+Sandboxed-session note: the onedir build starts in place without unpacking to
+``%TEMP%``, so nothing is written outside the user-data dirs it is given.  Pass
+``--exe`` to test a copy installed elsewhere; the checks are identical.
 """
 
 from __future__ import annotations
@@ -55,7 +53,7 @@ import httpx
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BACKEND_DIR = REPO_ROOT / "backend"
-DEFAULT_EXE = REPO_ROOT / "dist" / "backend.exe"
+DEFAULT_EXE = REPO_ROOT / "build" / "sidecar" / "backend" / "backend.exe"
 SOURCE_VIDEO = BACKEND_DIR / ".e2e" / "source_16x9.mp4"
 FONT_CANDIDATES = [
     BACKEND_DIR / ".e2e" / "fonts" / "tahoma.ttf",
@@ -66,7 +64,7 @@ SYSTEM_FONTS = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
 THAI_TEXT = "ฟังตัฟซีร: ซูเราะฮ์อัลฟาติฮะฮ์ (บทเรียนที่ 1)"
 ARABIC_TEXT = "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ"
 
-#: Onefile extraction of the AI stack can take a while on cold disk cache.
+#: First start after install can be slow while Windows scans the onedir files.
 READY_TIMEOUT = 90.0
 #: A sidecar that needs longer than this to answer /health is a regression.
 COLD_START_BUDGET = 60.0
@@ -376,7 +374,7 @@ def check_frozen_dirs(health: dict, root: Path) -> None:
             text,
         )
     check(
-        "Frozen dirs differ from the onefile _MEIPASS temp dir",
+        "Frozen dirs differ from the read-only resource folder",
         "_MEI" not in str(fonts_dir) and "_MEI" not in str(work_dir),
         f"fonts={fonts_dir}",
     )
@@ -581,8 +579,8 @@ def check_missing_ffmpeg(exe: Path) -> None:
             "TAFSEER_PORT": str(port),
             "TAFSEER_HOST": "127.0.0.1",
             "TAFSEER_LOG_LEVEL": "INFO",
-            # No TAFSEER_FFMPEG/TAFSEER_FFPROBE, minimal PATH, no bundled copy
-            # next to backend.exe -> the sidecar must report ffmpeg missing.
+            # No TAFSEER_FFMPEG/TAFSEER_FFPROBE, minimal PATH, and no bundled
+            # copy in the sidecar folder or its parent -> ffmpeg must be missing.
             "PATH": r"C:\Windows\System32;C:\Windows",
         }
     )
@@ -673,7 +671,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--exe",
         default=None,
-        help="Path to the frozen backend.exe (default: dist/backend.exe).",
+        help="Path to the frozen backend.exe (default: build/sidecar/backend/backend.exe).",
     )
     args = parser.parse_args(argv)
 

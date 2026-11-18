@@ -2,15 +2,16 @@
 <#
 .SYNOPSIS
     Packaged payload smoke test: install the NSIS installer, verify the bundled
-    sidecar (backend.exe + ffmpeg.exe + ffprobe.exe) works from the install
-    directory, then uninstall.
+    sidecar (backend\backend.exe + ffmpeg.exe + ffprobe.exe) works from the
+    install directory, then uninstall.
 
 .DESCRIPTION
     Verifies the installer payload without needing an interactive desktop:
-      1. NSIS silent install lays down the app + backend.exe + ffmpeg.exe +
+      1. NSIS silent install lays down the app + backend\ + ffmpeg.exe +
          ffprobe.exe + THIRD_PARTY_NOTICES.md + uninstall.exe.
-      2. The installed backend.exe starts on a free port with the app's user-data
-         directories, resolves the *bundled* ffmpeg.exe, and answers /health.
+      2. The installed backend\backend.exe starts on a free port with the app's
+         user-data directories, resolves the *bundled* ffmpeg.exe, and answers
+         /health.
       3. The sidecar exits cleanly (no orphan process).
       4. The uninstaller removes the program files.
 
@@ -33,9 +34,10 @@ param(
     [switch]$TryGui,
     [switch]$KeepInstalled,
     # Where the throwaway install lives. Defaults to <repo>/.smoke. Set it outside
-    # any cloud-synced folder: the installed backend.exe is a PyInstaller onefile
-    # and this script redirects its %TEMP% into the sandbox, where extraction fails
-    # inside OneDrive with "Could not create temporary directory".
+    # any cloud-synced folder: onefile sidecars extract to %TEMP%, and this script
+    # redirects %TEMP% into the sandbox, where extraction fails inside OneDrive
+    # with "Could not create temporary directory". (Release builds are onedir and
+    # no longer extract, but the redirect keeps the sandbox self-contained.)
     [string]$Sandbox = ""
 )
 
@@ -87,7 +89,7 @@ try {
 
     $expected = @(
         "Tafseer Clipper.exe",
-        "backend.exe",
+        "backend\backend.exe",
         "ffmpeg.exe",
         "ffprobe.exe",
         "THIRD_PARTY_NOTICES.md",
@@ -98,10 +100,14 @@ try {
         if (-not (Test-Path -LiteralPath $path)) { Fail "Missing installed file: $relative" }
         Write-Host ("  OK {0} ({1:N1} MiB)" -f $relative, ((Get-Item $path).Length / 1MB))
     }
+    # 0.1.4+ ships an onedir engine; the old onefile must not be present.
+    if (Test-Path -LiteralPath (Join-Path $installDir "backend.exe")) {
+        Fail "Onefile backend.exe is still installed at the install root."
+    }
 
     # --- 2. bundled sidecar from the install dir ---------------------------- #
-    Step "Starting the installed backend.exe (bundled ffmpeg must resolve)"
-    $sidecarExe = Join-Path $installDir "backend.exe"
+    Step "Starting the installed backend\backend.exe (bundled ffmpeg must resolve)"
+    $sidecarExe = Join-Path $installDir "backend\backend.exe"
     $fontsDir = Join-Path $localAppData "Tafseer Clipper\fonts"
     $workDir = Join-Path $localAppData "Tafseer Clipper\work"
     $logDir = Join-Path $localAppData "Tafseer Clipper\logs"
@@ -119,8 +125,8 @@ try {
     $env:TAFSEER_FONTS_DIR = $fontsDir
     $env:TAFSEER_WORK_DIR = $workDir
     $env:TAFSEER_LOG_DIR = $logDir
-    # Onefile sidecars extract to %TEMP%; keep that inside the sandbox and use
-    # CreateProcess (`&`) so the shell security prompt cannot block the run.
+    # Older onefile sidecars extract to %TEMP%; keep that inside the sandbox so
+    # nothing can fail inside a cloud-synced profile. Release builds are onedir.
     $sidecarTmp = Join-Path $sandboxRoot "tmp"
     New-Item -ItemType Directory -Force $sidecarTmp | Out-Null
     $env:TEMP = $sidecarTmp
@@ -144,13 +150,13 @@ try {
     }
     if (-not $health) {
         if ($sidecar.HasExited) { Fail "Installed backend.exe exited with code $($sidecar.ExitCode)." }
-        Fail "Installed backend.exe did not answer /health on port $port within 45 s."
+        Fail "Installed backend\backend.exe did not answer /health on port $port within 45 s."
     }
     if ($health.status -ne "ok") { Fail "Unexpected /health status: $($health.status)" }
-    if ($health.version -ne "0.1.0") { Fail "Unexpected sidecar version: $($health.version)" }
+    if (-not $health.version) { Fail "Sidecar reported no version." }
     Write-Host ("  /health ok: version={0} ffmpeg={1} ffprobe={2} nvenc={3}" -f `
         $health.version, $health.ffmpeg_available, $health.ffprobe_available, $health.nvenc_available)
-    if (-not $health.ffmpeg_available) { Fail "Bundled ffmpeg.exe was not resolved next to backend.exe." }
+    if (-not $health.ffmpeg_available) { Fail "Bundled ffmpeg.exe was not resolved from the install root." }
     Write-Host "  fonts_dir: $($health.fonts_dir)"
     Write-Host "  work_dir : $($health.work_dir)"
     if ($health.fonts_dir -notlike "*$sandboxRoot*") { Fail "fonts_dir escaped the sandbox: $($health.fonts_dir)" }
@@ -226,9 +232,22 @@ try {
         $uninstaller = Join-Path $installDir "uninstall.exe"
         Unblock-File -Path $uninstaller -ErrorAction SilentlyContinue
         cmd.exe /c "`"$uninstaller`" /S"
-        Start-Sleep -Seconds 5
+        # The NSIS uninstaller copies itself to %TEMP%, relaunches and returns
+        # immediately, so the launched process is already gone. With the onedir
+        # engine it has ~3,450 files and ~1,100 directories to remove, which is
+        # far more than a fixed few-second sleep covers: poll instead.
+        $uninstallDeadline = (Get-Date).AddSeconds(180)
+        while ((Get-Date) -lt $uninstallDeadline) {
+            $appGone = -not (Test-Path -LiteralPath (Join-Path $installDir "Tafseer Clipper.exe"))
+            $engineGone = -not (Test-Path -LiteralPath (Join-Path $installDir "backend"))
+            if ($appGone -and $engineGone) { break }
+            Start-Sleep -Milliseconds 500
+        }
         if (Test-Path -LiteralPath (Join-Path $installDir "Tafseer Clipper.exe")) {
-            Fail "Uninstall left the application executable behind."
+            Fail "Uninstall left the application executable behind (still present after 180 s)."
+        }
+        if (Test-Path -LiteralPath (Join-Path $installDir "backend")) {
+            Fail "Uninstall left the sidecar folder behind (still present after 180 s)."
         }
         Write-Host "  program files removed"
     }

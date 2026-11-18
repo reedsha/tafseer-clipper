@@ -21,10 +21,10 @@ Arabic) into short bilingual clips.
   Windows 10+.
 - **WebView2 runtime.** Present on Windows 11; the installer fetches it on
   Windows 10 when it is missing (needs an internet connection on first install).
-- **Disk:** ~450 MB for the installed app (163 MB installer, including the bundled
-  `backend.exe`, `ffmpeg.exe` and `ffprobe.exe`). Optional extras are much
-  larger: the GPU acceleration pack is ~2.1 GB, and Whisper models are 0.5–3 GB
-  depending on the model chosen.
+- **Disk:** ~550 MB for the installed app (165 MB installer: the engine ships
+  unpacked under `backend\`, plus `ffmpeg.exe` and `ffprobe.exe`). Optional
+  extras are much larger: the GPU acceleration pack is ~2.1 GB, and Whisper
+  models are 0.5–3 GB depending on the model chosen.
 - **GPU: optional.** An NVIDIA GPU only enables the one-click acceleration pack;
   transcription and rendering always work on the CPU.
 
@@ -73,8 +73,8 @@ powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1            # 
 powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1 -SkipSidecar -SkipSigning   # fast local build
 ```
 
-The installer is per-user (no admin), ships `backend.exe`, `ffmpeg.exe` and
-`ffprobe.exe`, and produces signed auto-updater artifacts. See
+The installer is per-user (no admin), ships the onedir engine under `backend\`,
+`ffmpeg.exe` and `ffprobe.exe`, and produces signed auto-updater artifacts. See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the signing/updater secrets and
 [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) for the clean-VM gate.
 

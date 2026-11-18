@@ -135,9 +135,10 @@ jobs:
           $triple = "x86_64-pc-windows-msvc"
           Copy-Item "$env:FFMPEG_DIR\ffmpeg.exe" "src-tauri\binaries\ffmpeg-$triple.exe" -Force
           Copy-Item "$env:FFMPEG_DIR\ffprobe.exe" "src-tauri\binaries\ffprobe-$triple.exe" -Force
-          # tauri-build requires every externalBin to exist; the real backend.exe
-          # is produced by the release workflow, cargo check only needs a file.
-          Copy-Item C:\Windows\System32\where.exe "src-tauri\binaries\backend-$triple.exe" -Force
+          # tauri-build requires every bundled resource to exist; the real onedir
+          # sidecar is produced by the release workflow, cargo check only needs a file.
+          New-Item -ItemType Directory -Force build\sidecar\backend | Out-Null
+          Copy-Item C:\Windows\System32\where.exe "build\sidecar\backend\backend.exe" -Force
       - name: cargo check
         working-directory: src-tauri
         run: cargo check --locked

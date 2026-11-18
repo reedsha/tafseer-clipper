@@ -20,13 +20,19 @@ use tauri_plugin_shell::ShellExt;
 /// Window label declared in `tauri.conf.json` and targeted by the capability.
 const MAIN_WINDOW_LABEL: &str = "main";
 
-/// The bundled sidecar binary name. Tauri resolves this against
-/// `bundle.externalBin` (`binaries/backend`) next to the executable, so the
-/// argument must be the configured name without the `-$TARGET_TRIPLE` suffix.
-const SIDECAR_PROGRAM: &str = "backend";
+/// Folder inside the app's resource directory holding the PyInstaller onedir
+/// sidecar. `tauri.conf.json` maps the `build/sidecar/backend/` staging folder
+/// here, and the NSIS installer lays it out as `<install>\backend\`.
+const SIDECAR_RESOURCE_DIR: &str = "backend";
+
+#[cfg(windows)]
+const SIDECAR_EXE: &str = "backend.exe";
+#[cfg(not(windows))]
+const SIDECAR_EXE: &str = "backend";
 
 /// Port used when the sidecar cannot be spawned (for example a dev run where
-/// `backend.exe` is missing) so a manually started backend still answers.
+/// the sidecar folder was not staged) so a manually started backend still
+/// answers.
 const FALLBACK_SIDECAR_PORT: u16 = 8008;
 
 /// Process-wide handle to the spawned sidecar.
@@ -78,6 +84,37 @@ fn initialization_script(sidecar_url: &str) -> String {
     format!("window.__TAFSEER_SIDECAR_URL__ = {url};\n")
 }
 
+/// Resolve the bundled onedir sidecar at
+/// `resource_dir()/backend/backend.exe`.
+///
+/// The NSIS installer puts resources next to the app executable, and
+/// `tauri-build` copies the same folder next to `target/<profile>` so
+/// `cargo run` / `tauri dev` resolve it the same way.  Returns `None` (never
+/// panics) when the folder was not staged, so the shell can fall back to a
+/// manually launched backend on `FALLBACK_SIDECAR_PORT`.
+fn sidecar_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let resource_dir = match app.path().resource_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("[tafseer] could not resolve the resource directory ({error})");
+            return None;
+        }
+    };
+    let candidate = resource_dir
+        .join(SIDECAR_RESOURCE_DIR)
+        .join(SIDECAR_EXE);
+    if candidate.is_file() {
+        Some(candidate)
+    } else {
+        eprintln!(
+            "[tafseer] sidecar not found at {} (run scripts/build-release.ps1 \
+             -SkipSigning, or pass -SkipSidecar to reuse the staged build)",
+            candidate.display()
+        );
+        None
+    }
+}
+
 /// Spawn `backend.exe` with the loopback port, user-data directories and the
 /// optional GPU acceleration pack directory.
 /// Returns `None` (and never panics) when the binary is missing or fails to
@@ -88,16 +125,13 @@ fn spawn_sidecar(
     paths: &SidecarPaths,
     cuda_dir: Option<&Path>,
 ) -> Option<CommandChild> {
-    let command = match app.shell().sidecar(SIDECAR_PROGRAM) {
-        Ok(command) => command,
-        Err(error) => {
-            eprintln!(
-                "[tafseer] could not resolve the {SIDECAR_PROGRAM} sidecar ({error}); \
-                 falling back to 127.0.0.1:{FALLBACK_SIDECAR_PORT}"
-            );
-            return None;
-        }
+    let Some(executable) = sidecar_executable(app) else {
+        eprintln!(
+            "[tafseer] falling back to 127.0.0.1:{FALLBACK_SIDECAR_PORT}"
+        );
+        return None;
     };
+    let command = app.shell().command(&executable);
 
     let mut command = command
         .env("TAFSEER_HOST", "127.0.0.1")
@@ -142,8 +176,9 @@ fn spawn_sidecar(
         }
         Err(error) => {
             eprintln!(
-                "[tafseer] could not start {SIDECAR_PROGRAM}.exe ({error}); \
-                 falling back to 127.0.0.1:{FALLBACK_SIDECAR_PORT}"
+                "[tafseer] could not start {} ({error}); \
+                 falling back to 127.0.0.1:{FALLBACK_SIDECAR_PORT}",
+                executable.display()
             );
             None
         }

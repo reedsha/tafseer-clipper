@@ -24,9 +24,9 @@ LOG_FILE_NAME = "sidecar.log"
 BACKEND_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BACKEND_DIR.parent
 
-#: Read-only resources bundled by PyInstaller.  In a frozen onefile build this
-#: is the ephemeral ``%TEMP%\\_MEIxxxxxx`` extraction directory, so it must never
-#: hold files that have to survive the process (imported fonts, work files).
+#: Read-only resources bundled by PyInstaller.  In the onedir release build this
+#: is the sidecar's ``_internal`` folder inside the install directory, so it must
+#: never hold files that have to survive the process (imported fonts, work files).
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", BACKEND_DIR))
 
 
@@ -168,10 +168,13 @@ def _candidate_ffmpeg_paths(name: str) -> list[Path]:
 
     names = _executable_names(name)
 
-    # 2. Bundled binary shipped next to backend.exe by the Tauri installer.
+    # 2. Bundled binaries shipped by the Tauri installer.  ffmpeg/ffprobe stay
+    #    `externalBin`s at the install root; the onedir sidecar lives one level
+    #    deeper (`<install>\backend\backend.exe`), so check both directories.
     executable = sys.executable
     executable_dir = Path(executable).resolve().parent if executable else BACKEND_DIR
     candidates.extend(executable_dir / exe for exe in names)
+    candidates.extend(executable_dir.parent / exe for exe in names)
 
     # 3. Read-only resources: the onefile ``_MEIPASS`` dir and, for an onedir
     #    build, the sidecar folder itself (``BACKEND_DIR`` in a source checkout).

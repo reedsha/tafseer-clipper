@@ -48,7 +48,6 @@
       "nsis"
     ],
     "externalBin": [
-      "binaries/backend",
       "binaries/ffmpeg",
       "binaries/ffprobe"
     ],
@@ -66,13 +65,15 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../build/sidecar/backend/": "backend/"
     },
     "windows": {
       "nsis": {
         "installMode": "currentUser",
         "displayLanguageSelector": false,
-        "compression": "lzma"
+        "compression": "lzma",
+        "installerHooks": "nsis-hooks.nsh"
       },
       "signCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File sign-windows.ps1 %1"
     }

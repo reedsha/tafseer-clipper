@@ -94,7 +94,7 @@ Merge that commit; Release Please will propose `v0.2.0`.
 # Full build: frozen sidecar -> stage binaries -> NSIS installer (+ updater artifacts)
 powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1
 
-# Reuse an existing dist/backend.exe
+# Reuse an existing build/sidecar/backend/ onedir sidecar
 powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1 -SkipSidecar
 
 # Unsigned local build (never publish it)
@@ -103,11 +103,13 @@ powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1 -SkipSigning
 
 What the script does:
 
-1. Builds `dist/backend.exe` with PyInstaller from `backend/build_sidecar.spec`
-   using `.build-venv` (create it with
+1. Builds `build/sidecar/backend/` (onedir) with PyInstaller from
+   `backend/build_sidecar.spec` using `.build-venv` (create it with
    `py -3.12 -m venv .build-venv` + `pip install -r backend/requirements.txt pyinstaller`).
-2. Copies `backend.exe`, `ffmpeg.exe`, `ffprobe.exe` into `src-tauri/binaries/`
-   with the Rust target-triple suffix Tauri's `externalBin` requires.
+2. Copies `ffmpeg.exe`, `ffprobe.exe` into `src-tauri/binaries/` with the Rust
+   target-triple suffix Tauri's `externalBin` requires. The sidecar folder is
+   bundled as a resource (`<install>\backend\backend.exe`), **not** an
+   `externalBin`; never build it into the Vite `dist/` folder.
 3. Runs `npx tauri build --bundles nsis` with the updater signing key from
    `TAURI_SIGNING_PRIVATE_KEY` (or `.release-secrets/updater.key`).
 
@@ -196,6 +198,15 @@ before the first release. The `production` environment secret
 decision** (SmartScreen warnings accepted). Set it back to `1` — or delete it —
 once Authenticode credentials are configured, to restore fail-closed.
 
+> **Note on the onedir engine.** Since 0.1.4 the Python engine is a resource
+> folder (`<install>\backend\`) with ~96 `.dll`/`.exe` files, so a build with
+> Authenticode credentials signs each of them through `sign-windows.ps1` as well
+> as the app and the installer (~2 extra minutes; that is expected). Without
+> credentials they stay unsigned, and `scripts/build-release.ps1 -SkipSigning`
+> removes `bundle.windows.signCommand` for that build — Tauri asks `signtool`
+> whether a bundled DLL is already signed *before* deciding to sign it, so the
+> hook cannot stay in place on a machine without the Windows SDK.
+
 > **Note on the key format.** `TAURI_SIGNING_PRIVATE_KEY` must be the **base64
 > text** of the minisign key (exactly the contents of `.release-secrets/updater.key`).
 > The Tauri CLI base64-decodes the value before loading it; passing the decoded
@@ -269,10 +280,9 @@ covered by `docs/RELEASE_CHECKLIST.md` on a desktop VM.
 
 Pass `-Sandbox <dir>` to put the throwaway install somewhere other than
 `<repo>/.smoke`. Use it whenever the checkout lives in a cloud-synced folder
-(OneDrive, Dropbox): the installed `backend.exe` is a PyInstaller onefile that
-extracts to `%TEMP%`, which the script redirects into the sandbox, and that
-extraction fails inside OneDrive with `Could not create temporary directory!`
-for reasons unrelated to the app. Example:
+(OneDrive, Dropbox): the script redirects the sidecar's `%TEMP%` there, and
+temporary-file creation fails inside OneDrive for reasons unrelated to the app.
+Release builds are onedir and no longer extract to `%TEMP%`. Example:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/smoke-installer.ps1 -Sandbox C:\smoke-test

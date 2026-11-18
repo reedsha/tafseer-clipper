@@ -661,12 +661,13 @@ function pickSettingsData(state: SettingsState): SettingsData {
 
 let healthRequestInFlight = false;
 
-/* A freshly spawned sidecar needs a few seconds to unpack/import before its
-   loopback socket accepts connections. The first /health verdict is given a
-   bounded retry window while the UI stays "checking" (so the startup gate
-   keeps the splash up). Without this, a cold start flashes a false "Engine
-   not responding" that self-heals on the next 15 s poll with no user action. */
-const BOOT_GRACE_MS = 15_000;
+/* A freshly spawned sidecar needs a few seconds to import before its loopback
+   socket accepts connections, and the first launch after install can be slower
+   while Windows scans the onedir files. The first /health verdict is given a
+   bounded retry window while the UI stays "checking" (so the startup gate keeps
+   the splash up). Without this, a cold start flashes a false "Engine not
+   responding" that self-heals on the next 15 s poll with no user action. */
+const BOOT_GRACE_MS = 45_000;
 const BOOT_RETRY_MS = 1_500;
 let bootRetryDeadline = 0;
 let bootRetryTimer: number | null = null;

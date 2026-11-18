@@ -83,11 +83,14 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
-      - name: Build frozen sidecar (backend.exe)
+      - name: Build frozen sidecar (onedir)
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check -r backend/requirements.txt pyinstaller
-          python -m PyInstaller --noconfirm --clean backend/build_sidecar.spec
+          python -m PyInstaller --noconfirm --clean --distpath build/sidecar backend/build_sidecar.spec
+          if (-not (Test-Path "build\sidecar\backend\backend.exe")) {
+            throw "PyInstaller did not produce build\sidecar\backend\backend.exe"
+          }
 
       - name: Setup FFmpeg
         id: ffmpeg
@@ -102,7 +105,6 @@ jobs:
           FFMPEG_DIR: ${{ steps.ffmpeg.outputs.ffmpeg-dir }}
         run: |
           $triple = "x86_64-pc-windows-msvc"
-          Copy-Item dist/backend.exe "src-tauri\binaries\backend-$triple.exe" -Force
           Copy-Item "$env:FFMPEG_DIR\ffmpeg.exe" "src-tauri\binaries\ffmpeg-$triple.exe" -Force
           Copy-Item "$env:FFMPEG_DIR\ffprobe.exe" "src-tauri\binaries\ffprobe-$triple.exe" -Force
 
@@ -139,7 +141,6 @@ jobs:
           $bundle = "src-tauri\target\release\bundle\nsis"
           if (-not (Test-Path $bundle)) { $bundle = ".cargo-target\release\bundle\nsis" }
           $files = @(Get-ChildItem $bundle -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in ".exe", ".sig" })
-          $files += @(Get-Item "dist\backend.exe" -ErrorAction SilentlyContinue)
           $files = $files | Where-Object { $_ }
           if ($files.Count -eq 0) { throw "No release artifacts found to checksum." }
           $lines = $files | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }

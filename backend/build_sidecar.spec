@@ -3,12 +3,18 @@
 
 Build (with the sidecar requirements installed)::
 
-    py -m PyInstaller --noconfirm --clean backend/build_sidecar.spec
+    py -m PyInstaller --noconfirm --clean --distpath build/sidecar backend/build_sidecar.spec
 
-The default output is a single-file ``dist/backend.exe`` that is copied to
-``src-tauri/binaries/backend-x86_64-pc-windows-msvc.exe`` (Tauri's
-``externalBin`` naming).  Set ``TAFSEER_SIDECAR_ONEDIR=1`` to emit an onedir
-``dist/backend/`` folder instead (faster start-up, easier to debug).
+The default output is an **onedir** ``build/sidecar/backend/`` folder that Tauri
+bundles as a resource; it is spawned from ``resource_dir()/backend/backend.exe``.
+Onefile extraction (275 MB / 800+ files into ``%TEMP%`` on every first launch)
+was the cause of the multi-minute first start, so it is no longer the release
+layout.
+
+Always pass ``--distpath build/sidecar``: the repository root ``dist/`` is the
+Vite frontend output and is emptied by ``pnpm build``.  Set
+``TAFSEER_SIDECAR_ONEFILE=1`` to emit a single-file ``backend.exe`` instead
+(legacy/debug builds only).
 
 The hooks below exist because static analysis cannot see these runtime assets:
 
@@ -129,12 +135,13 @@ analysis = Analysis(
 # MSVC runtime: use the build machine's current redistributable, not a wheel's
 # --------------------------------------------------------------------------- #
 # Some wheels (av/onnxruntime/…) still ship the Visual Studio 2019 (14.29)
-# redistributable DLLs. In a PyInstaller onefile build they are extracted next
-# to the app, and the extraction directory precedes System32 in the DLL search
-# order. The CUDA/cuDNN libraries from the optional GPU acceleration pack are
-# built with the current MSVC runtime (14.4x/14.5x), so mixing them crashes at
-# GPU model load (0xc0000005 in MSVCP140.dll). Replace the bundled copies with
-# the build machine's redistributable files (Microsoft permits redistribution).
+# redistributable DLLs. PyInstaller puts them next to the frozen app (onedir:
+# ``_internal``; onefile: the extraction directory), and that directory precedes
+# System32 in the DLL search order. The CUDA/cuDNN libraries from the optional
+# GPU acceleration pack are built with the current MSVC runtime (14.4x/14.5x),
+# so mixing them crashes at GPU model load (0xc0000005 in MSVCP140.dll). Replace
+# the bundled copies with the build machine's redistributable files (Microsoft
+# permits redistribution).
 VC_RUNTIME_DLLS = (
     "msvcp140.dll",
     "msvcp140_1.dll",
@@ -160,14 +167,23 @@ for _name in VC_RUNTIME_DLLS:
 
 pyz = PYZ(analysis.pure)
 
-ONEDIR = os.environ.get("TAFSEER_SIDECAR_ONEDIR", "").strip().lower() in {
+ONEFILE = os.environ.get("TAFSEER_SIDECAR_ONEFILE", "").strip().lower() in {
     "1",
     "true",
     "yes",
     "on",
 }
 
-if ONEDIR:
+# `dist/` belongs to Vite (`pnpm build` empties it). Refuse to place the sidecar
+# there, otherwise a frontend build silently deletes the backend the installer
+# was supposed to bundle.
+if Path(DISTPATH).resolve() == (BACKEND_DIR.parent / "dist").resolve():  # noqa: F821
+    raise SystemExit(
+        "[spec] Refusing to write the sidecar into the frontend's dist/ folder. "
+        "Pass --distpath build/sidecar (see scripts/build-release.ps1)."
+    )
+
+if not ONEFILE:
     exe = EXE(
         pyz,
         analysis.scripts,

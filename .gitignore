@@ -85,4 +85,6 @@ src-tauri/target/
 .kangentic/
 build/
 kangentic.json
+# scripts/smoke-installer.ps1 throwaway install sandbox
+.smoke/
 

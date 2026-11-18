@@ -23,7 +23,10 @@ import { useSettingsStore } from "@/store/settingsStore";
  * wedged in "checking"; the header LED then reports the real state.
  */
 const MIN_DISPLAY_MS = 900;
-const HARD_CAP_MS = 20_000;
+// Failsafe only: releases shortly after the store's 45 s boot grace, so a
+// wedged handshake can never hold the splash forever. A genuine failure has
+// already published "offline" by then.
+const HARD_CAP_MS = 50_000;
 const FADE_MS = 360;
 
 export function StartupGate() {

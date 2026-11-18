@@ -22,7 +22,10 @@ supports 8.1+, and WebView2 is installed by the NSIS bootstrapper when missing
       require a valid signature and timestamp here instead.
 - [ ] Installer file name matches the tag (`Tafseer Clipper_0.1.0_x64-setup.exe`).
 - [ ] App version shows `0.1.0` in Settings → Storage (Updates) and `GET /health`.
-- [ ] `THIRD_PARTY_NOTICES.md` is present in the install directory (`resources/`).
+- [ ] `THIRD_PARTY_NOTICES.md` is present in the install directory.
+- [ ] The engine is the onedir resource: `backend\backend.exe` and
+      `backend\_internal\` exist, and there is **no** `backend.exe` at the
+      install root (an upgrade must have removed the 0.1.3 onefile).
 
 ## 1. Launch and shell plumbing
 
