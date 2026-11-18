@@ -130,6 +130,12 @@ export interface GlossaryEntry {
 export interface EditorDefaults {
   cutBufferSeconds: number;
   autoPad: boolean;
+  /** Seconds the Step 2 waveform edge buttons grow/trim the clip by. */
+  edgeButtonStepSeconds: number;
+  /** Seconds the Step 2 Shift/Alt + arrow shortcuts grow/trim the clip by. */
+  edgeKeyStepSeconds: number;
+  /** When true the keyboard step follows the button step. */
+  edgeShareStep: boolean;
   filenameTemplate: string;
   maxCharsPerLine: number;
   /** Physical lines per subtitle cue: 1 or 2 (default 2). */
@@ -355,6 +361,9 @@ const DEFAULT_DATA: SettingsData = {
   editor: {
     cutBufferSeconds: 0.3,
     autoPad: true,
+    edgeButtonStepSeconds: 5,
+    edgeKeyStepSeconds: 0.2,
+    edgeShareStep: false,
     filenameTemplate: "{LectureName}_Clip{01}_{Title}.mp4",
     maxCharsPerLine: 40,
     subtitleMaxLines: 2,
@@ -632,6 +641,17 @@ function coerceSettingsData(raw: unknown): SettingsData {
         "cutBufferSeconds",
       ),
       autoPad: asBoolean(editor.autoPad, DEFAULT_DATA.editor.autoPad),
+      edgeButtonStepSeconds: asRangedNumber(
+        editor.edgeButtonStepSeconds,
+        DEFAULT_DATA.editor.edgeButtonStepSeconds,
+        "edgeButtonStepSeconds",
+      ),
+      edgeKeyStepSeconds: asRangedNumber(
+        editor.edgeKeyStepSeconds,
+        DEFAULT_DATA.editor.edgeKeyStepSeconds,
+        "edgeKeyStepSeconds",
+      ),
+      edgeShareStep: asBoolean(editor.edgeShareStep, DEFAULT_DATA.editor.edgeShareStep),
       filenameTemplate: asString(editor.filenameTemplate, DEFAULT_DATA.editor.filenameTemplate),
       maxCharsPerLine: asRangedNumber(
         editor.maxCharsPerLine,

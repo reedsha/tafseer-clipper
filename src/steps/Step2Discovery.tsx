@@ -60,13 +60,12 @@ import {
   MIN_RENDERABLE_CLIP_SECONDS,
   normalizeSpeechRange,
   rangesOverlap,
-  speechFromCut,
 } from "@/lib/clipMath";
 import { toMediaSrc } from "@/lib/media";
-import { formatClock } from "@/lib/format";
+import { clamp, formatClock } from "@/lib/format";
 import { DEFAULT_DISCOVERY_SETTINGS, type ProjectClip, type ProjectData } from "@/lib/projectTypes";
 import { buildDecisionProviderFor, buildProviderFor, describeProviderGap } from "@/lib/providers";
-import { DISCOVERY_LIMITS } from "@/lib/settingsLimits";
+import { coerceToRange, DISCOVERY_LIMITS, NUMERIC_LIMITS } from "@/lib/settingsLimits";
 import { useAiActivityStore } from "@/store/aiActivityStore";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore } from "@/store/settingsStore";
@@ -75,10 +74,6 @@ import { useUiStore } from "@/store/uiStore";
 type DiscoveryMode = "initial" | "reroll" | "replace";
 type CutEdge = "start" | "end";
 type RefindMode = "reroll" | "replace";
-
-/** One click / one Shift+arrow on the trim edge adds this many seconds. */
-const EDGE_BUTTON_STEP = 5;
-const EDGE_KEY_STEP = 0.2;
 
 /** Playback-rate ladder for the J/K/L shuttle (1× = normal speed). */
 const SHUTTLE_RATES = [0.25, 0.5, 1, 1.5, 2, 3, 4] as const;
@@ -226,6 +221,7 @@ function TrimRow({
   label,
   value,
   speechValue,
+  step,
   active,
   onActivate,
   onNudge,
@@ -233,6 +229,8 @@ function TrimRow({
   label: string;
   value: number;
   speechValue: number;
+  /** Seconds moved by this row's nudge buttons (the shared button step). */
+  step: number;
   active: boolean;
   onActivate: () => void;
   onNudge: (delta: number) => void;
@@ -265,22 +263,24 @@ function TrimRow({
         <Button
           variant="outline"
           size="icon-xs"
-          aria-label={`Nudge ${label} back 0.2 seconds`}
+          aria-label={`Nudge ${label} back ${step} seconds`}
           onClick={(event) => {
             event.stopPropagation();
-            onNudge(-0.2);
+            onNudge(-step);
           }}
         >
           <Minus className="size-3" />
         </Button>
-        <span className="flex-1 text-center text-[10px] text-muted-foreground">0.2 s</span>
+        <span className="flex-1 text-center text-[10px] tabular-nums text-muted-foreground">
+          {step} s
+        </span>
         <Button
           variant="outline"
           size="icon-xs"
-          aria-label={`Nudge ${label} forward 0.2 seconds`}
+          aria-label={`Nudge ${label} forward ${step} seconds`}
           onClick={(event) => {
             event.stopPropagation();
-            onNudge(0.2);
+            onNudge(step);
           }}
         >
           <Plus className="size-3" />
@@ -353,6 +353,8 @@ export function Step2Discovery() {
   );
   const [activeEdge, setActiveEdge] = useState<CutEdge>("start");
   const [bufferDraft, setBufferDraft] = useState(editor.cutBufferSeconds);
+  const [buttonStepDraft, setButtonStepDraft] = useState(String(editor.edgeButtonStepSeconds));
+  const [keyStepDraft, setKeyStepDraft] = useState(String(editor.edgeKeyStepSeconds));
   const [playhead, setPlayhead] = useState(0);
   const [shuttleRate, setShuttleRate] = useState(1);
 
@@ -395,6 +397,11 @@ export function Step2Discovery() {
   useEffect(() => {
     setBufferDraft(editor.cutBufferSeconds);
   }, [editor.cutBufferSeconds]);
+
+  useEffect(() => {
+    setButtonStepDraft(String(editor.edgeButtonStepSeconds));
+    setKeyStepDraft(String(editor.edgeKeyStepSeconds));
+  }, [editor.edgeButtonStepSeconds, editor.edgeKeyStepSeconds]);
 
   useEffect(() => {
     setMinDraft(String(project?.discovery.minDuration ?? DEFAULT_DISCOVERY_SETTINGS.minDuration));
@@ -599,7 +606,14 @@ export function Step2Discovery() {
     }
   }, []);
 
-  const nudgeEdge = useCallback((edge: CutEdge, delta: number) => {
+  /**
+   * Move one edge of the selected clip by `delta` seconds: a negative value
+   * moves it earlier (grow the start, trim the end), a positive value moves it
+   * later (trim the start, grow the end). The raw speech bounds stay the
+   * source of truth and the cut is recomputed through the current buffer so
+   * every edge change remains reversible.
+   */
+  const adjustEdge = useCallback((edge: CutEdge, delta: number) => {
     const current = useProjectStore.getState().project;
     if (!current) return;
     const clip =
@@ -619,74 +633,9 @@ export function Step2Discovery() {
       toast.error("Clip is too short to render — minimum 0.5 s.");
       return;
     }
-    // User-driven nudges keep the drag exact: no 1 s AI-proposal minimum.
+    // User-driven edge changes keep the exact step: no 1 s AI-proposal minimum.
     const normalized = normalizeSpeechRange(nextSpeechStart, nextSpeechEnd, current.duration, 0);
     if (!normalized) return;
-    useProjectStore.getState().updateClip(clip.id, {
-      speechStart: normalized.start,
-      speechEnd: normalized.end,
-      start: cut.start,
-      end: cut.end,
-    });
-  }, []);
-
-  /**
-   * Pull more of the lecture into the selected clip at one edge. Like the
-   * nudge path, the raw speech bounds are the source of truth and the cut is
-   * recomputed through the current buffer, so the change stays reversible.
-   */
-  const extendEdge = useCallback((edge: CutEdge, seconds: number) => {
-    const current = useProjectStore.getState().project;
-    if (!current) return;
-    const clip =
-      current.clips.find((item) => item.id === current.selectedClipId) ?? current.clips[0];
-    if (!clip) return;
-    const maxTime = current.duration;
-    const nextSpeechStart =
-      edge === "start" ? Math.max(0, clip.speechStart - seconds) : clip.speechStart;
-    const nextSpeechEnd =
-      edge === "end" ? (maxTime == null ? clip.speechEnd + seconds : Math.min(maxTime, clip.speechEnd + seconds)) : clip.speechEnd;
-    const settings = useSettingsStore.getState();
-    const cut = applyCutBuffer(nextSpeechStart, nextSpeechEnd, {
-      duration: current.duration,
-      buffer: settings.editor.cutBufferSeconds,
-      autoPad: settings.editor.autoPad,
-    });
-    if (cut.end - cut.start < MIN_RENDERABLE_CLIP_SECONDS) return;
-    const normalized = normalizeSpeechRange(nextSpeechStart, nextSpeechEnd, current.duration, 0);
-    if (!normalized) return;
-    useProjectStore.getState().updateClip(clip.id, {
-      speechStart: normalized.start,
-      speechEnd: normalized.end,
-      start: cut.start,
-      end: cut.end,
-    });
-  }, []);
-
-  const handleTrimCommit = useCallback((range: { start: number; end: number }) => {
-    const current = useProjectStore.getState().project;
-    if (!current) return;
-    const clip =
-      current.clips.find((item) => item.id === current.selectedClipId) ?? current.clips[0];
-    if (!clip) return;
-    const settings = useSettingsStore.getState();
-    const context = {
-      duration: current.duration,
-      buffer: settings.editor.cutBufferSeconds,
-      autoPad: settings.editor.autoPad,
-    };
-    // The render floor applies to the dragged cut; rejecting silently was the
-    // old bug (drag below 1 s + 2×buffer did nothing with zero feedback).
-    if (range.end - range.start < MIN_RENDERABLE_CLIP_SECONDS) {
-      toast.error("Clip is too short to render — minimum 0.5 s.");
-      return;
-    }
-    const speech = speechFromCut(range.start, range.end, context);
-    // User-driven trims keep the drag exact: no 1 s AI-proposal minimum (with
-    // auto-pad on, a 0.5 s cut has ~0 s of speech inside it).
-    const normalized = normalizeSpeechRange(speech.start, speech.end, current.duration, 0);
-    if (!normalized) return;
-    const cut = applyCutBuffer(normalized.start, normalized.end, context);
     useProjectStore.getState().updateClip(clip.id, {
       speechStart: normalized.start,
       speechEnd: normalized.end,
@@ -737,6 +686,9 @@ export function Step2Discovery() {
     applyShuttleRate(1);
   }, [applyShuttleRate]);
 
+  const buttonStep = editor.edgeButtonStepSeconds;
+  const keyStep = editor.edgeShareStep ? editor.edgeButtonStepSeconds : editor.edgeKeyStepSeconds;
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (
@@ -753,40 +705,46 @@ export function Step2Discovery() {
       ) {
         return;
       }
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.metaKey || event.ctrlKey) return;
+
+      const shift = event.shiftKey;
+      const alt = event.altKey;
 
       switch (event.key) {
         case " ":
+          if (shift || alt) break;
           event.preventDefault();
           videoRef.current?.togglePlay();
           break;
         case "j":
         case "J":
+          if (shift || alt) break;
           event.preventDefault();
           shuttle(-1);
           break;
         case "k":
         case "K":
+          if (shift || alt) break;
           event.preventDefault();
           pauseShuttle();
           break;
         case "l":
         case "L":
+          if (shift || alt) break;
           event.preventDefault();
           shuttle(1);
           break;
         case "ArrowLeft":
+          // Shift owns the cut-in edge, Alt owns the cut-out edge; the arrow
+          // is the direction that edge moves. Plain arrows do nothing here.
+          if (shift === alt) break;
           event.preventDefault();
-          // Shift+arrow extends that edge; plain arrow nudges the active edge.
-          // Key repeat is intentionally left on so holding the key extends
-          // continuously.
-          if (event.shiftKey) extendEdge("start", EDGE_KEY_STEP);
-          else nudgeEdge(activeEdge, -0.2);
+          adjustEdge(shift ? "start" : "end", -keyStep);
           break;
         case "ArrowRight":
+          if (shift === alt) break;
           event.preventDefault();
-          if (event.shiftKey) extendEdge("end", EDGE_KEY_STEP);
-          else nudgeEdge(activeEdge, 0.2);
+          adjustEdge(shift ? "start" : "end", keyStep);
           break;
         default:
           break;
@@ -794,7 +752,7 @@ export function Step2Discovery() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeEdge, extendEdge, nudgeEdge, pauseShuttle, shuttle]);
+  }, [adjustEdge, keyStep, pauseShuttle, shuttle]);
 
   function handleApprove(clip: ProjectClip) {
     approveClip(clip.id, !clip.approved);
@@ -852,6 +810,38 @@ export function Step2Discovery() {
     }
     setMinDraft(String(min));
     setMaxDraft(String(max));
+  }
+
+  function commitEdgeStep(which: "button" | "key") {
+    const draft = which === "button" ? buttonStepDraft : keyStepDraft;
+    const raw = draft.trim() === "" ? Number.NaN : Number(draft);
+    const limit = which === "button" ? "edgeButtonStepSeconds" : "edgeKeyStepSeconds";
+    const fallback =
+      which === "button" ? editor.edgeButtonStepSeconds : editor.edgeKeyStepSeconds;
+    if (!Number.isFinite(raw) || raw <= 0) {
+      toast.error("Step size needs a positive number", {
+        description: `Use a value from ${NUMERIC_LIMITS[limit].min} to ${NUMERIC_LIMITS[limit].max} seconds.`,
+      });
+      setDraftForStep(which, fallback);
+      return;
+    }
+    const step = coerceToRange(raw, fallback, NUMERIC_LIMITS[limit]);
+    if (which === "button") {
+      updateEditor(
+        editor.edgeShareStep
+          ? { edgeButtonStepSeconds: step, edgeKeyStepSeconds: step }
+          : { edgeButtonStepSeconds: step },
+      );
+      if (editor.edgeShareStep) setKeyStepDraft(String(step));
+    } else {
+      updateEditor({ edgeKeyStepSeconds: step });
+    }
+    setDraftForStep(which, step);
+  }
+
+  function setDraftForStep(which: "button" | "key", value: number) {
+    if (which === "button") setButtonStepDraft(String(value));
+    else setKeyStepDraft(String(value));
   }
 
   if (!project) {
@@ -1223,11 +1213,16 @@ export function Step2Discovery() {
                 clipEnd={selected?.end ?? 0}
                 playhead={playhead}
                 onSeek={(seconds) => {
-                  setPlayhead(seconds);
-                  videoRef.current?.seekTo(seconds);
+                  // The waveform is clipped to the selected clip, so seeking
+                  // can never leave its boundaries.
+                  const next = selected
+                    ? clamp(seconds, selected.start, selected.end)
+                    : seconds;
+                  setPlayhead(next);
+                  videoRef.current?.seekTo(next);
                 }}
-                onTrimCommit={handleTrimCommit}
-                onExtend={(edge) => extendEdge(edge, EDGE_BUTTON_STEP)}
+                onExpand={(edge) => adjustEdge(edge, edge === "start" ? -buttonStep : buttonStep)}
+                onCollapse={(edge) => adjustEdge(edge, edge === "start" ? buttonStep : -buttonStep)}
               />
             </div>
 
@@ -1238,24 +1233,92 @@ export function Step2Discovery() {
                     label="Cut in"
                     value={selected.start}
                     speechValue={selected.speechStart}
+                    step={buttonStep}
                     active={activeEdge === "start"}
                     onActivate={() => setActiveEdge("start")}
                     onNudge={(delta) => {
                       setActiveEdge("start");
-                      nudgeEdge("start", delta);
+                      adjustEdge("start", delta);
                     }}
                   />
                   <TrimRow
                     label="Cut out"
                     value={selected.end}
                     speechValue={selected.speechEnd}
+                    step={buttonStep}
                     active={activeEdge === "end"}
                     onActivate={() => setActiveEdge("end")}
                     onNudge={(delta) => {
                       setActiveEdge("end");
-                      nudgeEdge("end", delta);
+                      adjustEdge("end", delta);
                     }}
                   />
+                </div>
+
+                <div className="rounded-md border border-border bg-card/30 px-3 py-2.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <Clock3 className="size-3.5 text-muted-foreground" />
+                      <span className="text-xs font-medium text-foreground">Edge step size</span>
+                    </div>
+                    <Switch
+                      checked={editor.edgeShareStep}
+                      onCheckedChange={(checked) => {
+                        if (checked) {
+                          updateEditor({
+                            edgeShareStep: true,
+                            edgeKeyStepSeconds: editor.edgeButtonStepSeconds,
+                          });
+                          setKeyStepDraft(String(editor.edgeButtonStepSeconds));
+                        } else {
+                          updateEditor({ edgeShareStep: false });
+                        }
+                      }}
+                      aria-label="Use the same step for buttons and keys"
+                    />
+                  </div>
+                  <div className="mt-2 flex items-end gap-2">
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <Label htmlFor="edge-button-step" className="text-[10px] text-muted-foreground">
+                        Buttons (s)
+                      </Label>
+                      <Input
+                        id="edge-button-step"
+                        type="number"
+                        inputMode="decimal"
+                        min={NUMERIC_LIMITS.edgeButtonStepSeconds.min}
+                        max={NUMERIC_LIMITS.edgeButtonStepSeconds.max}
+                        step={NUMERIC_LIMITS.edgeButtonStepSeconds.step}
+                        value={buttonStepDraft}
+                        onChange={(event) => setButtonStepDraft(event.target.value)}
+                        onBlur={() => commitEdgeStep("button")}
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <Label htmlFor="edge-key-step" className="text-[10px] text-muted-foreground">
+                        Keyboard (s)
+                      </Label>
+                      <Input
+                        id="edge-key-step"
+                        type="number"
+                        inputMode="decimal"
+                        min={NUMERIC_LIMITS.edgeKeyStepSeconds.min}
+                        max={NUMERIC_LIMITS.edgeKeyStepSeconds.max}
+                        step={NUMERIC_LIMITS.edgeKeyStepSeconds.step}
+                        value={keyStepDraft}
+                        onChange={(event) => setKeyStepDraft(event.target.value)}
+                        onBlur={() => commitEdgeStep("key")}
+                        disabled={editor.edgeShareStep}
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                  </div>
+                  <p className="mt-1.5 text-[10px] text-muted-foreground">
+                    {editor.edgeShareStep
+                      ? "Buttons and keys use the same step."
+                      : "Set one step for the waveform buttons and one for the shortcuts."}
+                  </p>
                 </div>
 
                 <div className="rounded-md border border-border bg-card/30 px-3 py-2.5">
@@ -1311,7 +1374,8 @@ export function Step2Discovery() {
                     suffix="×"
                     format={{ maximumFractionDigits: 2 }}
                   />
-                  ) · J slower, then rewind · ←/→ nudge 0.2 s · Shift+←/Shift+→ extend 0.2 s
+                  ) · J slower, then rewind · Shift+← grow in / Shift+→ trim in · Alt+← trim out /
+                  Alt+→ grow out · {keyStep} s per key press
                 </p>
               </div>
             ) : (
