@@ -80,6 +80,38 @@ backend/config.py            APP_VERSION = "0.1.0"
 > Release Please changelog, and a hand-made tag leaves `main` without the
 > matching version bump.
 
+#### If the draft exists but the tag does not
+
+Release Please usually pushes the tag with the draft. If it only opened the
+draft (check `git ls-remote --tags origin "vX.Y.Z*"`), the Windows build never
+starts, because `release.yml` triggers on the tag:
+
+```bash
+git push origin "<merge-commit-sha>:refs/tags/vX.Y.Z"
+```
+
+Pushing that tag flips the draft's tag to a placeholder (`untagged-…`), so the
+release has to be re-attached before publishing. `release.yml` uploads by
+release id, so its assets are unaffected:
+
+```bash
+gh api --method PATCH "repos/OWNER/REPO/releases/<release-id>" \
+  -f "tag_name=vX.Y.Z" -f "target_commitish=<merge-commit-sha>"
+```
+
+#### Publishing
+
+Publish with **`prerelease=false`**: the updater endpoint is
+`releases/latest/download/latest.json`, GitHub never marks a pre-release as
+"Latest", and `make_latest` is ignored for pre-releases. A release published as
+a pre-release therefore leaves existing installs updating to the *previous*
+version.
+
+```bash
+gh api --method PATCH "repos/OWNER/REPO/releases/<release-id>" \
+  -F "draft=false" -F "prerelease=false" -F "make_latest=true"
+```
+
 ### Making a release without a code change
 
 ```bash
