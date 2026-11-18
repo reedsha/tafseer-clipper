@@ -11,6 +11,24 @@ Conventional Commit into `main`, and a `chore(release): vX.Y.Z` pull request
 appears that bumps every version anchor and regenerates this file. Merging that
 pull request creates the `vX.Y.Z` tag and starts the Windows release build.
 
+## [0.1.6-beta](https://github.com/reedsha/tafseer-clipper/compare/v0.1.5-beta...v0.1.6-beta) (2026-11-18)
+
+
+### Features
+
+* allow a separate Arabic verification model ([0746d7d](https://github.com/reedsha/tafseer-clipper/commit/0746d7d5f13049e17c699dff2aefed6c2e013da4))
+* make clip finding explicit and configurable ([34d7224](https://github.com/reedsha/tafseer-clipper/commit/34d722496ba734bb5c021e09777b2a87b620ba95))
+
+
+### Bug Fixes
+
+* write the accel manifest without a UTF-8 BOM ([be981c6](https://github.com/reedsha/tafseer-clipper/commit/be981c6b51d55b86e5110dcd04afcca490fe23e6))
+
+
+### Miscellaneous Chores
+
+* pin release version ([90f39fe](https://github.com/reedsha/tafseer-clipper/commit/90f39fe68d55485b03228fcedda223de0e237e09))
+
 ## [0.1.5-beta](https://github.com/reedsha/tafseer-clipper/compare/v0.1.4-beta...v0.1.5-beta) (2026-11-18)
 
 
