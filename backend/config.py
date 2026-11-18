@@ -16,7 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 
 APP_NAME = "Tafseer Clipper Sidecar"
-APP_VERSION = "0.1.3-beta"  # x-release-please-version
+APP_VERSION = "0.1.4-beta"  # x-release-please-version
 
 #: Rotating log file name inside :func:`log_dir`.
 LOG_FILE_NAME = "sidecar.log"

@@ -11,6 +11,13 @@ Conventional Commit into `main`, and a `chore(release): vX.Y.Z` pull request
 appears that bumps every version anchor and regenerates this file. Merging that
 pull request creates the `vX.Y.Z` tag and starts the Windows release build.
 
+## [0.1.4-beta](https://github.com/reedsha/tafseer-clipper/compare/v0.1.3-beta...v0.1.4-beta) (2026-11-18)
+
+
+### Bug Fixes
+
+* ship the engine as an onedir bundle so first launch has no false engine error ([13e76e2](https://github.com/reedsha/tafseer-clipper/commit/13e76e2e9671c33db35266e446418f16c3f4e456))
+
 ## [0.1.3-beta](https://github.com/reedsha/tafseer-clipper/compare/v0.1.2-beta...v0.1.3-beta) (2026-11-17)
 
 
