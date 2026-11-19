@@ -1,8 +1,10 @@
+import { L } from "@/lib/i18n";
 import NumberFlow from "@number-flow/react";
 import { Check, History, Settings, Settings2 } from "lucide-react";
 import { cn } from "cn";
 
 import { AiActivityLine } from "@/components/AiActivityLine";
+import { TaskCenter } from "@/components/TaskCenter";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
@@ -16,6 +18,7 @@ import {
   SidecarStatusDot,
 } from "@/components/SidecarStatusDot";
 import { describeAcceleration } from "@/lib/acceleration";
+import { useAppVersion } from "@/lib/appVersion";
 import { STEP_LABELS, type WizardStep } from "@/lib/projectTypes";
 import { useAiActivityStore } from "@/store/aiActivityStore";
 import { useProjectStore } from "@/store/projectStore";
@@ -68,6 +71,8 @@ export function StepperHeader() {
   const sidecar = useSettingsStore((state) => state.sidecar);
   /** Vendor-neutral acceleration state for the engine status tooltip. */
   const acceleration = describeAcceleration(sidecar.health);
+  /** The installed app's version; the sidecar can lag behind after an update. */
+  const appVersion = useAppVersion();
 
   const currentStep = project?.step ?? 1;
   const renderJob = useRenderStore((state) => state.job);
@@ -88,7 +93,7 @@ export function StepperHeader() {
           but hide the step tabs — there is nothing to step through until a
           session is opened or created. */}
       {project ? (
-        <nav aria-label="Wizard steps" className="relative flex h-full items-end gap-1.5">
+        <nav aria-label={L("Wizard steps")} className="relative flex h-full items-end gap-1.5">
           {STEPS.map((step) => {
             const active = currentStep === step;
             const done = stepCompletion(step, project, renderDoneForProject);
@@ -167,14 +172,15 @@ export function StepperHeader() {
       ) : null}
 
       <div className="relative ml-auto flex items-center gap-1.5">
+        <TaskCenter />
         <Popover open={aiActivityOpen} onOpenChange={setAiActivityOpen}>
           <PopoverTrigger asChild>
             <Button
               type="button"
               variant="ghost"
               size="icon-sm"
-              aria-label="Recent AI activity"
-              title="Recent AI activity"
+              aria-label={L("Recent AI activity")}
+              title={L("Recent AI activity")}
               className="text-muted-foreground"
             >
               <History className="size-3.5" />
@@ -182,7 +188,7 @@ export function StepperHeader() {
           </PopoverTrigger>
           <PopoverContent align="end" className="w-80 p-2">
             <p className="px-1 pb-1.5 text-[11px] font-medium text-muted-foreground">
-              Recent AI activity
+              {L("Recent AI activity")}
             </p>
             {aiEntries.length ? (
               <div className="space-y-1">
@@ -197,7 +203,7 @@ export function StepperHeader() {
               </div>
             ) : (
               <p className="px-1 py-2 text-xs leading-relaxed text-muted-foreground">
-                No AI runs yet this session.
+                {L("No AI runs yet this session.")}
               </p>
             )}
           </PopoverContent>
@@ -222,14 +228,19 @@ export function StepperHeader() {
           <TooltipContent side="bottom" className="max-w-64 text-xs">
             {sidecar.status === "online" && sidecar.health ? (
               <span className="flex flex-col gap-0.5">
-                <span>Engine v{sidecar.health.version}</span>
+                <span>Tafseer Clipper v{appVersion ?? sidecar.health.version}</span>
+                {appVersion && sidecar.health.version !== appVersion ? (
+                  <span className="text-muted-foreground">
+                    Engine v{sidecar.health.version} (bundled engine)
+                  </span>
+                ) : null}
                 <span>{acceleration.label}</span>
                 {acceleration.gpuName ? (
                   <span className="text-muted-foreground">Detected: {acceleration.gpuName}</span>
                 ) : null}
                 {acceleration.gpuDetected ? (
                   <span className="inline-flex items-baseline gap-1">
-                    <span>GPU memory:</span>
+                    <span>{L("GPU memory:")}</span>
                     <NumberFlow
                       value={sidecar.health.vram_mb}
                       suffix=" MB"
@@ -239,7 +250,7 @@ export function StepperHeader() {
                 ) : null}
               </span>
             ) : (
-              (sidecar.error ?? "Click to check the processing engine again.")
+              (sidecar.error ?? L("Click to check the processing engine again."))
             )}
           </TooltipContent>
         </Tooltip>
@@ -249,7 +260,7 @@ export function StepperHeader() {
             <Button
               variant="ghost"
               size="icon-sm"
-              aria-label="Open settings"
+              aria-label={L("Open settings")}
               onClick={() => openSettings()}
             >
               <Settings className="size-4" />

@@ -31,7 +31,9 @@ embed-resource = "3.0.12"
 
 [dependencies]
 # `protocol-asset` backs `convertFileSrc(...)` for lecture video / WAV playback in the renderer.
-tauri = { version = "2", features = ["protocol-asset"] }
+# `tray-icon` lets the user keep long-running tasks alive in the system tray
+# when they close the window (AGENTS.md §3 — window lifecycle only).
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-opener = "2"

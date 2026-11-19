@@ -117,6 +117,12 @@ test.describe("app shell", () => {
     ).toBeVisible();
     await expect(page.getByText(/1\.5 GB/)).toBeVisible();
 
+    // The AI setup card is gone; its vocabulary hint now lives on this screen.
+    await expect(page.getByRole("heading", { name: "AI setup" })).toHaveCount(0);
+    await expect(
+      page.getByRole("textbox", { name: "Transcription vocabulary hint" }),
+    ).toBeVisible();
+
     // The hint names GPU/CPU capability only — never a product line, and the
     // CPU fallback is always stated. Either the GPU is ready or the CPU path
     // is spelled out, depending on the machine running the suite.
@@ -152,7 +158,8 @@ test.describe("app shell", () => {
     await page.getByRole("button", { name: "Language", exact: true }).click();
     await page.getByRole("combobox", { name: "Language", exact: true }).click();
     await page.getByRole("option", { name: "ไทย" }).click();
-    await page.getByRole("button", { name: "Back to app" }).click();
+    // The settings chrome also translates once Thai is selected.
+    await page.getByRole("button", { name: "กลับไปแอป" }).click();
 
     await expect(page.getByRole("heading", { name: "เพิ่มบทบรรยายของคุณ" })).toBeVisible();
   });

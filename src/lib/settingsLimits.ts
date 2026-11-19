@@ -21,7 +21,12 @@ export const NUMERIC_LIMITS = {
   thaiOutlineWidth: { min: 0, max: 8, step: 0.5 },
   /** Stored as a 0–1 fraction; the drawer edits it as 0–100 %. */
   boxOpacity: { min: 0, max: 1, step: 0.01 },
+  /** Per-line vertical move in export-frame pixels, on top of the default anchor. */
+  verticalOffset: { min: -900, max: 900, step: 1 },
   cutBufferSeconds: { min: 0, max: 1.5, step: 0.05 },
+  /** Step 2 edge buttons / keyboard shortcuts for growing or trimming a clip. */
+  edgeButtonStepSeconds: { min: 0.1, max: 60, step: 0.1 },
+  edgeKeyStepSeconds: { min: 0.1, max: 60, step: 0.1 },
   maxCharsPerLine: { min: 20, max: 80, step: 1 },
   /** Upper bound is a sanity guard; the interval list stays open-ended. */
   autosaveIntervalMs: { min: 0, max: 60 * 60_000, step: 1_000 },

@@ -76,11 +76,14 @@ export type DecisionSlotMode = "local" | "cloud";
 export type DecisionFormat = "auto" | "systemone" | "decisions";
 
 /**
- * One fast-judgment slot. `enabled: false` (or an empty model) means the step
- * keeps today's path; the connection address and key are never duplicated here
- * — they are reused from `ollama` / `cloud`.
+ * One fast-judgment slot. Judgments are always on: the `enabled` field is kept
+ * so older settings backups still load, but coercion forces it to `true` — an
+ * empty model (or an unreachable service) is what makes a step use its standard
+ * path. The connection address and key are never duplicated here; they are
+ * reused from `ollama` / `cloud`.
  */
 export interface DecisionSlotSettings {
+  /** Always `true`; retained only for backward-compatible settings backups. */
   enabled: boolean;
   mode: DecisionSlotMode;
   model: string;
@@ -101,6 +104,8 @@ export interface ArabicStyle {
   /** Multiplier that keeps Arabic diacritics from clipping. */
   lineHeightPad: number;
   bold: boolean;
+  /** Vertical move from the default anchor, in export-frame pixels. */
+  verticalOffset: number;
 }
 
 export interface ThaiStyle {
@@ -111,6 +116,8 @@ export interface ThaiStyle {
   outlineColor: string;
   boxOpacity: number;
   bold: boolean;
+  /** Vertical move from the default anchor, in export-frame pixels. */
+  verticalOffset: number;
 }
 
 export interface StylePreset {
@@ -130,6 +137,12 @@ export interface GlossaryEntry {
 export interface EditorDefaults {
   cutBufferSeconds: number;
   autoPad: boolean;
+  /** Seconds the Step 2 waveform edge buttons grow/trim the clip by. */
+  edgeButtonStepSeconds: number;
+  /** Seconds the Step 2 Shift/Alt + arrow shortcuts grow/trim the clip by. */
+  edgeKeyStepSeconds: number;
+  /** When true the keyboard step follows the button step. */
+  edgeShareStep: boolean;
   filenameTemplate: string;
   maxCharsPerLine: number;
   /** Physical lines per subtitle cue: 1 or 2 (default 2). */
@@ -251,6 +264,7 @@ const DEFAULT_ARABIC: ArabicStyle = {
   boxOpacity: 0,
   lineHeightPad: 1.35,
   bold: false,
+  verticalOffset: 0,
 };
 
 const DEFAULT_THAI: ThaiStyle = {
@@ -261,6 +275,7 @@ const DEFAULT_THAI: ThaiStyle = {
   outlineColor: "#0b0c0d",
   boxOpacity: 0.15,
   bold: false,
+  verticalOffset: 0,
 };
 
 function preset(id: string, name: string, arabic: ArabicStyle, thai: ThaiStyle): StylePreset {
@@ -282,6 +297,14 @@ const DEFAULT_PRESETS: StylePreset[] = [
     { ...DEFAULT_THAI, color: "#ffffff", boxOpacity: 0.45, outlineWidth: 2 },
   ),
 ];
+
+/**
+ * Ids of the presets the app ships with. The style editor's library splits
+ * these from the user's own saved presets; every other id counts as saved.
+ */
+export const BUILTIN_PRESET_IDS: ReadonlySet<string> = new Set(
+  DEFAULT_PRESETS.map((preset) => preset.id),
+);
 
 // No built-in clip-brief presets: the brief is the user's own editorial brief,
 // seeded empty. Users can still save their own presets from the prompt drawer.
@@ -306,9 +329,9 @@ const DEFAULT_GLOSSARY: GlossaryEntry[] = [
  * generative paths exactly as they are until the editor picks a model.
  */
 const DEFAULT_DECISION_SLOTS: DecisionSlots = {
-  analysis: { enabled: false, mode: "local", model: "", format: "auto", endpointUrl: "" },
-  clip_scoring: { enabled: false, mode: "cloud", model: "", format: "auto", endpointUrl: "" },
-  verify_triage: { enabled: false, mode: "cloud", model: "", format: "auto", endpointUrl: "" },
+  analysis: { enabled: true, mode: "local", model: "", format: "auto", endpointUrl: "" },
+  clip_scoring: { enabled: true, mode: "cloud", model: "", format: "auto", endpointUrl: "" },
+  verify_triage: { enabled: true, mode: "cloud", model: "", format: "auto", endpointUrl: "" },
 };
 
 const DEFAULT_DATA: SettingsData = {
@@ -355,6 +378,9 @@ const DEFAULT_DATA: SettingsData = {
   editor: {
     cutBufferSeconds: 0.3,
     autoPad: true,
+    edgeButtonStepSeconds: 5,
+    edgeKeyStepSeconds: 0.2,
+    edgeShareStep: false,
     filenameTemplate: "{LectureName}_Clip{01}_{Title}.mp4",
     maxCharsPerLine: 40,
     subtitleMaxLines: 2,
@@ -434,6 +460,7 @@ function coerceArabic(value: unknown, fallback: ArabicStyle): ArabicStyle {
     boxOpacity: asRangedNumber(value.boxOpacity, fallback.boxOpacity, "boxOpacity"),
     lineHeightPad: asRangedNumber(value.lineHeightPad, fallback.lineHeightPad, "arabicLineHeightPad"),
     bold: asBoolean(value.bold, fallback.bold),
+    verticalOffset: asRangedNumber(value.verticalOffset, fallback.verticalOffset, "verticalOffset"),
   };
 }
 
@@ -447,6 +474,7 @@ function coerceThai(value: unknown, fallback: ThaiStyle): ThaiStyle {
     outlineColor: asString(value.outlineColor, fallback.outlineColor),
     boxOpacity: asRangedNumber(value.boxOpacity, fallback.boxOpacity, "boxOpacity"),
     bold: asBoolean(value.bold, fallback.bold),
+    verticalOffset: asRangedNumber(value.verticalOffset, fallback.verticalOffset, "verticalOffset"),
   };
 }
 
@@ -533,7 +561,9 @@ function coerceDecisionSlots(value: unknown): DecisionSlots {
     const raw = value[id];
     if (!isRecord(raw)) continue;
     slots[id] = {
-      enabled: asBoolean(raw.enabled, slots[id].enabled),
+      // Judgments are always on. Old backups stored `enabled: false`; forcing
+      // it here makes those snapshots use the new behaviour on next launch.
+      enabled: true,
       mode: raw.mode === "local" || raw.mode === "cloud" ? raw.mode : slots[id].mode,
       model: asString(raw.model, slots[id].model).trim(),
       format: asDecisionFormat(
@@ -632,6 +662,17 @@ function coerceSettingsData(raw: unknown): SettingsData {
         "cutBufferSeconds",
       ),
       autoPad: asBoolean(editor.autoPad, DEFAULT_DATA.editor.autoPad),
+      edgeButtonStepSeconds: asRangedNumber(
+        editor.edgeButtonStepSeconds,
+        DEFAULT_DATA.editor.edgeButtonStepSeconds,
+        "edgeButtonStepSeconds",
+      ),
+      edgeKeyStepSeconds: asRangedNumber(
+        editor.edgeKeyStepSeconds,
+        DEFAULT_DATA.editor.edgeKeyStepSeconds,
+        "edgeKeyStepSeconds",
+      ),
+      edgeShareStep: asBoolean(editor.edgeShareStep, DEFAULT_DATA.editor.edgeShareStep),
       filenameTemplate: asString(editor.filenameTemplate, DEFAULT_DATA.editor.filenameTemplate),
       maxCharsPerLine: asRangedNumber(
         editor.maxCharsPerLine,

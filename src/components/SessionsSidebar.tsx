@@ -1,3 +1,4 @@
+import { L } from "@/lib/i18n";
 /**
  * Sessions sidebar — the always-present list of auto-saved sessions (formerly
  * the "Recent lectures" bar + "View all" drawer). Not collapsible.
@@ -39,14 +40,14 @@ import { openProjectFile } from "@/lib/projectFile";
 import { STEP_LABELS, type RecentProject } from "@/lib/projectTypes";
 import { useProjectStore } from "@/store/projectStore";
 
-/** "Today" / "Yesterday" / "Earlier" bucket for the list separators. */
+/** L("Today") / L("Yesterday") / L("Earlier") bucket for the list separators. */
 function dayBucket(timestamp: number): string {
   const startOfToday = new Date();
   startOfToday.setHours(0, 0, 0, 0);
   const todayStart = startOfToday.getTime();
-  if (timestamp >= todayStart) return "Today";
-  if (timestamp >= todayStart - 86_400_000) return "Yesterday";
-  return "Earlier";
+  if (timestamp >= todayStart) return L("Today");
+  if (timestamp >= todayStart - 86_400_000) return L("Yesterday");
+  return L("Earlier");
 }
 
 /**
@@ -132,12 +133,12 @@ export function SessionsSidebar() {
 
   return (
     <aside
-      aria-label="Sessions"
+      aria-label={L("Sessions")}
       className="flex w-64 shrink-0 flex-col border-r border-border bg-card/20"
     >
       <div className="flex items-center justify-between gap-1 px-3 pb-1 pt-3">
         <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
-          Sessions
+          {L("Sessions")}
           {recentProjects.length > 0 ? (
             <Badge
               variant="secondary"
@@ -151,8 +152,8 @@ export function SessionsSidebar() {
           <Button
             variant="ghost"
             size="icon-xs"
-            aria-label="New session"
-            title="New session"
+            aria-label={L("New session")}
+            title={L("New session")}
             onClick={() => createProject()}
           >
             <Plus className="size-3.5" />
@@ -160,7 +161,7 @@ export function SessionsSidebar() {
           <Button
             variant="ghost"
             size="icon-xs"
-            aria-label="Open .tafseer"
+            aria-label={L("Open .tafseer")}
             title="Open a .tafseer file"
             onClick={() => void handleOpenFile()}
           >
@@ -172,9 +173,7 @@ export function SessionsSidebar() {
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
         {recentProjects.length === 0 ? (
           <p className="px-2 py-6 text-center text-[11px] leading-relaxed text-muted-foreground">
-            No sessions yet. Choose “Create new session” on the start screen to
-            begin — every lecture is auto-saved here so you can resume without
-            re-transcribing.
+            {L("No sessions yet. Choose “Create new session” on the start screen to begin — every lecture is auto-saved here so you can resume without re-transcribing.")}
           </p>
         ) : (
           <ul className="space-y-1">
@@ -219,7 +218,7 @@ export function SessionsSidebar() {
                             if (event.key === "Enter") commitRename(item.id);
                             if (event.key === "Escape") setRenamingId(null);
                           }}
-                          aria-label="Session name"
+                          aria-label={L("Session name")}
                           className="h-6 px-1.5 text-xs"
                           autoFocus
                         />
@@ -295,7 +294,7 @@ export function SessionsSidebar() {
                           variant="ghost"
                           size="icon-xs"
                           aria-label={`Rename ${item.name}`}
-                          title="Rename (or double-click the row)"
+                          title={L("Rename (or double-click the row)")}
                           onClick={() => {
                             setRenamingId(item.id);
                             setRenameValue(item.name);
@@ -333,10 +332,10 @@ export function SessionsSidebar() {
           title={lastAutosaveError ?? undefined}
         >
           {lastAutosaveError
-            ? "Auto-save failed — changes are at risk"
+            ? L("Auto-save failed — changes are at risk")
             : project
               ? `Auto-saved ${autosavedAt ? relativeTime(autosavedAt) : "…"}`
-              : "Auto-save is on"}
+              : L("Auto-save is on")}
         </p>
       </div>
 
@@ -349,7 +348,7 @@ export function SessionsSidebar() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove this session?</AlertDialogTitle>
+            <AlertDialogTitle>{L("Remove this session?")}</AlertDialogTitle>
             <AlertDialogDescription>
               {pendingRemove ? (
                 <>
@@ -366,7 +365,7 @@ export function SessionsSidebar() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel asChild>
-              <Button variant="outline">Keep session</Button>
+              <Button variant="outline">{L("Keep session")}</Button>
             </AlertDialogCancel>
             <AlertDialogAction asChild>
               <Button
@@ -374,13 +373,13 @@ export function SessionsSidebar() {
                 onClick={() => {
                   if (!pendingRemove) return;
                   removeRecent(pendingRemove.id);
-                  toast.success("Session removed", {
+                  toast.success(L("Session removed"), {
                     description: pendingRemove.name,
                   });
                   setPendingRemove(null);
                 }}
               >
-                Remove session
+                {L("Remove session")}
               </Button>
             </AlertDialogAction>
           </AlertDialogFooter>

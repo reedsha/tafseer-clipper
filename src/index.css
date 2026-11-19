@@ -12,6 +12,14 @@
 :root {
   --radius: 0.5rem;
 
+  /*
+   * Height reserved for the renderer-drawn window title bar. Zero in a plain
+   * browser build (the browser owns the chrome); `.desktop-shell` raises it to
+   * the bar's height so fixed overlays start below the bar instead of colliding
+   * with its "Back to app" / drag region.
+   */
+  --titlebar-height: 0px;
+
   --background: #0f1113;
   --foreground: #e7e9ea;
 
@@ -62,6 +70,11 @@
   --content-thai-white: #f4f4f1;
 
   color-scheme: dark;
+}
+
+/* Desktop shell: the title bar is drawn in the renderer, so reserve its height. */
+.desktop-shell {
+  --titlebar-height: 2rem;
 }
 
 @theme inline {

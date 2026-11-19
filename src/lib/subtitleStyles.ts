@@ -33,6 +33,46 @@ export const ASS_RESOLUTIONS: Record<Resolution, { width: number; height: number
   "1920x1080": { width: 1920, height: 1080 },
 };
 
+/** A style override may also carry the editor's vertical nudge. */
+export type StyleOverride = Partial<AssStyle> & { verticalOffset?: number };
+
+export type SubtitleLine = "arabic" | "thai";
+
+/**
+ * `StyleSpec.margin_v` is capped at 1000 by the sidecar, and the Harakat
+ * padding adds a few pixels on top, so leave headroom before that ceiling.
+ */
+const MAX_MARGIN_V = 900;
+
+function clampMarginV(value: number): number {
+  return Math.min(MAX_MARGIN_V, Math.max(0, Math.round(value)));
+}
+
+/**
+ * Clamp a stored offset so the resolved line anchor stays inside the frame.
+ * Export resolution governs the bound so a line placed in the editor can
+ * never be pushed out of frame in the burned video.
+ */
+export function clampVerticalOffset(
+  kind: SubtitleLine,
+  resolution: Resolution,
+  offset: number,
+): number {
+  const base = defaultAssStyles(resolution)[kind].marginV;
+  return clampMarginV(base + offset) - base;
+}
+
+/** Increment a line's offset by `delta` export pixels, staying inside the frame. */
+export function nudgeVerticalOffset(
+  kind: SubtitleLine,
+  resolution: Resolution,
+  current: number,
+  delta: number,
+): number {
+  if (!Number.isFinite(delta) || delta === 0) return current;
+  return clampVerticalOffset(kind, resolution, current + delta);
+}
+
 function style(partial: AssStyle): AssStyle {
   return partial;
 }
@@ -127,30 +167,34 @@ export function defaultAssStyles(resolution: Resolution): {
  */
 export function resolveAssStyles(
   resolution: Resolution,
-  arabicOverride?: Partial<AssStyle> | null,
-  thaiOverride?: Partial<AssStyle> | null,
+  arabicOverride?: StyleOverride | null,
+  thaiOverride?: StyleOverride | null,
 ): { arabic: AssStyle; thai: AssStyle } {
   const base = defaultAssStyles(resolution);
-  const merge = (target: AssStyle, override?: Partial<AssStyle> | null): AssStyle => ({
-    ...target,
-    ...(override
-      ? {
-          font: override.font || target.font,
-          size: override.size || target.size,
-          primaryColor: override.primaryColor || target.primaryColor,
-          outlineColor: override.outlineColor || target.outlineColor,
-          backColor: override.backColor || target.backColor,
-          boxOpacity: override.boxOpacity ?? target.boxOpacity,
-          bold: override.bold ?? target.bold,
-          outline: override.outline ?? target.outline,
-          shadow: override.shadow ?? target.shadow,
-          marginV: override.marginV ?? target.marginV,
-          marginL: override.marginL ?? target.marginL,
-          marginR: override.marginR ?? target.marginR,
-          lineHeightPad: override.lineHeightPad ?? target.lineHeightPad,
-        }
-      : {}),
-  });
+  const merge = (target: AssStyle, override?: StyleOverride | null): AssStyle => {
+    const anchor = override?.marginV ?? target.marginV;
+    const offset = override?.verticalOffset ?? 0;
+    return {
+      ...target,
+      ...(override
+        ? {
+            font: override.font || target.font,
+            size: override.size || target.size,
+            primaryColor: override.primaryColor || target.primaryColor,
+            outlineColor: override.outlineColor || target.outlineColor,
+            backColor: override.backColor || target.backColor,
+            boxOpacity: override.boxOpacity ?? target.boxOpacity,
+            bold: override.bold ?? target.bold,
+            outline: override.outline ?? target.outline,
+            shadow: override.shadow ?? target.shadow,
+            marginV: clampMarginV(anchor + offset),
+            marginL: override.marginL ?? target.marginL,
+            marginR: override.marginR ?? target.marginR,
+            lineHeightPad: override.lineHeightPad ?? target.lineHeightPad,
+          }
+        : {}),
+    };
+  };
 
   return {
     arabic: merge(base.arabic, arabicOverride),

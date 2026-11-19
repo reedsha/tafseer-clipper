@@ -151,26 +151,29 @@ export function SecretInput({
 }
 
 /**
- * Slider plus an exact-value read-out. The read-out stays a NumberFlow (the
- * contract's animated-number primitive) and doubles as a trigger: clicking it
- * opens a shadcn Popover so a precise value can be typed instead of nudged.
+ * The exact-value read-out shared by both NumberFlow layouts. It stays an
+ * animated NumberFlow (the contract's animated-number primitive) and doubles
+ * as a trigger: clicking it opens a shadcn Popover so a precise value can be
+ * typed instead of nudged.
  */
-export function NumberField({
+function NumberValueEditor({
   value,
-  onChange,
   suffix,
   min,
   max,
-  step = 1,
+  step,
   ariaLabel,
+  onCommit,
+  className,
 }: {
   value: number;
-  onChange: (value: number) => void;
   suffix: string;
   min: number;
   max: number;
-  step?: number;
+  step: number;
   ariaLabel: string;
+  onCommit: (value: number) => void;
+  className?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState("");
@@ -186,85 +189,157 @@ export function NumberField({
   function commit() {
     const parsed = Number(draft.replace(",", "."));
     if (Number.isFinite(parsed)) {
-      onChange(coerceToRange(parsed, value, { min, max, step }));
+      onCommit(coerceToRange(parsed, value, { min, max, step }));
     }
     setOpen(false);
   }
 
   return (
-    <div className="flex items-center gap-3" data-vaul-no-drag>
-      <Slider
-        value={[value]}
-        min={min}
-        max={max}
-        step={step}
-        onValueChange={([next]) => onChange(next)}
-        aria-label={ariaLabel}
-      />
-      <Popover
-        open={open}
-        onOpenChange={(next) => {
-          setOpen(next);
-          if (next) setDraft(String(value));
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) setDraft(String(value));
+      }}
+    >
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          className={cn(
+            "h-6 w-16 shrink-0 justify-end px-1.5 text-xs font-normal tabular-nums text-foreground/90",
+            className,
+          )}
+          aria-label={`Type an exact value for ${ariaLabel}`}
+          title="Type an exact value"
+        >
+          <NumberFlow
+            value={value}
+            suffix={suffix}
+            format={{ maximumFractionDigits: step < 1 ? 2 : 0 }}
+          />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        sideOffset={6}
+        className="w-56 space-y-2 p-3"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          inputRef.current?.focus();
+          inputRef.current?.select();
         }}
       >
-        <PopoverTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="h-6 w-16 shrink-0 justify-end px-1.5 text-xs font-normal tabular-nums text-foreground/90"
-            aria-label={`Type an exact value for ${ariaLabel}`}
-            title="Type an exact value"
-          >
-            <NumberFlow
-              value={value}
-              suffix={suffix}
-              format={{ maximumFractionDigits: step < 1 ? 2 : 0 }}
-            />
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent
-          align="end"
-          sideOffset={6}
-          className="w-56 space-y-2 p-3"
-          onOpenAutoFocus={(event) => {
+        <form
+          className="space-y-2"
+          onSubmit={(event) => {
             event.preventDefault();
-            inputRef.current?.focus();
-            inputRef.current?.select();
+            commit();
           }}
         >
-          <form
-            className="space-y-2"
-            onSubmit={(event) => {
-              event.preventDefault();
-              commit();
-            }}
-          >
-            <Label htmlFor={inputId} className="text-[11px] font-medium text-foreground">
-              {ariaLabel}
-            </Label>
-            <Input
-              id={inputId}
-              ref={inputRef}
-              value={draft}
-              inputMode={step < 1 ? "decimal" : "numeric"}
-              autoComplete="off"
-              spellCheck={false}
-              aria-label={ariaLabel}
-              onChange={(event) => setDraft(event.target.value)}
-              onFocus={(event) => event.currentTarget.select()}
-              className="h-8 text-xs"
-            />
-            <p className="text-[10px] leading-relaxed text-muted-foreground">
-              {rangeText} · snaps to {step}
-            </p>
-            <Button type="submit" size="sm" className="w-full">
-              Set
-            </Button>
-          </form>
-        </PopoverContent>
-      </Popover>
+          <Label htmlFor={inputId} className="text-[11px] font-medium text-foreground">
+            {ariaLabel}
+          </Label>
+          <Input
+            id={inputId}
+            ref={inputRef}
+            value={draft}
+            inputMode={step < 1 ? "decimal" : "numeric"}
+            autoComplete="off"
+            spellCheck={false}
+            aria-label={ariaLabel}
+            onChange={(event) => setDraft(event.target.value)}
+            onFocus={(event) => event.currentTarget.select()}
+            className="h-8 text-xs"
+          />
+          <p className="text-[10px] leading-relaxed text-muted-foreground">
+            {rangeText} · snaps to {step}
+          </p>
+          <Button type="submit" size="sm" className="w-full">
+            Set
+          </Button>
+        </form>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/**
+ * Slider plus an exact-value read-out.
+ *
+ * `layout="row"` is the compact form used by the settings pages (slider and
+ * read-out on one line). `layout="stacked"` is the inspector form used by the
+ * style editor: label and read-out on the first line, the slider full width
+ * beneath — the same row rhythm as a colour channel or mixer strip.
+ */
+export function NumberField({
+  value,
+  onChange,
+  suffix,
+  min,
+  max,
+  step = 1,
+  ariaLabel,
+  layout = "row",
+  displayLabel,
+}: {
+  value: number;
+  onChange: (value: number) => void;
+  suffix: string;
+  min: number;
+  max: number;
+  step?: number;
+  ariaLabel: string;
+  layout?: "row" | "stacked";
+  /** Short visible label; `ariaLabel` stays the distinct accessible name. */
+  displayLabel?: string;
+}) {
+  const slider = (
+    <Slider
+      value={[value]}
+      min={min}
+      max={max}
+      step={step}
+      onValueChange={([next]) => onChange(next)}
+      aria-label={ariaLabel}
+    />
+  );
+  const editor = (
+    <NumberValueEditor
+      value={value}
+      suffix={suffix}
+      min={min}
+      max={max}
+      step={step}
+      ariaLabel={ariaLabel}
+      onCommit={onChange}
+      className={
+        layout === "stacked"
+          ? "h-5 w-14 px-1 text-[11px] text-muted-foreground hover:text-foreground"
+          : undefined
+      }
+    />
+  );
+
+  if (layout === "stacked") {
+    return (
+      <div className="space-y-1.5" data-vaul-no-drag>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-[11px] font-medium text-foreground/80">
+            {displayLabel ?? ariaLabel}
+          </span>
+          {editor}
+        </div>
+        {slider}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-3" data-vaul-no-drag>
+      {slider}
+      {editor}
     </div>
   );
 }
@@ -364,6 +439,65 @@ export function ColorSelect({
   );
 }
 
+/**
+ * Colour row in the inspector rhythm: label on the left, the current swatch
+ * and its hex value on the right. The trigger opens a shadcn Popover with the
+ * palette; the swatch itself is content colour, never a theme token.
+ */
+export function ColorSwatchField({
+  value,
+  onChange,
+  options,
+  label,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  options: { value: string; label: string }[];
+  label: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <Label className="text-[11px] font-medium text-foreground/80">{label}</Label>
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="h-6 gap-1.5 px-1.5 text-[11px] font-normal text-muted-foreground hover:text-foreground"
+            aria-label={label}
+          >
+            <span
+              className="size-3 rounded-full border border-border"
+              style={{ backgroundColor: value }}
+            />
+            <span className="font-mono tabular-nums">{value}</span>
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="end" className="w-48 p-1">
+          {withCurrentColor(options, value).map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => onChange(option.value)}
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground"
+            >
+              <span
+                className="size-3 shrink-0 rounded-full border border-border"
+                style={{ backgroundColor: option.value }}
+              />
+              <span className="min-w-0 flex-1 truncate">{option.label}</span>
+              <span className="font-mono text-[10px] text-muted-foreground">
+                {option.value}
+              </span>
+            </button>
+          ))}
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
+
 export const ARABIC_COLORS = [
   { value: "#dcb46e", label: "Warm gold" },
   { value: "#e2c07c", label: "Pale gold" },
@@ -393,11 +527,51 @@ export const AUTOSAVE_OPTIONS = [
 ];
 
 export const SHORTCUTS = [
-  { keys: "Space", action: "Play / pause" },
-  { keys: "J K L", action: "Shuttle backward / pause / forward" },
-  { keys: "← →", action: "Nudge 0.2s" },
-  { keys: "Ctrl Enter", action: "Split subtitle at cursor" },
-  { keys: "Ctrl K", action: "Command palette" },
+  {
+    keys: "Space",
+    action: "Play / pause",
+    where: "Step 2 preview · Step 3 Output preview",
+  },
+  {
+    keys: "J K L",
+    action: "Shuttle backward / pause / forward",
+    where: "Step 2 preview · Step 3 Output preview",
+  },
+  {
+    keys: "Shift ← →",
+    action: "Nudge clip cut-in edge",
+    where: "Step 2 · waveform & trim",
+  },
+  {
+    keys: "Alt ← →",
+    action: "Nudge clip cut-out edge",
+    where: "Step 2 · waveform & trim",
+  },
+  {
+    keys: "← →",
+    action: "Previous / next subtitle cue",
+    where: "Step 3 · Subtitle lines & Output preview",
+  },
+  {
+    keys: "Enter",
+    action: "Mark reviewed & go to next cue",
+    where: "Step 3 · Subtitle lines",
+  },
+  {
+    keys: "Escape",
+    action: "Exit subtitle preview focus",
+    where: "Step 3 · Output preview (focus mode)",
+  },
+  {
+    keys: "Ctrl Enter",
+    action: "Split subtitle at cursor",
+    where: "Step 3 · Subtitle lines editor",
+  },
+  {
+    keys: "Ctrl K",
+    action: "Command palette",
+    where: "Any step · Command palette",
+  },
 ];
 
 /** The 0–100 % view of the stored 0–1 box-opacity fraction. */

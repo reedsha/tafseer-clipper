@@ -6,19 +6,14 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
 } from "react";
-import { Heart, MessageCircle, ScanText, Send } from "lucide-react";
+import { ScanText } from "lucide-react";
 import { cn } from "cn";
 
+import { SubtitleOverlay } from "@/components/subtitles/SubtitleOverlay";
 import { toMediaSrc } from "@/lib/media";
 import type { FramingMode, Resolution, SubtitleCue } from "@/lib/projectTypes";
-import {
-  ASS_RESOLUTIONS,
-  previewLineMetrics,
-  type AssStyle,
-  type PreviewLineMetrics,
-} from "@/lib/subtitleStyles";
+import { ASS_RESOLUTIONS, type AssStyle, type SubtitleLine } from "@/lib/subtitleStyles";
 
 export interface SubtitleMonitorHandle {
   /** Play from `start` to `end` (absolute source seconds) and stop there. */
@@ -46,6 +41,11 @@ export interface SubtitleMonitorProps {
   onPlayingChange?: (playing: boolean) => void;
   onTogglePlay?: () => void;
   className?: string;
+  /** Let the editor drag the caption lines, as in the style editor. */
+  interactive?: boolean;
+  offsets?: { arabic: number; thai: number };
+  /** Delta is in export-frame pixels; positive moves the line up. */
+  onNudgeLine?: (kind: SubtitleLine, deltaExportPx: number) => void;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -79,6 +79,9 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
       onPlayingChange,
       onTogglePlay,
       className,
+      interactive = false,
+      offsets,
+      onNudgeLine,
     },
     ref,
   ) {
@@ -322,59 +325,6 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
     const overlayCue = playing
       ? cueAt(cues, now - clipStart)
       : (cues.find((cue) => cue.id === selectedCueId) ?? null);
-    const arabic = overlayCue?.arabic ?? "";
-    const thai = overlayCue?.thai ?? "";
-
-    const arabicMetrics = previewLineMetrics(styles.arabic, resolution, box.width);
-    const thaiMetrics = previewLineMetrics(styles.thai, resolution, box.width);
-    const scale = box.width / play.width;
-
-    /** Outline ring in this line's *own* colour (Arabic and Thai can differ). */
-    const textShadow = (outlinePx: number, color: string, shadowPx: number) => {
-      const layers: string[] = [];
-      if (outlinePx > 0) {
-        layers.push(
-          `-${outlinePx}px 0 0 ${color}`,
-          `${outlinePx}px 0 0 ${color}`,
-          `0 -${outlinePx}px 0 ${color}`,
-          `0 ${outlinePx}px 0 ${color}`,
-          `0 0 ${outlinePx * 1.5}px ${color}`,
-        );
-      }
-      // `.ass` Shadow 1 is a hard drop shadow; mirror it so the preview matches.
-      if (shadowPx > 0) layers.push(`${shadowPx}px ${shadowPx}px 0 rgba(0, 0, 0, 0.55)`);
-      return layers.length ? layers.join(", ") : undefined;
-    };
-
-    const lineStyle = (
-      metrics: PreviewLineMetrics,
-      line: AssStyle,
-      kind: "arabic" | "thai",
-    ): CSSProperties => ({
-      bottom: metrics.bottomPx,
-      left: metrics.leftPx,
-      right: metrics.rightPx,
-      fontFamily:
-        kind === "arabic"
-          ? `'${line.font}', 'Noto Naskh Arabic', 'Traditional Arabic', serif`
-          : `'${line.font}', 'Leelawadee UI', 'Tahoma', sans-serif`,
-      fontSize: `${metrics.fontPx}px`,
-      lineHeight: `${line.lineHeightPad}`,
-      fontWeight: line.bold ? 700 : 400,
-      color: line.primaryColor,
-      textShadow: textShadow(metrics.outlinePx, line.outlineColor, line.shadow * scale),
-    });
-
-    /** BorderStyle 3: the `.ass` box is BackColour behind the text; mirror it. */
-    const boxStyle = (line: AssStyle, metrics: PreviewLineMetrics) =>
-      line.boxOpacity > 0
-        ? {
-            backgroundColor: `rgba(0, 0, 0, ${Math.min(1, Math.max(0, line.boxOpacity))})`,
-            padding: `${metrics.outlinePx}px ${metrics.outlinePx * 2}px`,
-            boxDecorationBreak: "clone" as const,
-            WebkitBoxDecorationBreak: "clone" as const,
-          }
-        : undefined;
 
     return (
       <div
@@ -430,44 +380,17 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
             </div>
           )}
 
-          {safeZone && portrait ? (
-            <div className="pointer-events-none absolute inset-0" aria-hidden>
-              {/* Platform UI: right-hand action rail and the caption block. */}
-              <div className="absolute inset-y-0 right-0 w-[16%] border-l border-dashed border-foreground/25 bg-foreground/[0.04]">
-                <div className="flex flex-col items-center gap-2 pt-[38%] text-foreground/30">
-                  <Heart className="size-2.5" />
-                  <MessageCircle className="size-2.5" />
-                  <Send className="size-2.5" />
-                </div>
-              </div>
-              <div className="absolute inset-x-0 bottom-0 h-[22%] border-t border-dashed border-foreground/25 bg-foreground/[0.04]" />
-              <div className="absolute inset-x-[4%] inset-y-[6%] border border-dashed border-foreground/15" />
-              <span className="absolute bottom-1 right-1.5 text-[8px] uppercase tracking-[0.14em] text-foreground/35">
-                TikTok / Reels / Shorts safe zone
-              </span>
-            </div>
-          ) : null}
-
-          {arabic ? (
-            <p
-              dir="rtl"
-              lang="ar"
-              className="pointer-events-none absolute px-2 text-center whitespace-pre-line"
-              style={lineStyle(arabicMetrics, styles.arabic, "arabic")}
-            >
-              <span style={boxStyle(styles.arabic, arabicMetrics)}>{arabic}</span>
-            </p>
-          ) : null}
-
-          {thai ? (
-            <p
-              lang="th"
-              className="pointer-events-none absolute px-2 text-center whitespace-pre-line"
-              style={lineStyle(thaiMetrics, styles.thai, "thai")}
-            >
-              <span style={boxStyle(styles.thai, thaiMetrics)}>{thai}</span>
-            </p>
-          ) : null}
+          <SubtitleOverlay
+            resolution={resolution}
+            width={box.width}
+            styles={styles}
+            arabic={overlayCue?.arabic ?? ""}
+            thai={overlayCue?.thai ?? ""}
+            safeZone={safeZone}
+            interactive={interactive}
+            offsets={offsets}
+            onNudgeLine={onNudgeLine}
+          />
 
           {playing ? (
             <span

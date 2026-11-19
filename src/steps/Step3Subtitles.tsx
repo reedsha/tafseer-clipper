@@ -1,8 +1,10 @@
+import { L } from "@/lib/i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import NumberFlow from "@number-flow/react";
 import { toast } from "sonner";
 import {
   AlertTriangle,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
@@ -63,9 +65,15 @@ import { aiRouteFor, decisionActivityFor } from "@/lib/aiActivity";
 import { formatClock } from "@/lib/format";
 import { buildDecisionProviderFor, buildProviderFor } from "@/lib/providers";
 import { FRAMING_LABELS, type FramingMode, type Resolution, type SubtitleCue } from "@/lib/projectTypes";
-import { resolveAssStyles, stylesOverlap } from "@/lib/subtitleStyles";
+import {
+  nudgeVerticalOffset,
+  resolveAssStyles,
+  stylesOverlap,
+  type SubtitleLine,
+} from "@/lib/subtitleStyles";
 import { buildCuesFromTranscript, looksLikeFragmentSeed } from "@/lib/subtitleCues";
 import { useAiActivityStore } from "@/store/aiActivityStore";
+import { deliverTaskResult, useJobStore, useTaskJob } from "@/store/jobStore";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
@@ -110,6 +118,8 @@ export function Step3Subtitles() {
 
   const arabicSettings = useSettingsStore((state) => state.arabic);
   const thaiSettings = useSettingsStore((state) => state.thai);
+  const updateArabic = useSettingsStore((state) => state.updateArabic);
+  const updateThai = useSettingsStore((state) => state.updateThai);
   const maxCharsPerLine = useSettingsStore((state) => state.editor.maxCharsPerLine);
   const maxLines = useSettingsStore((state) => state.editor.subtitleMaxLines);
   const language = useSettingsStore((state) => state.editor.language);
@@ -127,9 +137,6 @@ export function Step3Subtitles() {
   const queueRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const caretRef = useRef<{ cueId: string; field: CueField; offset: number } | null>(null);
-  const cancelVerifyAllRef = useRef(false);
-  const verifyAllRunningRef = useRef(false);
-  const verifyAllAbortRef = useRef<AbortController | null>(null);
   const healedSeedRef = useRef<string | null>(null);
   const seekKeyRef = useRef<string | null>(null);
 
@@ -143,7 +150,10 @@ export function Step3Subtitles() {
   const [rebuildHint, setRebuildHint] = useState(false);
   const [muted, setMuted] = useState(false);
   const [verifying, setVerifying] = useState<string | null>(null);
-  const [verifyAll, setVerifyAll] = useState<{ done: number; total: number } | null>(null);
+  // The batch owns its job, so leaving Step 3 no longer stops the check; only
+  // the explicit Stop button (or starting a new run) cancels it.
+  const verifyJob = useTaskJob("verify", project?.id ?? null);
+  const verifyAll = verifyJob?.status === "running" ? verifyJob.progress : null;
   const [playhead, setPlayhead] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [rate, setRate] = useState(1);
@@ -375,7 +385,7 @@ export function Step3Subtitles() {
           : item,
       ),
     );
-    toast("Original Thai line restored", {
+    toast(L("Original Thai line restored"), {
       description: cue.originalText?.slice(0, 80) || "The Arabic replacement was removed.",
     });
   };
@@ -433,6 +443,7 @@ export function Step3Subtitles() {
           boxOpacity: arabicSettings.boxOpacity,
           bold: arabicSettings.bold,
           lineHeightPad: arabicSettings.lineHeightPad,
+          verticalOffset: arabicSettings.verticalOffset,
         },
         {
           font: thaiSettings.fontFamily,
@@ -443,11 +454,32 @@ export function Step3Subtitles() {
           boxOpacity: thaiSettings.boxOpacity,
           bold: thaiSettings.bold,
           lineHeightPad: 1.2,
+          verticalOffset: thaiSettings.verticalOffset,
         },
       ),
     [resolution, arabicSettings, thaiSettings],
   );
   const overlap = stylesOverlap(styles.arabic, styles.thai);
+
+  /** Drag/arrow positioning writes the same style fields the preset captures. */
+  const nudgeMonitorLine = (kind: SubtitleLine, delta: number) => {
+    const state = useSettingsStore.getState();
+    if (kind === "arabic") {
+      updateArabic({
+        verticalOffset: nudgeVerticalOffset(
+          "arabic",
+          resolution,
+          state.arabic.verticalOffset,
+          delta,
+        ),
+      });
+    } else {
+      updateThai({
+        verticalOffset: nudgeVerticalOffset("thai", resolution, state.thai.verticalOffset, delta),
+      });
+    }
+  };
+
   const activePreset = presets.find((preset) => preset.id === activePresetId) ?? null;
   const presetModified = activePreset
     ? !presetMatchesStyle(activePreset, arabicSettings, thaiSettings)
@@ -592,7 +624,7 @@ export function Step3Subtitles() {
 
   /**
    * The one-tap review loop: checking a line moves the deck to the next line
-   * that still needs attention, so "To check" drains without extra clicks.
+   * that still needs attention, so L("To check") drains without extra clicks.
    */
   const toggleReviewed = useCallback(
     (cue: SubtitleCue) => {
@@ -845,6 +877,8 @@ export function Step3Subtitles() {
         });
         throw new Error("empty");
       }
+      // Capture the owning session now: the reply may land after a switch.
+      const projectId = useProjectStore.getState().project?.id;
       const settings = useSettingsStore.getState();
       const verificationOverrideConfigured =
         settings.verificationProvider.mode !== "inherit" &&
@@ -884,19 +918,19 @@ export function Step3Subtitles() {
         useAiActivityStore.getState().finish(activityId, "done", result.model || undefined);
       }
 
-      if (selectedClipId) {
-        const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
-        const next = latest.map((item) =>
-          item.id === cue.id
-            ? { ...item, arabic: result.verified_text || item.arabic }
-            : item,
-        );
-        setSubtitles(selectedClipId, next);
+      if (selectedClipId && projectId) {
+        // Route by project id: a session switch mid-check must not write into
+        // whatever project happens to be open when the reply lands.
+        deliverTaskResult(projectId, {
+          kind: "verify",
+          clipId: selectedClipId,
+          lines: [{ cueId: cue.id, arabic: result.verified_text || cue.arabic }],
+        });
       }
 
       if (result.correction_applied) {
         if (announce) {
-          toast.success("Arabic corrected", {
+          toast.success(L("Arabic corrected"), {
             description: result.notes || "The Uthmani spelling was updated.",
           });
         }
@@ -930,8 +964,17 @@ export function Step3Subtitles() {
   );
 
   const handleVerifyAll = useCallback(async () => {
-    if (!selectedClipId || verifyAllRunningRef.current) return;
+    if (!selectedClipId) return;
     const settings = useSettingsStore.getState();
+    const projectId = useProjectStore.getState().project?.id;
+    if (!projectId) return;
+    const alreadyRunning = useJobStore
+      .getState()
+      .jobs.some(
+        (job) =>
+          job.kind === "verify" && job.projectId === projectId && job.status === "running",
+      );
+    if (alreadyRunning) return;
     const verificationOverrideConfigured =
       settings.verificationProvider.mode !== "inherit" &&
       settings.verificationProvider.model.trim() !== "";
@@ -956,117 +999,104 @@ export function Step3Subtitles() {
 
     const decisionRoute = decisionActivityFor(settings, "verify_triage");
     const decisionProvider = buildDecisionProviderFor(settings, "verify_triage");
-    const activityId = useAiActivityStore.getState().start(
-      decisionRoute
-        ? { task: "arabic-check", ...decisionRoute }
-        : aiRouteFor(settings, "arabic-check"),
-    );
-    verifyAllRunningRef.current = true;
-    cancelVerifyAllRef.current = false;
-    const controller = new AbortController();
-    verifyAllAbortRef.current = controller;
-    setVerifyAll({ done: 0, total: targets.length });
-    let corrected = 0;
-    let failed = 0;
-    let checked = 0;
-    let status: "done" | "failed" | "cancelled" = "done";
+    const clipId = selectedClipId;
     // One request per clip keeps the round-trips at 1–3 instead of one per line
     // (docs/DECISION_MODELS_PLAN.md §5); 64 is the sidecar's batch ceiling.
     const BATCH = 64;
+    let corrected = 0;
+    let failed = 0;
+    let checked = 0;
 
-    try {
-      for (let offset = 0; offset < targets.length; offset += BATCH) {
-        if (controller.signal.aborted || cancelVerifyAllRef.current) break;
-        const chunk = targets.slice(offset, offset + BATCH);
-        setVerifying(chunk[0]?.id ?? null);
-        try {
-          const result = await verifyArabicBatch(
-            {
-              lines: chunk.map((cue) => ({
-                arabic_text: cue.arabic.trim(),
-                context_thai: cue.thai.replace(/\n/g, " "),
-                cue_id: cue.id,
-              })),
-              provider: buildProviderFor(settings, "verify"),
-              decision_provider: decisionProvider,
-            },
-            { signal: controller.signal },
-          );
-          const byCue = new Map(
-            result.lines
-              .filter((line) => line.cue_id)
-              .map((line) => [line.cue_id as string, line]),
-          );
-          if (selectedClipId) {
-            const latest =
-              useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
-            const next = latest.map((item) => {
-              const line = byCue.get(item.id);
-              if (!line) return item;
-              if (line.correction_applied) corrected += 1;
-              return line.verified_text
-                ? { ...item, arabic: line.verified_text }
-                : item;
-            });
-            setSubtitles(selectedClipId, next);
-          }
-          checked += chunk.length;
-        } catch {
-          if (controller.signal.aborted) {
-            status = "cancelled";
-            break;
-          }
-          failed += chunk.length;
-        }
-        setVerifyAll((current) =>
-          current
-            ? { ...current, done: Math.min(current.total, current.done + chunk.length) }
-            : current,
+    useJobStore.getState().startTask({
+      kind: "verify",
+      projectId,
+      label: "Checking Arabic",
+      run: async (signal, hooks) => {
+        const activityId = useAiActivityStore.getState().start(
+          decisionRoute
+            ? { task: "arabic-check", ...decisionRoute }
+            : aiRouteFor(settings, "arabic-check"),
         );
-      }
-
-      if (controller.signal.aborted || cancelVerifyAllRef.current) {
-        status = "cancelled";
-      } else if (failed > 0) {
-        status = "failed";
-      }
-    } catch {
-      // An unexpected error (a malformed batch reply, a store write) must not
-      // strand the running activity or the verifying state — report as failed.
-      status = "failed";
-    } finally {
-      verifyAllRunningRef.current = false;
-      verifyAllAbortRef.current = null;
-      setVerifying(null);
-      setVerifyAll(null);
-      useAiActivityStore.getState().finish(activityId, status);
-    }
-
-    if (status === "cancelled") {
-      toast("Arabic check stopped", {
-        description: `${checked} line${checked === 1 ? "" : "s"} checked.`,
-      });
-      return;
-    }
-    if (status === "failed") {
-      toast.error(`Checked ${checked} of ${targets.length} lines`, {
-        description: `${failed} line${failed === 1 ? "" : "s"} could not be checked.`,
-      });
-      return;
-    }
-    toast.success("Arabic checked", {
-      description: `${targets.length} line${targets.length === 1 ? "" : "s"} · ${corrected} corrected.`,
+        const allLines: Array<{ cueId: string; arabic: string }> = [];
+        hooks.setProgress(0, targets.length);
+        try {
+          for (let offset = 0; offset < targets.length; offset += BATCH) {
+            if (signal.aborted) break;
+            const chunk = targets.slice(offset, offset + BATCH);
+            try {
+              const result = await verifyArabicBatch(
+                {
+                  lines: chunk.map((cue) => ({
+                    arabic_text: cue.arabic.trim(),
+                    context_thai: cue.thai.replace(/\n/g, " "),
+                    cue_id: cue.id,
+                  })),
+                  provider: buildProviderFor(settings, "verify"),
+                  decision_provider: decisionProvider,
+                },
+                { signal },
+              );
+              const byCue = new Map(
+                result.lines
+                  .filter((line) => line.cue_id)
+                  .map((line) => [line.cue_id as string, line]),
+              );
+              const chunkLines: Array<{ cueId: string; arabic: string }> = [];
+              for (const cue of chunk) {
+                const line = byCue.get(cue.id);
+                if (!line) continue;
+                if (line.correction_applied) corrected += 1;
+                if (line.verified_text) {
+                  chunkLines.push({ cueId: cue.id, arabic: line.verified_text });
+                  allLines.push({ cueId: cue.id, arabic: line.verified_text });
+                }
+              }
+              if (chunkLines.length) {
+                hooks.deliverPartial({ kind: "verify", clipId, lines: chunkLines });
+              }
+              checked += chunk.length;
+            } catch {
+              if (signal.aborted) break;
+              failed += chunk.length;
+            }
+            hooks.setProgress(Math.min(targets.length, offset + chunk.length), targets.length);
+          }
+        } catch (caught) {
+          useAiActivityStore
+            .getState()
+            .finish(activityId, signal.aborted ? "cancelled" : "failed");
+          throw caught;
+        }
+        useAiActivityStore
+          .getState()
+          .finish(activityId, signal.aborted ? "cancelled" : failed > 0 ? "failed" : "done");
+        // A cancelled batch keeps whatever chunks already landed (delivered as
+        // partials); a finished one returns the full list so a session that was
+        // not open can still receive it through the journal.
+        if (signal.aborted) return null;
+        return { kind: "verify" as const, clipId, lines: allLines };
+      },
+      onSuccess: () => {
+        if (failed > 0) {
+          toast.error(`Checked ${checked} of ${targets.length} lines`, {
+            description: `${failed} line${failed === 1 ? "" : "s"} could not be checked.`,
+          });
+          return;
+        }
+        toast.success(L("Arabic checked"), {
+          description: `${targets.length} line${targets.length === 1 ? "" : "s"} · ${corrected} corrected.`,
+        });
+      },
+      onError: (message) => {
+        toast.error("Arabic check failed", { description: message });
+      },
+      onCancel: () => {
+        toast("Arabic check stopped", {
+          description: `${checked} line${checked === 1 ? "" : "s"} checked.`,
+        });
+      },
     });
-  }, [selectedClipId, setSubtitles]);
-
-  /* A batch must not keep spending AI calls after the editor leaves Step 3. */
-  useEffect(
-    () => () => {
-      cancelVerifyAllRef.current = true;
-      verifyAllAbortRef.current?.abort();
-    },
-    [],
-  );
+  }, [selectedClipId]);
 
   /* ------------------------------ keyboard ----------------------------- */
 
@@ -1167,13 +1197,13 @@ export function Step3Subtitles() {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
         <Languages className="size-5 text-muted-foreground" />
-        <p className="text-sm font-medium text-foreground">No approved clips</p>
+        <p className="text-sm font-medium text-foreground">{L("No approved clips")}</p>
         <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
           Approve clips in Find Clips first — each approved clip gets its own bilingual subtitle
           track.
         </p>
         <Button className="mt-1" size="sm" onClick={() => setStep(2)}>
-          Back to clip discovery
+          {L("Back to clip discovery")}
         </Button>
       </div>
     );
@@ -1181,13 +1211,13 @@ export function Step3Subtitles() {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <header className="shrink-0 border-b border-border px-4 py-2.5">
+      <header className="relative shrink-0 bg-card/30 px-4 pt-2.5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex min-w-0 items-baseline gap-2">
             <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-              Step 3 of 4
+              {L("Step 3 of 4")}
             </p>
-            <h1 className="text-base font-medium text-foreground">Subtitles</h1>
+            <h1 className="text-base font-medium text-foreground">{L("Subtitles")}</h1>
             <span className="truncate text-[11px] text-muted-foreground">{project.name}</span>
           </div>
           <div className="flex items-center gap-1.5">
@@ -1200,11 +1230,18 @@ export function Step3Subtitles() {
           </div>
         </div>
 
+        {/* The rule the active clip tab sits on (and visually erases), so the
+            clip queue reads like the stage tabs above it. */}
+        <div aria-hidden className="absolute inset-x-0 bottom-0 h-px bg-border" />
+
+        {/* `relative` matters: it lifts the strip into the positioned paint
+            layer so the selected tab's background covers the rule below it,
+            exactly like the stage tabs in the header above. */}
         <div
           ref={queueRef}
           role="group"
           aria-label="Clips"
-          className="-mx-1 mt-2 flex gap-1 overflow-x-auto px-1 pb-0.5"
+          className="relative -mx-1 mt-2 flex items-end gap-1.5 overflow-x-auto px-1"
         >
           {approvedClips.map((clip, index) => {
             const clipCues = project.subtitles[clip.id] ?? [];
@@ -1212,30 +1249,49 @@ export function Step3Subtitles() {
             const complete = clipCues.length > 0 && checkedInClip === clipCues.length;
             const selected = clip.id === selectedClipId;
             return (
-              <Button
+              <div
                 key={clip.id}
                 data-clip-id={clip.id}
-                size="xs"
-                variant={selected ? "secondary" : "ghost"}
-                aria-pressed={selected}
-                onClick={() => selectClip(clip.id)}
                 className={cn(
-                  "shrink-0 gap-1.5 text-xs",
-                  selected && "ring-1 ring-ring/40",
+                  "flex shrink-0 items-center gap-0.5 rounded-t-lg border border-b-0 px-1",
+                  selected
+                    ? "border-border bg-background"
+                    : "border-transparent hover:bg-accent/30",
                 )}
               >
-                <span className="text-[10px] tabular-nums text-muted-foreground">
-                  {index + 1}
-                </span>
-                <span className="max-w-[150px] truncate">{clip.title}</span>
-                {complete ? (
-                  <CheckCircle2 className="size-3 text-foreground/80" />
-                ) : (
-                  <span className="text-[10px] tabular-nums text-muted-foreground">
-                    {checkedInClip}/{clipCues.length}
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  aria-pressed={selected}
+                  onClick={() => selectClip(clip.id)}
+                  className={cn(
+                    "h-auto gap-2.5 px-4 py-2 text-xs font-normal hover:bg-transparent",
+                    selected
+                      ? "text-foreground hover:bg-transparent"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "flex size-5 items-center justify-center rounded-full border text-[10px] tabular-nums",
+                      selected
+                        ? "border-ring/50 bg-secondary text-foreground"
+                        : complete
+                          ? "border-border bg-secondary/60 text-foreground"
+                          : "border-border text-muted-foreground",
+                    )}
+                  >
+                    {complete ? <Check className="size-3" /> : index + 1}
                   </span>
-                )}
-              </Button>
+                  <span className="max-w-[150px] truncate">{clip.title}</span>
+                  {complete ? null : (
+                    <span className="text-[10px] tabular-nums text-muted-foreground">
+                      {checkedInClip}/{clipCues.length}
+                    </span>
+                  )}
+                </Button>
+              </div>
             );
           })}
         </div>
@@ -1254,7 +1310,7 @@ export function Step3Subtitles() {
           <section className="flex min-h-0 flex-col border-r border-border">
             <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2">
               <div className="flex items-center gap-2">
-                <h2 className="text-[13px] font-medium text-foreground">Subtitle lines</h2>
+                <h2 className="text-[13px] font-medium text-foreground">{L("Subtitle lines")}</h2>
                 <Badge variant="outline" className="text-[10px] tabular-nums">
                   {cues.length}
                 </Badge>
@@ -1269,7 +1325,7 @@ export function Step3Subtitles() {
                   aria-pressed={filter === "all"}
                   onClick={() => setFilter("all")}
                 >
-                  All
+                  {L("All")}
                 </Button>
                 <Button
                   size="xs"
@@ -1277,13 +1333,13 @@ export function Step3Subtitles() {
                   aria-pressed={filter === "unchecked"}
                   onClick={() => setFilter("unchecked")}
                 >
-                  To check
+                  {L("To check")}
                 </Button>
                 <Button
                   size="icon-xs"
                   variant="ghost"
-                  aria-label="Rebuild lines from transcript"
-                  title="Rebuild lines from transcript"
+                  aria-label={L("Rebuild lines from transcript")}
+                  title={L("Rebuild lines from transcript")}
                   disabled={(project.transcript?.segments.length ?? 0) === 0}
                   onClick={() => setRebuildOpen(true)}
                 >
@@ -1291,7 +1347,7 @@ export function Step3Subtitles() {
                 </Button>
                 <Button size="xs" variant="outline" className="gap-1" onClick={handleAdd}>
                   <Plus className="size-3" />
-                  Add line
+                  {L("Add line")}
                 </Button>
               </div>
             </div>
@@ -1331,7 +1387,7 @@ export function Step3Subtitles() {
                   className="shrink-0"
                   onClick={() => setRebuildOpen(true)}
                 >
-                  Rebuild lines
+                  {L("Rebuild lines")}
                 </Button>
               </div>
             ) : null}
@@ -1353,9 +1409,7 @@ export function Step3Subtitles() {
                     <Button
                       size="xs"
                       variant="ghost"
-                      onClick={() => {
-                        cancelVerifyAllRef.current = true;
-                      }}
+                      onClick={() => useJobStore.getState().cancelKind("verify", project?.id ?? null)}
                     >
                       Stop
                     </Button>
@@ -1372,7 +1426,7 @@ export function Step3Subtitles() {
                     Check {arabicCount} Arabic
                   </Button>
                 ) : (
-                  <span className="text-[11px] text-muted-foreground">No Arabic lines</span>
+                  <span className="text-[11px] text-muted-foreground">{L("No Arabic lines")}</span>
                 )}
               </div>
             </div>
@@ -1389,7 +1443,7 @@ export function Step3Subtitles() {
                   <div className="flex flex-col items-center justify-center gap-2 px-6 py-12 text-center">
                     <ScanText className="size-5 text-muted-foreground" />
                     <p className="text-xs font-medium text-foreground">
-                      No subtitle lines for this clip
+                      {L("No subtitle lines for this clip")}
                     </p>
                     <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
                       The transcript has no speech inside this clip. Widen the cut in Find Clips,
@@ -1401,7 +1455,7 @@ export function Step3Subtitles() {
                       </Button>
                       <Button size="sm" className="gap-1.5" onClick={handleAdd}>
                         <Plus className="size-3.5" />
-                        Add line
+                        {L("Add line")}
                       </Button>
                     </div>
                   </div>
@@ -1409,10 +1463,10 @@ export function Step3Subtitles() {
                   <div className="flex flex-col items-center justify-center gap-1 px-6 py-12 text-center">
                     <CheckCircle2 className="size-5 text-muted-foreground" />
                     <p className="text-xs font-medium text-foreground">
-                      Every line in this clip is checked
+                      {L("Every line in this clip is checked")}
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      Switch to All to edit a line again.
+                      {L("Switch to All to edit a line again.")}
                     </p>
                   </div>
                 ) : (
@@ -1478,7 +1532,7 @@ export function Step3Subtitles() {
                                   : "text-muted-foreground/50",
                               )}
                             >
-                              {cue.arabic || "No Arabic line"}
+                              {cue.arabic || L("No Arabic line")}
                             </p>
                             <p
                               lang="th"
@@ -1487,7 +1541,7 @@ export function Step3Subtitles() {
                                 cue.thai ? "text-foreground/90" : "text-muted-foreground/60",
                               )}
                             >
-                              {cue.thai.replace(/\n/g, " ") || "No Thai line"}
+                              {cue.thai.replace(/\n/g, " ") || L("No Thai line")}
                             </p>
                           </div>
 
@@ -1577,7 +1631,7 @@ export function Step3Subtitles() {
                                 onClick={() => playCue(cue)}
                               >
                                 <Play className="size-3" />
-                                Play
+                                {L("Play")}
                               </Button>
                               {cue.arabic.trim() ? (
                                 <Button
@@ -1593,7 +1647,7 @@ export function Step3Subtitles() {
                                   ) : (
                                     <ShieldCheck className="size-3" />
                                   )}
-                                  Check Arabic
+                                  {L("Check Arabic")}
                                 </Button>
                               ) : null}
                               <Button
@@ -1645,17 +1699,17 @@ export function Step3Subtitles() {
           className={cn(
             "flex min-h-0 flex-col",
             previewFocus
-              ? "fixed inset-0 z-40 border-0 bg-background p-3"
+              ? "fixed inset-x-0 bottom-0 top-[var(--titlebar-height)] z-40 border-0 bg-background p-3"
               : "border-l border-border",
           )}
           role={previewFocus ? "dialog" : undefined}
           aria-modal={previewFocus || undefined}
-          aria-label={previewFocus ? "Output preview" : undefined}
+          aria-label={previewFocus ? L("Output preview") : undefined}
         >
           {previewFocus ? (
             <div className="flex shrink-0 items-center justify-between px-1 pb-2">
               <span className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                Output preview
+                {L("Output preview")}
               </span>
               <Button
                 variant="ghost"
@@ -1668,6 +1722,53 @@ export function Step3Subtitles() {
             </div>
           ) : null}
           <div className="flex min-h-0 flex-1 flex-col gap-2 px-3 py-2">
+            {/* Output shape sits above the picture it changes: the editor
+                frames the clip while looking at the frame. */}
+            <div className="flex shrink-0 items-start gap-2">
+              <div className="min-w-0 flex-1 space-y-1">
+                <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                  {L("Aspect ratio")}
+                </p>
+                <SegmentedToggle<Resolution>
+                  label={L("Aspect ratio")}
+                  value={resolution}
+                  options={[
+                    { value: "1080x1920", label: "9:16", hint: "1080 x 1920, vertical" },
+                    { value: "1920x1080", label: "16:9", hint: "1920 x 1080, widescreen" },
+                  ]}
+                  onChange={(value) => updateExportSettings({ resolution: value })}
+                />
+              </div>
+              <div className="min-w-0 flex-1 space-y-1">
+                <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                  {L("Framing mode")}
+                </p>
+                <SegmentedToggle<FramingMode>
+                  label={L("Framing mode")}
+                  value={framing}
+                  disabled={!portrait}
+                  options={[
+                    {
+                      value: "blur-fill",
+                      label: FRAMING_LABELS["blur-fill"],
+                      hint: "Keeps the slide visible inside blurred bars",
+                    },
+                    {
+                      value: "center-crop",
+                      label: FRAMING_LABELS["center-crop"],
+                      hint: "Crops to fill the frame",
+                    },
+                  ]}
+                  onChange={(value) => updateExportSettings({ framing: value })}
+                />
+              </div>
+            </div>
+            {portrait ? null : (
+              <p className="shrink-0 text-[10px] leading-relaxed text-muted-foreground">
+                16:9 uses the whole frame, so framing applies to 9:16 only.
+              </p>
+            )}
+
             <SubtitleMonitor
               ref={monitorRef}
               resolution={resolution}
@@ -1677,8 +1778,14 @@ export function Step3Subtitles() {
               cues={cues}
               selectedCueId={activeCue?.id ?? null}
               styles={styles}
-              safeZone={safeZone && portrait}
+              safeZone={safeZone}
               muted={muted}
+              interactive
+              offsets={{
+                arabic: arabicSettings.verticalOffset,
+                thai: thaiSettings.verticalOffset,
+              }}
+              onNudgeLine={nudgeMonitorLine}
               onTimeUpdate={handleMonitorTime}
               onPlayingChange={setPlaying}
               onTogglePlay={togglePlay}
@@ -1705,7 +1812,7 @@ export function Step3Subtitles() {
               <Button
                 variant="ghost"
                 size="icon-sm"
-                aria-label={playing ? "Pause" : "Play the selected line"}
+                aria-label={playing ? L("Pause") : "Play the selected line"}
                 disabled={!canPlay || !activeCue}
                 onClick={togglePlay}
               >
@@ -1714,7 +1821,7 @@ export function Step3Subtitles() {
               <Button
                 variant="ghost"
                 size="icon-xs"
-                aria-label="Previous line"
+                aria-label={L("Previous line")}
                 disabled={!activeCue}
                 onClick={() => moveCue(-1)}
               >
@@ -1723,7 +1830,7 @@ export function Step3Subtitles() {
               <Button
                 variant="ghost"
                 size="icon-xs"
-                aria-label="Next line"
+                aria-label={L("Next line")}
                 disabled={!activeCue}
                 onClick={() => moveCue(1)}
               >
@@ -1749,7 +1856,7 @@ export function Step3Subtitles() {
                 <Button
                   variant="ghost"
                   size="icon-xs"
-                  aria-label={muted ? "Unmute" : "Mute"}
+                  aria-label={muted ? L("Unmute") : L("Mute")}
                   onClick={() => setMuted((value) => !value)}
                 >
                   {muted ? <VolumeX className="size-3.5" /> : <Volume2 className="size-3.5" />}
@@ -1778,51 +1885,13 @@ export function Step3Subtitles() {
                   <span className="flex min-w-0 items-center gap-1.5">
                     <SlidersHorizontal className="size-3" />
                     <span className="truncate">
-                      {resolution === "1080x1920" ? "9:16" : "16:9"}
-                      {" · "}
-                      {portrait ? FRAMING_LABELS[framing] : "Full frame"}
-                      {" · "}
-                      {activePreset?.name ?? "Custom style"}
+                      {activePreset?.name ?? L("Custom style")}
                     </span>
                   </span>
                   <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
                 </Button>
               </PopoverTrigger>
               <PopoverContent align="end" side="top" className="w-80 space-y-3">
-                <div className="space-y-1">
-                  <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                    Aspect
-                  </p>
-                  <SegmentedToggle<Resolution>
-                    label="Export aspect ratio"
-                    value={resolution}
-                    options={[
-                      { value: "1080x1920", label: "9:16 Vertical" },
-                      { value: "1920x1080", label: "16:9 Widescreen" },
-                    ]}
-                    onChange={(value) => updateExportSettings({ resolution: value })}
-                  />
-                </div>
-
-                {portrait ? (
-                  <div className="space-y-1">
-                    <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                      Framing
-                    </p>
-                    <SegmentedToggle<FramingMode>
-                      label="9:16 framing"
-                      value={framing}
-                      options={[
-                        { value: "blur-fill", label: FRAMING_LABELS["blur-fill"] },
-                        { value: "center-crop", label: FRAMING_LABELS["center-crop"] },
-                      ]}
-                      onChange={(value) => updateExportSettings({ framing: value })}
-                    />
-                  </div>
-                ) : null}
-
-                <Separator />
-
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
@@ -1840,7 +1909,7 @@ export function Step3Subtitles() {
                       onValueChange={(value) => applyPreset(value)}
                     >
                       <SelectTrigger className="h-8 flex-1 text-xs" aria-label="Subtitle style">
-                        <SelectValue placeholder="Custom style" />
+                        <SelectValue placeholder={L("Custom style")} />
                       </SelectTrigger>
                       <SelectContent>
                         {presets.map((preset) => (
@@ -1860,7 +1929,7 @@ export function Step3Subtitles() {
                       }}
                     >
                       <Type className="size-3" />
-                      Edit
+                      {L("Edit")}
                     </Button>
                   </div>
                 </div>
@@ -1869,7 +1938,7 @@ export function Step3Subtitles() {
 
                 <div className="flex items-center justify-between gap-2">
                   <div className="space-y-0.5">
-                    <p className="text-xs font-medium text-foreground">Safe zone</p>
+                    <p className="text-xs font-medium text-foreground">{L("Safe zone")}</p>
                     <p className="text-[11px] leading-relaxed text-muted-foreground">
                       Shows the TikTok / Reels / Shorts buttons and caption area.
                     </p>
@@ -1916,7 +1985,7 @@ export function Step3Subtitles() {
                 handleRebuild();
               }}
             >
-              Rebuild lines
+              {L("Rebuild lines")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1925,7 +1994,7 @@ export function Step3Subtitles() {
       <Dialog open={arabicReviewOpen} onOpenChange={setArabicReviewOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Arabic passages</DialogTitle>
+            <DialogTitle>{L("Arabic passages")}</DialogTitle>
             <DialogDescription>
               Each recitation is its own subtitle. Qur'an passages marked verified were matched
               against the bundled corpus; hadith and quotes are AI suggestions. Review them before
@@ -1935,7 +2004,7 @@ export function Step3Subtitles() {
 
           <div className="space-y-3">
             {arabicPassages.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No Arabic passages in this clip.</p>
+              <p className="text-xs text-muted-foreground">{L("No Arabic passages in this clip.")}</p>
             ) : null}
             {arabicPassages.map((cue) => (
               <div
@@ -2000,7 +2069,7 @@ export function Step3Subtitles() {
                     onClick={() => playCue(cue)}
                   >
                     <Play className="size-3" />
-                    Play
+                    {L("Play")}
                   </Button>
                   <Button
                     size="xs"
@@ -2019,7 +2088,7 @@ export function Step3Subtitles() {
                       selectCue(cue);
                     }}
                   >
-                    Edit
+                    {L("Edit")}
                   </Button>
                   {cue.originalText ? (
                     <Button
@@ -2028,7 +2097,7 @@ export function Step3Subtitles() {
                       className="text-muted-foreground"
                       onClick={() => restoreArabicPassage(cue.id)}
                     >
-                      Restore Thai
+                      {L("Restore Thai")}
                     </Button>
                   ) : null}
                 </div>
@@ -2060,7 +2129,7 @@ export function Step3Subtitles() {
         </div>
         <div className="flex items-center gap-1.5">
           <Button variant="ghost" size="sm" onClick={() => setStep(2)}>
-            Back to clip discovery
+            {L("Back to clip discovery")}
           </Button>
           <Button
             size="sm"
@@ -2069,7 +2138,7 @@ export function Step3Subtitles() {
             onClick={() => setStep(4)}
           >
             <Smartphone className="size-3.5" />
-            Continue to export
+            {L("Continue to export")}
           </Button>
         </div>
       </footer>

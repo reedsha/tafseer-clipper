@@ -104,9 +104,10 @@ export interface DecisionSettingsSlice {
 }
 
 /**
- * The `decision_provider` override for one slot, or `null` when the slot is
- * off. The address and key are reused from the saved connections — the
- * decision layer never gets a second set of credentials (AGENTS.md §3).
+ * The `decision_provider` override for one slot, or `null` when no model is
+ * configured (the step then uses its standard path). Judgments are always on;
+ * the address and key are reused from the saved connections — the decision
+ * layer never gets a second set of credentials (AGENTS.md §3).
  */
 export function buildDecisionProviderFor(
   settings: DecisionSettingsSlice,
@@ -114,7 +115,7 @@ export function buildDecisionProviderFor(
 ): DecisionProviderOverride | null {
   const config = settings.decisionSlots[slot];
   const model = config.model.trim();
-  if (!config.enabled || !model) return null;
+  if (!model) return null;
   const timeout = settings.cloud.timeout || null;
   const endpoint_url = config.endpointUrl.trim() || null;
   if (config.mode === "local") {
@@ -145,7 +146,6 @@ export function describeDecisionSlotGap(
   slot: DecisionSlotId,
 ): string | null {
   const config = settings.decisionSlots[slot];
-  if (!config.enabled) return null;
   if (!config.model.trim()) return "the fast-judgment model";
   if (config.mode === "local") {
     return settings.ollama.baseUrl.trim() ? null : "the local AI address";

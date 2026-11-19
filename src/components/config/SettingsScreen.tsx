@@ -1,8 +1,9 @@
+import { L } from "@/lib/i18n";
 /**
  * Full-page Settings screen, styled like a preferences window: a left sidebar
  * listing every section, and a content pane showing the selected one. There is
  * deliberately no wizard footer — sections are jumped to directly from the
- * sidebar, and "Back to app" closes the screen.
+ * sidebar, and L("Back to app") closes the screen.
  */
 
 import { useRef, useState } from "react";
@@ -42,7 +43,6 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import {
   Select,
@@ -70,6 +70,7 @@ import { SidecarStatusDot, SIDECAR_STATUS_LABEL } from "@/components/SidecarStat
 import { listModels } from "@/lib/api";
 import { describeProviderGap, fitSentence } from "@/lib/providers";
 import { describeAcceleration } from "@/lib/acceleration";
+import { useAppVersion } from "@/lib/appVersion";
 import { buildDiagnostics, copyText } from "@/lib/diagnostics";
 import { formatBytes } from "@/lib/format";
 import { loadImportedFonts } from "@/lib/fonts";
@@ -94,30 +95,34 @@ import {
 import { useUiStore, type SettingsSection } from "@/store/uiStore";
 import { cn } from "cn";
 
-const SECTIONS: { id: SettingsSection; label: string; icon: LucideIcon }[] = [
-  { id: "connection", label: "AI connection", icon: KeyRound },
-  { id: "judgments", label: "Fast judgments", icon: Sparkles },
-  { id: "gpu", label: "GPU acceleration", icon: Cpu },
-  { id: "storage", label: "Storage & cache", icon: FolderOpen },
-  { id: "engine", label: "Engine & diagnostics", icon: Activity },
-  { id: "language", label: "Language", icon: Languages },
-  { id: "backup", label: "Backup & reset", icon: Save },
-  { id: "updates", label: "Updates", icon: Download },
-  { id: "shortcuts", label: "Keyboard shortcuts", icon: Keyboard },
-];
+function getSections(): { id: SettingsSection; label: string; icon: LucideIcon }[] {
+  return [
+  { id: "connection", label: L("AI connection"), icon: KeyRound },
+  { id: "judgments", label: L("Fast judgments"), icon: Sparkles },
+  { id: "gpu", label: L("GPU acceleration"), icon: Cpu },
+  { id: "storage", label: L("Storage & cache"), icon: FolderOpen },
+  { id: "engine", label: L("Engine & diagnostics"), icon: Activity },
+  { id: "language", label: L("Language"), icon: Languages },
+  { id: "backup", label: L("Backup & reset"), icon: Save },
+  { id: "updates", label: L("Updates"), icon: Download },
+    { id: "shortcuts", label: L("Keyboard shortcuts"), icon: Keyboard },
+  ];
+}
 
-const SECTION_DESCRIPTIONS: Record<SettingsSection, string> = {
-  connection: "One AI connection for clip finding, Arabic checking and cloud speech-to-text — cloud or on this computer.",
+function getSectionDescriptions(): Record<SettingsSection, string> {
+  return {
+  connection: L("One AI connection for clip finding, Arabic checking and cloud speech-to-text — cloud or on this computer."),
   judgments:
-    "Small, fast models for yes/no and ranking decisions. They make each step quicker and fall back automatically when they are off.",
-  gpu: "Optional hardware acceleration. Everything falls back to the CPU automatically.",
-  storage: "Auto-save, the project folder and the temporary disk cache.",
-  engine: "Live status of the processing engine, plus a copyable support bundle.",
-  language: "Display language of the app.",
-  backup: "Export or import every setting, or reset to defaults.",
-  updates: "Signed release updates for the installed desktop app.",
-  shortcuts: "Keyboard shortcuts used across the studio.",
-};
+    L("Small, fast models for yes/no and ranking decisions. They make each step quicker and fall back automatically when they are off."),
+  gpu: L("Optional hardware acceleration. Everything falls back to the CPU automatically."),
+  storage: L("Auto-save, the project folder and the temporary disk cache."),
+  engine: L("Live status of the processing engine, plus a copyable support bundle."),
+  language: L("Display language of the app."),
+  backup: L("Export or import every setting, or reset to defaults."),
+  updates: L("Signed release updates for the installed desktop app."),
+    shortcuts: L("Keyboard shortcuts used across the studio."),
+  };
+}
 
 export function SettingsScreen() {
   const setSettingsOpen = useUiStore((state) => state.setSettingsOpen);
@@ -125,7 +130,7 @@ export function SettingsScreen() {
   const openSettings = useUiStore((state) => state.openSettings);
 
   return (
-    <div className="fixed inset-0 z-40 flex bg-background">
+    <div className="fixed inset-x-0 bottom-0 top-[var(--titlebar-height)] z-40 flex bg-background">
       <aside className="flex w-60 shrink-0 flex-col gap-1 overflow-y-auto border-r border-border px-3 py-4">
         <Button
           variant="ghost"
@@ -134,12 +139,12 @@ export function SettingsScreen() {
           onClick={() => setSettingsOpen(false)}
         >
           <ArrowLeft className="size-4" />
-          Back to app
+          {L("Back to app")}
         </Button>
         <p className="px-2 pb-2 pt-4 text-[10px] uppercase tracking-[0.2em] text-muted-foreground/70">
-          Settings
+          {L("Settings")}
         </p>
-        {SECTIONS.map(({ id, label, icon: Icon }) => (
+        {getSections().map(({ id, label, icon: Icon }) => (
           <Button
             key={id}
             type="button"
@@ -164,10 +169,10 @@ export function SettingsScreen() {
         <div className="mx-auto w-full max-w-3xl px-10 py-8">
           <header className="space-y-1 pb-6">
             <h1 className="text-lg font-medium text-foreground">
-              {SECTIONS.find((s) => s.id === settingsSection)?.label ?? "Settings"}
+              {getSections().find((s) => s.id === settingsSection)?.label ?? L("Settings")}
             </h1>
             <p className="text-sm text-muted-foreground">
-              {SECTION_DESCRIPTIONS[settingsSection]}
+              {getSectionDescriptions()[settingsSection]}
             </p>
           </header>
           <div className="space-y-5">
@@ -237,7 +242,7 @@ function ConnectionSection() {
 
       const result = await listModels({ base_url: baseUrl, api_key: apiKey });
 
-      toast.success("Connected", {
+      toast.success(L("Connected"), {
         description: result.models.length
           ? `${result.models.length} model${result.models.length === 1 ? "" : "s"} available · no tokens used`
           : "The service answered but lists no models. Check its model access.",
@@ -255,7 +260,7 @@ function ConnectionSection() {
     const opened = await openExternalUrl("https://ollama.com/download");
     if (opened) return;
     const copied = await copyText("https://ollama.com/download");
-    toast(copied ? "Download link copied" : "Open ollama.com/download", {
+    toast(copied ? L("Download link copied") : "Open ollama.com/download", {
       description: "Install Ollama, then use Check again.",
     });
   }
@@ -263,10 +268,10 @@ function ConnectionSection() {
   return (
     <>
       <Section
-        title="Cloud (your AI account)"
-        description="An OpenAI-compatible connection. The server address and API key are entered here and nowhere else."
+        title={L("Cloud (your AI account)")}
+        description={L("An OpenAI-compatible connection. The server address and API key are entered here and nowhere else.")}
       >
-        <Field label="Server address">
+        <Field label={L("Server address")}>
           <Input
             value={cloud.baseUrl}
             onChange={(event) => updateCloud({ baseUrl: event.target.value })}
@@ -276,7 +281,7 @@ function ConnectionSection() {
             autoComplete="off"
           />
         </Field>
-        <Field label="API key">
+        <Field label={L("API key")}>
           {/* Chromium logs a password-manager warning for a `type="password"`
               field outside a form; this one is inert (no implicit submits). */}
           <form onSubmit={(event) => event.preventDefault()}>
@@ -306,11 +311,11 @@ function ConnectionSection() {
             ) : (
               <RefreshCw className="size-3.5" />
             )}
-            Test connection
+            {L("Test connection")}
           </Button>
           <span className="text-[11px] text-muted-foreground">
-            Checks the address and key, then lists available models. No tokens used.
-            Speech-to-text is checked when you transcribe.
+            {L("Checks the address and key, then lists available models. No tokens used.")}
+            {L("Speech-to-text is checked when you transcribe.")}
           </span>
         </div>
       </Section>
@@ -318,8 +323,8 @@ function ConnectionSection() {
       <Separator />
 
       <Section
-        title="Local (this computer, Ollama)"
-        description="The offline engine used when a model selector is switched to “This computer”."
+        title={L("Local (this computer, Ollama)")}
+        description={L("The offline engine used when a model selector is switched to “This computer”.")}
       >
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="outline" className="gap-1.5 text-[10px]">
@@ -330,7 +335,7 @@ function ConnectionSection() {
                 ollamaDetected ? "bg-status-online" : "bg-muted-foreground/50",
               )}
             />
-            {ollamaDetected ? "Ollama found" : "Ollama not found"}
+            {ollamaDetected ? L("Ollama found") : L("Ollama not found")}
           </Badge>
           <FitBadge tier={hardwareTier} />
           <Button
@@ -339,7 +344,7 @@ function ConnectionSection() {
             className="h-5 text-muted-foreground"
             onClick={() => void refreshHealth({ force: true })}
           >
-            Check again
+            {L("Check again")}
           </Button>
         </div>
 
@@ -349,12 +354,12 @@ function ConnectionSection() {
           </p>
         ) : null}
 
-        <Field label="Server address" hint="Default: http://localhost:11434/v1">
+        <Field label={L("Server address")} hint="Default: http://localhost:11434/v1">
           <Input
             value={ollama.baseUrl}
             onChange={(event) => updateOllama({ baseUrl: event.target.value })}
             placeholder="http://localhost:11434/v1"
-            aria-label="Ollama server address"
+            aria-label={L("Ollama server address")}
             spellCheck={false}
             autoComplete="off"
           />
@@ -368,7 +373,7 @@ function ConnectionSection() {
               free and runs everything offline.
             </p>
             <ol className="list-decimal space-y-0.5 pl-4 text-[11px] leading-relaxed text-muted-foreground">
-              <li>Install Ollama.</li>
+              <li>{L("Install Ollama.")}</li>
               <li>
                 Pull any model with <span className="font-mono">ollama pull &lt;model&gt;</span>.
               </li>
@@ -382,7 +387,7 @@ function ConnectionSection() {
                 onClick={() => void handleGetOllama()}
               >
                 <Download className="size-3.5" />
-                Get Ollama
+                {L("Get Ollama")}
               </Button>
             </div>
           </div>
@@ -405,21 +410,21 @@ const DECISION_SLOTS: {
   {
     id: "analysis",
     title: "Recitation & sentence breaks",
-    hint: "Step 1 · finds spoken Arabic and where sentences end",
+    hint: L("Step 1 · finds spoken Arabic and where sentences end"),
     description:
       "Classifies each transcript segment, so the lecture is grouped before you reach Find Clips.",
   },
   {
     id: "clip_scoring",
-    title: "Clip ranking",
-    hint: "Step 2 · orders candidate moments before titles are written",
+    title: L("Clip ranking"),
+    hint: L("Step 2 · orders candidate moments before titles are written"),
     description:
       "Scores every candidate window against your brief, then the writing model names only the finalists.",
   },
   {
     id: "verify_triage",
-    title: "Arabic triage",
-    hint: "Step 3 · skips lines that are already correct",
+    title: L("Arabic triage"),
+    hint: L("Step 3 · skips lines that are already correct"),
     description:
       "Checks which Arabic lines plausibly need a correction, so the proofreader only runs where it matters.",
   },
@@ -503,14 +508,14 @@ function JudgmentsSection() {
 
   return (
     <Section
-      title="Fast judgments"
-      description="Optional small models for quick yes/no and ranking decisions. Turn one on to make that step faster; if it is off or unreachable, the step falls back to the way it works today."
+      title={L("Fast judgments")}
+      description="Small models for quick yes/no and ranking decisions. Each step uses its configured model automatically; if no model is set or the service is unreachable, that step quietly falls back to the way it works today."
     >
       <div className="space-y-3">
         {DECISION_SLOTS.map((slot) => {
           const config = decisionSlots[slot.id];
           const probe = probes[slot.id];
-          const needsModel = config.enabled && !config.model.trim();
+          const needsModel = !config.model.trim();
           return (
             <div
               key={slot.id}
@@ -523,11 +528,6 @@ function JudgmentsSection() {
                     {slot.hint}
                   </p>
                 </div>
-                <Switch
-                  checked={config.enabled}
-                  onCheckedChange={(enabled) => updateDecisionSlot(slot.id, { enabled })}
-                  aria-label={`${slot.title} fast judgments`}
-                />
               </div>
               <p className="text-[11px] leading-relaxed text-muted-foreground">
                 {slot.description}
@@ -536,16 +536,15 @@ function JudgmentsSection() {
               <SegmentedToggle<DecisionSlotMode>
                 label={`Where ${slot.title} runs`}
                 value={config.mode}
-                disabled={!config.enabled}
                 options={[
-                  { value: "local", label: "This computer" },
-                  { value: "cloud", label: "Your AI account" },
+                  { value: "local", label: L("This computer") },
+                  { value: "cloud", label: L("Your AI account") },
                 ]}
                 onChange={(mode) => updateDecisionSlot(slot.id, { mode, model: "" })}
               />
 
               <Field
-                label="Model"
+                label={L("Model")}
                 hint="Only familiar fast-judgment models are listed. Type the exact name below if yours isn't shown."
               >
                 <ModelSelect
@@ -563,7 +562,7 @@ function JudgmentsSection() {
                     size="sm"
                     className="h-7 px-0 text-[11px] text-muted-foreground hover:text-foreground"
                   >
-                    Advanced
+                    {L("Advanced")}
                   </Button>
                 </DialogTrigger>
                 <DialogContent>
@@ -616,7 +615,7 @@ function JudgmentsSection() {
                   </div>
                   <DialogFooter>
                     <DialogClose asChild>
-                      <Button variant="outline">Done</Button>
+                      <Button variant="outline">{L("Done")}</Button>
                     </DialogClose>
                   </DialogFooter>
                 </DialogContent>
@@ -627,7 +626,7 @@ function JudgmentsSection() {
                   variant="outline"
                   size="sm"
                   className="gap-1.5"
-                  disabled={!config.enabled || probe.status === "running"}
+                  disabled={needsModel || probe.status === "running"}
                   onClick={() => void test(slot.id)}
                 >
                   {probe.status === "running" ? (
@@ -639,11 +638,11 @@ function JudgmentsSection() {
                 </Button>
                 {needsModel ? (
                   <span className="text-[11px] text-status-warning">
-                    Choose a model to switch this on.
+                    No model chosen yet — this step uses the standard path.
                   </span>
                 ) : probe.status === "idle" ? (
                   <span className="text-[11px] text-muted-foreground">
-                    {config.mode === "local" ? "Runs on this computer" : "Runs on your AI account"}
+                    {config.mode === "local" ? L("Runs on this computer") : L("Runs on your AI account")}
                   </span>
                 ) : (
                   <span
@@ -662,8 +661,7 @@ function JudgmentsSection() {
       </div>
 
       <p className="text-[11px] leading-relaxed text-muted-foreground">
-        Leaving a switch off keeps today's behavior exactly: the step uses its
-        regular model, or its built-in rules.
+        {L("Leaving a switch off keeps today's behavior exactly: the step uses its regular model, or its built-in rules.")}
       </p>
     </Section>
   );
@@ -678,7 +676,7 @@ function GpuSection() {
   const acceleration = describeAcceleration(health);
   return (
     <Section
-      title="Acceleration pack"
+      title={L("Acceleration pack")}
       description="Optional. The app detects a supported GPU, then downloads a signed acceleration pack — no driver setup. Without it everything runs on the CPU, which is slower but always available. GPU capability also decides whether hardware encoding can be enabled in the Export configuration."
     >
       <GpuAccelerationPanel summary={acceleration} />
@@ -701,16 +699,16 @@ function StorageSection() {
   return (
     <>
       <Section
-        title="Auto-save & project folder"
-        description="Auto-save writes a .tafseer snapshot after every edit so a lecture can resume at Step 2 or 3."
+        title={L("Auto-save & project folder")}
+        description={L("Auto-save writes a .tafseer snapshot after every edit so a lecture can resume at Step 2 or 3.")}
       >
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Auto-save interval">
+          <Field label={L("Auto-save interval")}>
             <Select
               value={String(storage.autosaveIntervalMs)}
               onValueChange={(value) => updateStorage({ autosaveIntervalMs: Number(value) })}
             >
-              <SelectTrigger className="w-full" aria-label="Auto-save interval">
+              <SelectTrigger className="w-full" aria-label={L("Auto-save interval")}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -724,13 +722,13 @@ function StorageSection() {
               </SelectContent>
             </Select>
           </Field>
-          <Field label="Project folder" hint="Used by native save dialogs">
+          <Field label={L("Project folder")} hint={L("Used by native save dialogs")}>
             <div className="flex gap-2">
               <Input
                 value={storage.projectFolder}
                 onChange={(event) => updateStorage({ projectFolder: event.target.value })}
                 placeholder="Documents\\Tafseer Clipper"
-                aria-label="Project folder"
+                aria-label={L("Project folder")}
                 spellCheck={false}
               />
               <Button
@@ -770,12 +768,12 @@ function StorageSection() {
       <Separator />
 
       <Section
-        title="Disk cache"
-        description="Temporary audio extracts and preview files created by the app."
+        title={L("Disk cache")}
+        description={L("Temporary audio extracts and preview files created by the app.")}
       >
         <div className="space-y-1.5 rounded-md border border-border bg-card/40 px-3 py-2">
           <div className="flex items-baseline justify-between gap-3">
-            <p className="text-[11px] text-muted-foreground">Cache size</p>
+            <p className="text-[11px] text-muted-foreground">{L("Cache size")}</p>
             <p
               className="text-xs tabular-nums text-foreground/90"
               aria-label={
@@ -795,7 +793,7 @@ function StorageSection() {
               )}
             </p>
           </div>
-          <p className="text-[11px] text-muted-foreground">Work directory</p>
+          <p className="text-[11px] text-muted-foreground">{L("Work directory")}</p>
           <p className="break-all font-mono text-[11px] text-foreground/80">
             {health?.work_dir ?? "—"}
           </p>
@@ -823,6 +821,8 @@ function EngineSection() {
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
   const health = sidecar.health;
   const acceleration = describeAcceleration(health);
+  /** Installed app version; the bundled engine can lag behind after an update. */
+  const appVersion = useAppVersion();
 
   async function handleCopyDiagnostics() {
     if (diagnosticsBusy) return;
@@ -837,7 +837,7 @@ function EngineSection() {
       });
       const copied = await copyText(bundle);
       if (copied) {
-        toast.success("Diagnostics copied", {
+        toast.success(L("Diagnostics copied"), {
           description: "Paste it into your support request. No API keys are included.",
         });
       } else {
@@ -856,14 +856,16 @@ function EngineSection() {
 
   return (
     <>
-      <Section title="Engine & hardware" description="Read-only snapshot of the running engine.">
+      <Section title={L("Engine & hardware")} description={L("Read-only snapshot of the running app and engine.")}>
         <div className="rounded-md border border-border bg-card/40">
           <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
             <div className="flex items-center gap-2">
               <SidecarStatusDot status={sidecar.status} />
               <span className="text-xs text-foreground/90">
                 {SIDECAR_STATUS_LABEL[sidecar.status]}
-                {sidecar.status === "online" && health ? ` · v${health.version}` : ""}
+                {sidecar.status === "online" && health
+                  ? ` · v${appVersion ?? health.version}`
+                  : ""}
               </span>
             </div>
             <Button
@@ -878,21 +880,27 @@ function EngineSection() {
             </Button>
           </div>
           <dl className="divide-y divide-border text-[11px]">
-            <HealthRow label="Engine version" value={health ? `v${health.version}` : "—"} />
             <HealthRow
-              label="Acceleration"
+              label={L("App version")}
+              value={appVersion ? `v${appVersion}` : health ? `v${health.version}` : "—"}
+            />
+            {health && appVersion && health.version !== appVersion ? (
+              <HealthRow label={L("Engine version")} value={`v${health.version}`} />
+            ) : null}
+            <HealthRow
+              label={L("Acceleration")}
               value={health ? <GpuStatusLine summary={acceleration} /> : "—"}
             />
             <HealthRow
-              label="Transcription"
+              label={L("Transcription")}
               value={health ? (acceleration.transcription === "gpu" ? "GPU" : "CPU") : "—"}
             />
             <HealthRow
-              label="Encoding"
+              label={L("Encoding")}
               value={health ? (acceleration.encoding === "gpu" ? "GPU" : "CPU") : "—"}
             />
             <HealthRow
-              label="GPU memory"
+              label={L("GPU memory")}
               value={
                 health ? (
                   <NumberFlow
@@ -915,7 +923,7 @@ function EngineSection() {
             />
             <HealthRow
               label="ffmpeg"
-              value={health ? (health.ffmpeg_available ? "Available" : "Missing") : "—"}
+              value={health ? (health.ffmpeg_available ? L("Available") : L("Missing")) : "—"}
             />
           </dl>
           {sidecar.error ? (
@@ -929,8 +937,8 @@ function EngineSection() {
       <Separator />
 
       <Section
-        title="Diagnostics"
-        description="Copy a support bundle with versions, paths and the last engine health snapshot."
+        title={L("Diagnostics")}
+        description={L("Copy a support bundle with versions, paths and the last engine health snapshot.")}
       >
         <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -945,7 +953,7 @@ function EngineSection() {
             ) : (
               <Copy className="size-3.5" />
             )}
-            Copy diagnostics
+            {L("Copy diagnostics")}
           </Button>
           <span className="text-[11px] text-muted-foreground">
             Diagnostics to the clipboard · API keys excluded
@@ -973,9 +981,9 @@ function LanguageSection() {
   const uiLanguage = useSettingsStore((state) => state.uiLanguage);
   const setUiLanguage = useSettingsStore((state) => state.setUiLanguage);
   return (
-    <Field label="Display language">
+    <Field label={L("Display language")}>
       <Select value={uiLanguage} onValueChange={(value) => setUiLanguage(value as UiLanguage)}>
-        <SelectTrigger className="w-full" aria-label="Language">
+        <SelectTrigger className="w-full" aria-label={L("Language")}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -984,7 +992,9 @@ function LanguageSection() {
         </SelectContent>
       </Select>
       <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-        Thai covers the add-lecture screen first; more screens follow.
+        {L(
+          "Interface text is translated where it reads naturally; technical names and shortcuts stay in English.",
+        )}
       </p>
     </Field>
   );
@@ -1025,17 +1035,17 @@ function BackupSection() {
         // that are actually present so the Step 3 preview can resolve them.
         const { importedFonts: restoredFonts } = useSettingsStore.getState();
         if (restoredFonts.length > 0) void loadImportedFonts(restoredFonts);
-        toast.success("Settings imported", {
+        toast.success(L("Settings imported"), {
           description:
             restoredFonts.length > 0
               ? "Font names were restored — re-import any .ttf/.otf files that are missing."
               : undefined,
         });
       } else {
-        toast.error("Import failed", { description: result.error });
+        toast.error(L("Import failed"), { description: result.error });
       }
     } catch (error) {
-      toast.error("Import failed", {
+      toast.error(L("Import failed"), {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -1045,7 +1055,7 @@ function BackupSection() {
 
   function handleExportSettings() {
     downloadJson(exportSettings(), settingsBackupFileName());
-    toast.success("Settings exported", {
+    toast.success(L("Settings exported"), {
       description: "Includes API keys in plain text — keep the file private.",
     });
   }
@@ -1053,8 +1063,8 @@ function BackupSection() {
   return (
     <>
       <Section
-        title="Portable settings backup"
-        description="Export or import API keys, glossaries, prompts and style presets. Font files themselves are not included — only the list of imported faces."
+        title={L("Portable settings backup")}
+        description={L("Export or import API keys, glossaries, prompts and style presets. Font files themselves are not included — only the list of imported faces.")}
       >
         <div className="flex flex-wrap gap-2">
           <input
@@ -1067,7 +1077,7 @@ function BackupSection() {
           />
           <Button variant="outline" size="sm" className="gap-1.5" onClick={handleExportSettings}>
             <Download className="size-3.5" />
-            Export settings (.json)
+            {L("Export settings (.json)")}
           </Button>
           <Button
             variant="outline"
@@ -1076,7 +1086,7 @@ function BackupSection() {
             onClick={() => settingsInputRef.current?.click()}
           >
             <Upload className="size-3.5" />
-            Import settings (.json)
+            {L("Import settings (.json)")}
           </Button>
           <Button
             variant="ghost"
@@ -1085,28 +1095,25 @@ function BackupSection() {
             onClick={() => setResetDialogOpen(true)}
           >
             <Trash2 className="size-3.5" />
-            Reset defaults
+            {L("Reset defaults")}
           </Button>
         </div>
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          The exported file contains API keys in plain text. Store it somewhere private
-          and never share it.
+          {L("The exported file contains API keys in plain text. Store it somewhere private and never share it.")}
         </p>
       </Section>
 
       <Dialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>Reset all settings?</DialogTitle>
+            <DialogTitle>{L("Reset all settings?")}</DialogTitle>
             <DialogDescription>
-              Restores the default dark studio configuration and clears every API key, imported
-              font reference, glossary pair, style preset and prompt preset. Export a backup first
-              if you need any of them.
+              {L("Restores the default dark studio configuration and clears every API key, imported font reference, glossary pair, style preset and prompt preset. Export a backup first if you need any of them.")}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="ghost" size="sm" onClick={() => setResetDialogOpen(false)}>
-              Cancel
+              {L("Cancel")}
             </Button>
             <Button
               variant="destructive"
@@ -1118,7 +1125,7 @@ function BackupSection() {
                 toast.success("Settings reset to defaults");
               }}
             >
-              Reset
+              {L("Reset")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1152,7 +1159,7 @@ function UpdatesSection() {
       });
       return;
     }
-    toast.success("You are up to date", {
+    toast.success(L("You are up to date"), {
       description: result.currentVersion
         ? `Tafseer Clipper v${result.currentVersion} is the latest release.`
         : "No newer release was announced.",
@@ -1163,7 +1170,7 @@ function UpdatesSection() {
     if (installingUpdate) return;
     const pending = getPendingUpdate();
     if (!pending) {
-      toast.error("No update is staged", {
+      toast.error(L("No update is staged"), {
         description: "Check for updates again before installing.",
       });
       return;
@@ -1172,16 +1179,16 @@ function UpdatesSection() {
     try {
       const result = await downloadAndInstall(pending);
       if ("error" in result) {
-        toast.error("Update failed", { description: result.error });
+        toast.error(L("Update failed"), { description: result.error });
         return;
       }
-      toast.success("Update installed", {
+      toast.success(L("Update installed"), {
         description: "Restarting Tafseer Clipper to finish the install.",
       });
       try {
         await relaunchApp();
       } catch (error) {
-        toast.error("Restart failed", {
+        toast.error(L("Restart failed"), {
           description:
             error instanceof Error
               ? error.message
@@ -1195,19 +1202,19 @@ function UpdatesSection() {
 
   return (
     <Section
-      title="Release channel"
-      description="Download the latest release for the installed desktop app. Nothing installs automatically."
+      title={L("Release channel")}
+      description={L("Download the latest release for the installed desktop app. Nothing installs automatically.")}
     >
       <div className="space-y-2 rounded-md border border-border bg-card/40 px-3 py-2.5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="space-y-0.5">
-            <p className="text-[11px] text-muted-foreground">App version</p>
+            <p className="text-[11px] text-muted-foreground">{L("App version")}</p>
             <p className="text-xs tabular-nums text-foreground/90">
               {updater.currentVersion
                 ? `v${updater.currentVersion}`
                 : desktopRuntime
-                  ? "Shown after an update check"
-                  : "Desktop app only"}
+                  ? L("Shown after an update check")
+                  : L("Desktop app only")}
             </p>
           </div>
           <Badge variant="outline" className="text-[10px]">
@@ -1229,7 +1236,7 @@ function UpdatesSection() {
               ) : (
                 <RefreshCw className="size-3.5" />
               )}
-              Check for updates
+              {L("Check for updates")}
             </Button>
             <Button
               variant="ghost"
@@ -1238,7 +1245,7 @@ function UpdatesSection() {
               onClick={() => void openExternalUrl(RELEASES_URL)}
             >
               <ExternalLink className="size-3.5" />
-              View all releases
+              {L("View all releases")}
             </Button>
             {updater.phase === "available" ? (
               <Button
@@ -1274,15 +1281,20 @@ function UpdatesSection() {
 
 function ShortcutsSection() {
   return (
-    <Section title="All shortcuts" description="Used across the studio.">
+    <Section title={L("All shortcuts")} description={L("Used across the studio.")}>
       <div className="space-y-1.5">
         {SHORTCUTS.map((shortcut) => (
           <div
             key={shortcut.keys}
             className="flex items-center justify-between gap-4 rounded-md border border-border bg-card/30 px-2.5 py-1.5"
           >
-            <span className="text-[11px] text-muted-foreground">{shortcut.action}</span>
-            <kbd className="rounded border border-border bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-foreground/80">
+            <div className="min-w-0 space-y-0.5">
+              <p className="text-[11px] text-muted-foreground">{shortcut.action}</p>
+              <p className="text-[10px] leading-relaxed text-muted-foreground/70">
+                {L("Used in:")} {L(shortcut.where)}
+              </p>
+            </div>
+            <kbd className="shrink-0 rounded border border-border bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-foreground/80">
               {shortcut.keys}
             </kbd>
           </div>

@@ -144,6 +144,7 @@ export const useRenderStore = create<RenderState>()((set) => ({
         boxOpacity: settings.arabic.boxOpacity,
         bold: settings.arabic.bold,
         lineHeightPad: settings.arabic.lineHeightPad,
+        verticalOffset: settings.arabic.verticalOffset,
       },
       {
         font: settings.thai.fontFamily,
@@ -154,6 +155,7 @@ export const useRenderStore = create<RenderState>()((set) => ({
         boxOpacity: settings.thai.boxOpacity,
         bold: settings.thai.bold,
         lineHeightPad: 1.2,
+        verticalOffset: settings.thai.verticalOffset,
       },
     );
 
