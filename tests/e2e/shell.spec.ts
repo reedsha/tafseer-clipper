@@ -158,7 +158,8 @@ test.describe("app shell", () => {
     await page.getByRole("button", { name: "Language", exact: true }).click();
     await page.getByRole("combobox", { name: "Language", exact: true }).click();
     await page.getByRole("option", { name: "ไทย" }).click();
-    await page.getByRole("button", { name: "Back to app" }).click();
+    // The settings chrome also translates once Thai is selected.
+    await page.getByRole("button", { name: "กลับไปแอป" }).click();
 
     await expect(page.getByRole("heading", { name: "เพิ่มบทบรรยายของคุณ" })).toBeVisible();
   });

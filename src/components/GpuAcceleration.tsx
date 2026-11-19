@@ -1,3 +1,4 @@
+import { L } from "@/lib/i18n";
 import { useEffect, useState } from "react";
 import NumberFlow from "@number-flow/react";
 import { toast } from "sonner";
@@ -98,11 +99,11 @@ function GpuPackAction({ summary }: { summary: AccelerationSummary }) {
     const result = await downloadAccelerationPack();
     setBusy(false);
     if ("error" in result) {
-      toast.error("Could not enable GPU acceleration", { description: result.error });
+      toast.error(L("Could not enable GPU acceleration"), { description: result.error });
       return;
     }
-    toast.success("GPU acceleration installed", {
-      description: "Restart the app to switch transcription and encoding to the GPU.",
+    toast.success(L("GPU acceleration installed"), {
+      description: L("Restart the app to switch transcription and encoding to the GPU."),
     });
   }
 
@@ -112,7 +113,7 @@ function GpuPackAction({ summary }: { summary: AccelerationSummary }) {
     try {
       await relaunchApp();
     } catch (error) {
-      toast.error("Could not restart", {
+      toast.error(L("Could not restart"), {
         description: error instanceof Error ? error.message : String(error),
       });
       setRestarting(false);
@@ -136,10 +137,10 @@ function GpuPackAction({ summary }: { summary: AccelerationSummary }) {
           ) : (
             <RotateCw className="size-3.5" />
           )}
-          Restart to use the GPU
+          {L("Restart to use the GPU")}
         </Button>
         <span className="text-[11px] text-muted-foreground">
-          Until then everything keeps running on the CPU.
+          {L("Until then everything keeps running on the CPU.")}
         </span>
       </div>
     );
@@ -161,10 +162,10 @@ function GpuPackAction({ summary }: { summary: AccelerationSummary }) {
             ) : (
               <Download className="size-3.5" />
             )}
-            Enable GPU acceleration
+            {L("Enable GPU acceleration")}
           </Button>
           <span className="text-[11px] text-muted-foreground">
-            One download, no driver setup. CPU works meanwhile.
+            {L("One download, no driver setup. CPU works meanwhile.")}
           </span>
         </div>
 
@@ -200,7 +201,7 @@ function GpuPackAction({ summary }: { summary: AccelerationSummary }) {
       <div className="space-y-1">
         <p className="flex items-center gap-1.5 text-[11px] text-status-online">
           <Sparkles className="size-3" />
-          GPU acceleration enabled
+          {L("GPU acceleration enabled")}
         </p>
         {pack.status ? (
           <p className="text-[11px] tabular-nums text-muted-foreground">
@@ -235,7 +236,7 @@ export function GpuAccelerationPanel({ summary }: { summary: AccelerationSummary
         {summary.state === "ready" ? (
           <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
             <Cpu className="size-3" />
-            CPU fallback automatic
+            {L("CPU fallback automatic")}
           </span>
         ) : null}
       </div>
@@ -248,7 +249,7 @@ export function GpuAccelerationPanel({ summary }: { summary: AccelerationSummary
       <GpuPackAction summary={summary} />
 
       {!isTauriRuntime() || pack.phase === "unsupported" ? (
-        <p className="text-[11px] text-muted-foreground">Available in the installed desktop app</p>
+        <p className="text-[11px] text-muted-foreground">{L("Available in the installed desktop app")}</p>
       ) : null}
     </div>
   );
@@ -305,6 +306,6 @@ export function GpuInlineHint({ summary }: { summary: AccelerationSummary }) {
 
 /** Human copy for the Step 4 availability line. */
 export function encodingAvailabilityText(summary: AccelerationSummary): string {
-  if (isGpuEncodingAvailable(summary)) return "GPU ready";
+  if (isGpuEncodingAvailable(summary)) return L("GPU ready");
   return "CPU fallback (slower)";
 }

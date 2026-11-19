@@ -1,7 +1,6 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type DragEvent,
@@ -36,13 +35,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { extractAndTranscribe } from "@/lib/api";
@@ -59,7 +51,7 @@ import {
   openLectureFile,
   subscribeNativeDrops,
 } from "@/lib/media";
-import { DEFAULT_DISCOVERY_SETTINGS, type ProjectData, type TranscriptData } from "@/lib/projectTypes";
+import { type TranscriptData } from "@/lib/projectTypes";
 import {
   buildDecisionProviderFor,
   buildProviderFor,
@@ -67,6 +59,7 @@ import {
   resolveSttConnection,
 } from "@/lib/providers";
 import { useAiActivityStore } from "@/store/aiActivityStore";
+import { useJobStore, useTaskJob } from "@/store/jobStore";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
@@ -84,7 +77,6 @@ export function Step1Ingest() {
   const cloudStt = useSettingsStore((state) => state.cloudStt);
   const whisper = useSettingsStore((state) => state.whisper);
   const updateWhisper = useSettingsStore((state) => state.updateWhisper);
-  const promptPresets = useSettingsStore((state) => state.promptPresets);
   const sidecar = useSettingsStore((state) => state.sidecar);
   const aiEntries = useAiActivityStore((state) => state.entries);
   const activeTranscription =
@@ -101,66 +93,39 @@ export function Step1Ingest() {
   const [browserFile, setBrowserFile] = useState<{ name: string; size: number } | null>(null);
   const [promptOpen, setPromptOpen] = useState(false);
   const [pendingReplace, setPendingReplace] = useState<{ path: string; name: string } | null>(null);
-  const [busy, setBusy] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const [error, setError] = useState<string | null>(null);
 
-  const abortRef = useRef<AbortController | null>(null);
-  const mountedRef = useRef(true);
+  // The job lives in `jobStore`, so switching steps (or sessions) never aborts
+  // a transcription and the progress survives a remount.
+  const transcribeJob = useTaskJob("transcribe", project?.id ?? null);
+  const busy = transcribeJob?.status === "running";
+  const error = transcribeJob?.status === "error" ? transcribeJob.error : null;
+
   const busyRef = useRef(false);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      abortRef.current?.abort();
-    };
-  }, []);
 
   useEffect(() => {
     busyRef.current = busy;
   }, [busy]);
 
-  // A project switch (resume/open/replace) must not let an in-flight
-  // transcription land in the wrong project.
+  // A project switch must not leave another session's staged browser file on
+  // screen. The running job is untouched; its result is routed to the project
+  // that started it by `jobStore`.
   useEffect(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setBusy(false);
-    setError(null);
     const current = useProjectStore.getState().project;
     if (current?.sourcePath || current?.transcript) setBrowserFile(null);
   }, [project?.id]);
 
   useEffect(() => {
-    if (!busy) return;
-    const startedAt = Date.now();
-    setElapsed(0);
-    const timer = window.setInterval(() => {
-      setElapsed((Date.now() - startedAt) / 1000);
-    }, 250);
+    if (!busy || !transcribeJob) {
+      setElapsed(0);
+      return;
+    }
+    const startedAt = transcribeJob.startedAt;
+    const tick = () => setElapsed((Date.now() - startedAt) / 1000);
+    tick();
+    const timer = window.setInterval(tick, 250);
     return () => window.clearInterval(timer);
-  }, [busy]);
-
-  const activePreset = useMemo(
-    () =>
-      project?.promptPresetId != null
-        ? (promptPresets.find((preset) => preset.id === project.promptPresetId) ?? null)
-        : null,
-    [project?.promptPresetId, promptPresets],
-  );
-
-  const presetValue = activePreset
-    ? activePreset.id
-    : project?.basePrompt.trim()
-      ? "custom"
-      : "default";
-  const promptBadge = activePreset ? "Preset" : project?.basePrompt.trim() ? "Custom" : "Default";
-  const discovery = project?.discovery ?? DEFAULT_DISCOVERY_SETTINGS;
-  const promptPreview =
-    project?.basePrompt.trim() ||
-    activePreset?.prompt ||
-    "The built-in defaults will be used.";
+  }, [busy, transcribeJob?.startedAt]);
 
   /** Vendor-neutral acceleration state derived from GET /health. */
   const acceleration = describeAcceleration(sidecar.health);
@@ -176,12 +141,6 @@ export function Step1Ingest() {
       : sttConnection.baseUrl && (sttConnection.apiKey || sttConnection.dedicated)
         ? `${sttServiceLabel} · ${cloudStt.model || "model not set"}`
         : `${sttServiceLabel} — not set up`;
-
-  const ensureProject = useCallback((): ProjectData => {
-    const current = useProjectStore.getState().project;
-    if (current) return current;
-    return useProjectStore.getState().createProject();
-  }, []);
 
   const stagePath = useCallback((path: string, displayName?: string) => {
     if (busyRef.current) return;
@@ -217,7 +176,6 @@ export function Step1Ingest() {
       useProjectStore.getState().createProject({ sourcePath: path, sourceFileName, name });
     }
     setBrowserFile(null);
-    setError(null);
     toast.success("Session ready", { description: sourceFileName });
   }, []);
 
@@ -243,7 +201,6 @@ export function Step1Ingest() {
         return;
       }
       setBrowserFile({ name: file.name, size: file.size });
-      setError(null);
       toast("File selected", {
         description: import.meta.env.DEV
           ? "The browser preview cannot read files from disk. Launch the desktop app to transcribe it."
@@ -322,43 +279,6 @@ export function Step1Ingest() {
     void handleBrowse();
   }
 
-  function handlePresetChange(value: string) {
-    ensureProject();
-    const store = useProjectStore.getState();
-    if (value === "custom") {
-      // The only enabled "custom" entry opens the editor instead of a dead no-op.
-      setPromptOpen(true);
-      return;
-    }
-    if (value === "default") {
-      store.setBasePrompt("");
-      store.setPromptPreset(null);
-      store.updateProject({ discovery: { ...DEFAULT_DISCOVERY_SETTINGS } });
-      return;
-    }
-    const preset = promptPresets.find((item) => item.id === value);
-    if (!preset) return;
-    store.setBasePrompt(preset.prompt);
-    store.setPromptPreset(preset.id);
-    store.updateProject({
-      discovery: {
-        minDuration: preset.minDuration,
-        maxDuration: preset.maxDuration,
-        maxClips: preset.maxClips,
-      },
-    });
-  }
-
-  function handleOpenPrompt() {
-    ensureProject();
-    setPromptOpen(true);
-  }
-
-  function handleGuideChange(value: string) {
-    ensureProject();
-    useProjectStore.getState().setSessionGuide(value);
-  }
-
   function handleReplaceConfirm() {
     const pending = pendingReplace;
     setPendingReplace(null);
@@ -378,7 +298,6 @@ export function Step1Ingest() {
       });
     }
     setBrowserFile(null);
-    setError(null);
     toast.success("New session ready", { description: pending.name });
   }
 
@@ -415,98 +334,95 @@ export function Step1Ingest() {
     }
 
     const route = aiRouteFor(settings, "transcription");
-    const activityId = useAiActivityStore.getState().start({
-      ...route,
-      detail:
-        route.backend === "local" && sidecar.health
-          ? acceleration.transcription === "gpu"
-            ? "GPU"
-            : "CPU"
-          : undefined,
+    const glossary = Object.fromEntries(
+      settings.glossary
+        .filter((entry) => entry.enabled && entry.find.trim())
+        .map((entry) => [entry.find, entry.replace]),
+    );
+    const projectId = current.id;
+    const sourcePath = current.sourcePath;
+
+    useJobStore.getState().startTask({
+      kind: "transcribe",
+      projectId,
+      label: "Transcribing lecture",
+      run: async (signal) => {
+        const activityId = useAiActivityStore.getState().start({
+          ...route,
+          detail:
+            route.backend === "local" && sidecar.health
+              ? acceleration.transcription === "gpu"
+                ? "GPU"
+                : "CPU"
+              : undefined,
+        });
+        try {
+          const result = await extractAndTranscribe(
+            {
+              file_path: sourcePath,
+              use_local_whisper: settings.transcriptionMode === "local",
+              initial_prompt: settings.whisper.initialPrompt,
+              language: settings.editor.language || null,
+              glossary,
+              model: settings.transcriptionMode === "local" ? settings.whisper.model : null,
+              compute_type:
+                settings.transcriptionMode === "local" ? settings.whisper.computeType : null,
+              auto_unload: settings.whisper.autoUnload,
+              vad_filter: true,
+              cloud:
+                settings.transcriptionMode === "cloud"
+                  ? {
+                      base_url: sttConnection.baseUrl,
+                      api_key: sttConnection.apiKey || null,
+                      model: settings.cloudStt.model || "whisper-1",
+                      language: settings.editor.language || null,
+                    }
+                  : null,
+              analysis_provider: buildProviderFor(settings),
+              decision_provider: buildDecisionProviderFor(settings, "analysis"),
+              arabic_model: settings.cloudStt.arabicModel.trim() || null,
+              detect_arabic: true,
+              group_sentences: true,
+            },
+            { signal },
+          );
+          useAiActivityStore.getState().finish(activityId, "done", result.model || undefined);
+          // `peaks` is the additive P2 field on TranscriptData (precomputed
+          // waveform peaks from the sidecar). Written through an intersection so
+          // this compiles whether or not the domain type has landed yet.
+          const transcript: TranscriptData & { peaks?: number[] } = {
+            language: result.language,
+            languageProbability: result.language_probability,
+            segments: result.segments,
+          };
+          if (result.waveform_peaks?.length) {
+            transcript.peaks = result.waveform_peaks;
+          }
+          return {
+            kind: "transcribe" as const,
+            transcriptId: result.transcript_id,
+            transcript,
+            duration: result.duration,
+            audioPath: result.audio_path,
+          };
+        } catch (caught) {
+          useAiActivityStore
+            .getState()
+            .finish(activityId, signal.aborted ? "cancelled" : "failed");
+          throw caught;
+        }
+      },
+      onSuccess: (payload) => {
+        if (payload?.kind !== "transcribe") return;
+        toast.success("Transcript ready", {
+          description: `${formatClock(payload.duration ?? 0)} of speech transcribed`,
+        });
+      },
+      onError: (message) => {
+        toast.error("Transcription failed", { description: message });
+      },
+      onCancel: () => toast("Transcription cancelled"),
     });
-
-    const controller = new AbortController();
-    abortRef.current?.abort();
-    abortRef.current = controller;
-    setBusy(true);
-    setError(null);
-
-    try {
-      const glossary = Object.fromEntries(
-        settings.glossary
-          .filter((entry) => entry.enabled && entry.find.trim())
-          .map((entry) => [entry.find, entry.replace]),
-      );
-
-      const result = await extractAndTranscribe(
-        {
-          file_path: current.sourcePath,
-          use_local_whisper: settings.transcriptionMode === "local",
-          initial_prompt: settings.whisper.initialPrompt,
-          language: settings.editor.language || null,
-          glossary,
-          model: settings.transcriptionMode === "local" ? settings.whisper.model : null,
-          compute_type:
-            settings.transcriptionMode === "local" ? settings.whisper.computeType : null,
-          auto_unload: settings.whisper.autoUnload,
-          vad_filter: true,
-          cloud:
-            settings.transcriptionMode === "cloud"
-              ? {
-                  base_url: sttConnection.baseUrl,
-                  api_key: sttConnection.apiKey || null,
-                  model: settings.cloudStt.model || "whisper-1",
-                  language: settings.editor.language || null,
-                }
-              : null,
-          analysis_provider: buildProviderFor(settings),
-          decision_provider: buildDecisionProviderFor(settings, "analysis"),
-          arabic_model: settings.cloudStt.arabicModel.trim() || null,
-          detect_arabic: true,
-          group_sentences: true,
-        },
-        { signal: controller.signal },
-      );
-
-      useAiActivityStore.getState().finish(activityId, "done", result.model || undefined);
-      if (!mountedRef.current || abortRef.current !== controller) return;
-
-      const store = useProjectStore.getState();
-      // `peaks` is the additive P2 field on TranscriptData (precomputed
-      // waveform peaks from the sidecar). Written through an intersection so
-      // this compiles whether or not the domain type has landed yet, and is a
-      // plain assignment once it has.
-      const transcript: TranscriptData & { peaks?: number[] } = {
-        language: result.language,
-        languageProbability: result.language_probability,
-        segments: result.segments,
-      };
-      if (result.waveform_peaks?.length) {
-        transcript.peaks = result.waveform_peaks;
-      }
-      store.setTranscript(result.transcript_id, transcript, result.duration);
-      store.updateProject({ audioPath: result.audio_path, duration: result.duration });
-      store.setStep(2);
-
-      toast.success("Transcript ready", {
-        description: `${formatClock(result.duration)} of speech transcribed`,
-      });
-    } catch (caught) {
-      useAiActivityStore
-        .getState()
-        .finish(activityId, controller.signal.aborted ? "cancelled" : "failed");
-      if (!mountedRef.current || abortRef.current !== controller) return;
-      if (controller.signal.aborted) {
-        toast("Transcription cancelled");
-        return;
-      }
-      const message = caught instanceof Error ? caught.message : String(caught);
-      setError(message);
-      toast.error("Transcription failed", { description: message });
-    } finally {
-      if (abortRef.current === controller) abortRef.current = null;
-      if (mountedRef.current) setBusy(false);
-    }
   }
 
   async function handleRestartApp() {
@@ -741,7 +657,9 @@ export function Step1Ingest() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => abortRef.current?.abort()}
+                      onClick={() => {
+                        if (transcribeJob) useJobStore.getState().cancelJob(transcribeJob.id);
+                      }}
                     >
                       Cancel
                     </Button>
@@ -839,79 +757,6 @@ export function Step1Ingest() {
             </div>
 
             <aside className="space-y-4">
-              {hasSource ? (
-                <>
-                  <section className="rounded-lg border border-border bg-card/40 p-4">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="space-y-0.5">
-                        <h2 className="text-[13px] font-medium text-foreground">Clip brief</h2>
-                        <p className="text-xs leading-relaxed text-muted-foreground">
-                          {t("step1.brief.description")}
-                        </p>
-                      </div>
-                      <Badge variant="outline" className="shrink-0 text-[10px]">
-                        {promptBadge}
-                      </Badge>
-                    </div>
-
-                    <Select value={presetValue} onValueChange={handlePresetChange}>
-                      <SelectTrigger className="mt-3 w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="default">Built-in default</SelectItem>
-                        {promptPresets.map((preset) => (
-                          <SelectItem key={preset.id} value={preset.id}>
-                            {preset.name}
-                          </SelectItem>
-                        ))}
-                        {presetValue === "custom" ? (
-                          <SelectItem value="custom">Edit clip brief…</SelectItem>
-                        ) : null}
-                      </SelectContent>
-                    </Select>
-
-                    <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-muted-foreground">
-                      {promptPreview}
-                    </p>
-
-                    <div className="mt-3 flex items-center justify-between gap-2">
-                      <span className="text-[11px] text-muted-foreground">
-                        {discovery.minDuration}–{discovery.maxDuration} s · up to{" "}
-                        {discovery.maxClips} clips
-                      </span>
-                      <Button
-                        variant="ghost"
-                        size="xs"
-                        className="gap-1 text-muted-foreground"
-                        onClick={handleOpenPrompt}
-                      >
-                        {t("step1.brief.edit")}
-                      </Button>
-                    </div>
-                  </section>
-
-                  <section className="rounded-lg border border-border bg-card/40 p-4">
-                    <Label
-                      htmlFor="session-guide"
-                      className="text-[13px] font-medium text-foreground"
-                    >
-                      {t("step1.guide.title")}
-                    </Label>
-                    <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-                      {t("step1.guide.description")}
-                    </p>
-                    <Textarea
-                      id="session-guide"
-                      value={project?.sessionGuide ?? ""}
-                      onChange={(event) => handleGuideChange(event.target.value)}
-                      rows={4}
-                      placeholder={t("step1.guide.placeholder")}
-                      className="mt-2 resize-y text-xs leading-relaxed"
-                    />
-                  </section>
-                </>
-              ) : null}
 
               <section className="rounded-lg border border-border bg-card/40 p-4">
                 <div className="space-y-0.5">

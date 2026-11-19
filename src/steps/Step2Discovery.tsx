@@ -1,3 +1,4 @@
+import { L } from "@/lib/i18n";
 import {
   useCallback,
   useEffect,
@@ -22,8 +23,6 @@ import {
   Languages,
   ListVideo,
   Loader2,
-  Minus,
-  Plus,
   RefreshCw,
   Scissors,
   Trash2,
@@ -58,7 +57,6 @@ import {
   applyCutBuffer,
   MIN_RENDERABLE_CLIP_SECONDS,
   normalizeSpeechRange,
-  rangesOverlap,
 } from "@/lib/clipMath";
 import { toMediaSrc } from "@/lib/media";
 import { clamp, formatClock } from "@/lib/format";
@@ -66,6 +64,7 @@ import { DEFAULT_DISCOVERY_SETTINGS, type ProjectClip, type ProjectData } from "
 import { buildDecisionProviderFor, buildProviderFor, describeProviderGap } from "@/lib/providers";
 import { coerceToRange, DISCOVERY_LIMITS, NUMERIC_LIMITS } from "@/lib/settingsLimits";
 import { useAiActivityStore } from "@/store/aiActivityStore";
+import { useJobStore, useTaskJob } from "@/store/jobStore";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
@@ -216,82 +215,6 @@ function ClipCard({
   );
 }
 
-function TrimRow({
-  label,
-  value,
-  speechValue,
-  step,
-  active,
-  onActivate,
-  onNudge,
-}: {
-  label: string;
-  value: number;
-  speechValue: number;
-  /** Seconds moved by this row's nudge buttons (the shared button step). */
-  step: number;
-  active: boolean;
-  onActivate: () => void;
-  onNudge: (delta: number) => void;
-}) {
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      aria-pressed={active}
-      aria-label={`${label} trim controls`}
-      onClick={onActivate}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onActivate();
-        }
-      }}
-      className={cn(
-        "cursor-default rounded-md border px-2.5 py-2 transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
-        active ? "border-ring/40 bg-accent/25" : "border-border bg-card/30",
-      )}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-          {label}
-        </span>
-        <TimeFlow value={value} tenths className="text-xs font-medium text-foreground" />
-      </div>
-      <div className="mt-1.5 flex items-center gap-1">
-        <Button
-          variant="outline"
-          size="icon-xs"
-          aria-label={`Nudge ${label} back ${step} seconds`}
-          onClick={(event) => {
-            event.stopPropagation();
-            onNudge(-step);
-          }}
-        >
-          <Minus className="size-3" />
-        </Button>
-        <span className="flex-1 text-center text-[10px] tabular-nums text-muted-foreground">
-          {step} s
-        </span>
-        <Button
-          variant="outline"
-          size="icon-xs"
-          aria-label={`Nudge ${label} forward ${step} seconds`}
-          onClick={(event) => {
-            event.stopPropagation();
-            onNudge(step);
-          }}
-        >
-          <Plus className="size-3" />
-        </Button>
-      </div>
-      <p className="mt-1 text-[10px] tabular-nums text-muted-foreground/70">
-        speech <TimeFlow value={speechValue} tenths />
-      </p>
-    </div>
-  );
-}
-
 function StepEmptyState({
   icon: Icon,
   title,
@@ -333,8 +256,16 @@ export function Step2Discovery() {
     aiEntries.find((entry) => entry.task === "clip-finding" && entry.status === "running") ??
     aiEntries.find((entry) => entry.task === "clip-finding");
 
-  const [status, setStatus] = useState<"idle" | "running" | "error">("idle");
-  const [error, setError] = useState<string | null>(null);
+  // The search lives in `jobStore`, so switching steps or sessions never
+  // aborts it and its proposals still reach the session that started it.
+  const discoveryJob = useTaskJob("discovery", project?.id ?? null);
+  const status: "idle" | "running" | "error" =
+    discoveryJob?.status === "running"
+      ? "running"
+      : discoveryJob?.status === "error"
+        ? "error"
+        : "idle";
+  const error = discoveryJob?.status === "error" ? discoveryJob.error : null;
   const [refinement, setRefinement] = useState("");
   const [refindMode, setRefindMode] = useState<RefindMode>("reroll");
   const [pendingReplaceAll, setPendingReplaceAll] = useState(false);
@@ -344,7 +275,6 @@ export function Step2Discovery() {
   const [maxDraft, setMaxDraft] = useState(
     String(project?.discovery.maxDuration ?? DEFAULT_DISCOVERY_SETTINGS.maxDuration),
   );
-  const [activeEdge, setActiveEdge] = useState<CutEdge>("start");
   const [bufferDraft, setBufferDraft] = useState(editor.cutBufferSeconds);
   const [buttonStepDraft, setButtonStepDraft] = useState(String(editor.edgeButtonStepSeconds));
   const [keyStepDraft, setKeyStepDraft] = useState(String(editor.edgeKeyStepSeconds));
@@ -352,8 +282,6 @@ export function Step2Discovery() {
   const [shuttleRate, setShuttleRate] = useState(1);
 
   const videoRef = useRef<VideoPlayerHandle>(null);
-  const requestRef = useRef<AbortController | null>(null);
-  const mountedRef = useRef(true);
   const lastProjectIdRef = useRef<string | null>(project?.id ?? null);
 
   const clips = project?.clips ?? [];
@@ -365,24 +293,13 @@ export function Step2Discovery() {
   const audioSrc = useMemo(() => toMediaSrc(project?.audioPath), [project?.audioPath]);
   const videoSrc = useMemo(() => toMediaSrc(project?.sourcePath), [project?.sourcePath]);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  // Switching projects while a discovery call is in flight must not apply the
-  // old proposals to the newly opened lecture. Discovery itself is always
-  // user-triggered, so a resumed session never starts an LLM call on its own.
+  // Switching projects resets the *view* only: refinement text and playhead
+  // belong to the session that was on screen. A discovery call that is still
+  // running keeps going and files its proposals into its own project.
   useEffect(() => {
     const nextId = project?.id ?? null;
     if (lastProjectIdRef.current === nextId) return;
     lastProjectIdRef.current = nextId;
-    requestRef.current?.abort();
-    requestRef.current = null;
-    setStatus("idle");
-    setError(null);
     setRefinement("");
     setPlayhead(0);
   }, [project?.id]);
@@ -452,7 +369,7 @@ export function Step2Discovery() {
   const runDiscovery = useCallback(async (mode: DiscoveryMode, note: string) => {
     const current = useProjectStore.getState().project;
     if (!current?.transcriptId) {
-      toast.error("Transcript missing", { description: "Run the lecture through Step 1 first." });
+      toast.error(L("Transcript missing"), { description: "Run the lecture through Step 1 first." });
       return;
     }
     if (!current.transcript || current.transcript.segments.length === 0) {
@@ -481,122 +398,104 @@ export function Step2Discovery() {
     }
     const replaceAll = mode === "replace";
     const decisionRoute = decisionActivityFor(settings, "clip_scoring");
-    const activityId = useAiActivityStore.getState().start(
-      decisionRoute
-        ? { task: "clip-finding", ...decisionRoute }
-        : aiRouteFor(settings, "clip-finding"),
-    );
-    const controller = new AbortController();
-    requestRef.current?.abort();
-    requestRef.current = controller;
-    setStatus("running");
-    setError(null);
+    const approvedRanges = current.clips
+      .filter((clip) => clip.approved)
+      .map((clip) => ({ start: clip.start, end: clip.end }));
+    const projectId = current.id;
+    const transcriptId = current.transcriptId;
+    const duration = current.duration;
 
-    try {
-      const approvedRanges = current.clips
-        .filter((clip) => clip.approved)
-        .map((clip) => ({ start: clip.start, end: clip.end }));
-
-      const result = await discoverClips(
-        {
-          transcript_id: current.transcriptId,
-          base_prompt: current.basePrompt,
-          session_guide: current.sessionGuide,
-          refinement_note: note.trim(),
-          excluded_ranges: replaceAll ? [] : approvedRanges,
-          max_clips: current.discovery.maxClips,
-          min_duration: current.discovery.minDuration,
-          max_duration: current.discovery.maxDuration,
-          language: settings.editor.language || "th",
-          provider: buildProviderFor(settings, "discovery"),
-          decision_provider: decisionSlot,
-          // "Start over" is a clean search: no old clip is kept or used as
-          // feedback, and their subtitle tracks are cleared below.
-          approved_exemplars: replaceAll ? [] : exemplarsFor(current, true),
-          rejected_exemplars: replaceAll ? [] : exemplarsFor(current, false),
-        },
-        { signal: controller.signal },
-      );
-
-      // With a fast-judgment slot the first pass is the ranking model, so the
-      // report's writing model would mislabel the run.
-      useAiActivityStore
-        .getState()
-        .finish(activityId, "done", decisionRoute ? undefined : result.model || undefined);
-      if (!mountedRef.current || requestRef.current !== controller) return;
-
-      const latest = useProjectStore.getState().project;
-      if (!latest) return;
-      const latestSettings = useSettingsStore.getState();
-      const approved = replaceAll ? [] : latest.clips.filter((clip) => clip.approved);
-      const proposals = result.clips
-        .map((proposal, index) =>
-          proposalToClip(
-            proposal,
-            index,
-            latest.duration,
-            latestSettings.editor.cutBufferSeconds,
-            latestSettings.editor.autoPad,
-          ),
-        )
-        .filter((clip): clip is ProjectClip => clip !== null)
-        .filter(
-          (clip) =>
-            !approved.some((kept) =>
-              rangesOverlap(clip.start, clip.end, kept.start, kept.end),
-            ),
+    useJobStore.getState().startTask({
+      kind: "discovery",
+      projectId,
+      label: replaceAll ? L("Starting over with new clips") : L("Finding clips"),
+      run: async (signal) => {
+        const activityId = useAiActivityStore.getState().start(
+          decisionRoute
+            ? { task: "clip-finding", ...decisionRoute }
+            : aiRouteFor(settings, "clip-finding"),
         );
-
-      const merged = [...approved, ...proposals].sort((a, b) => a.start - b.start);
-      useProjectStore.getState().setClips(merged);
-      if (replaceAll) {
-        // Old clip ids are gone, so their cue tracks must go too — otherwise
-        // Step 3 opens with orphaned subtitles nobody can see or edit.
-        useProjectStore.getState().updateProject({ subtitles: {}, selectedClipId: null });
-      }
-      if (note.trim()) setRefinement("");
-
-      toast.success(
-        mode === "replace"
-          ? "Started over with new clips"
-          : mode === "reroll"
-            ? "More clips found"
-            : "Clip proposals ready",
-        {
-          description: `${proposals.length} new clip${proposals.length === 1 ? "" : "s"}${
-            !replaceAll && result.excluded_ranges_applied > 0
-              ? ` — ${result.excluded_ranges_applied} approved clip${
-                  result.excluded_ranges_applied === 1 ? " was" : "s were"
-                } kept`
-              : ""
-          }`,
-        },
-      );
-      if (proposals.length === 0) {
-        toast("No new clips", {
-          description: "Add a note about what to look for and search again.",
-        });
-      }
-      setStatus("idle");
-    } catch (caught) {
-      useAiActivityStore
-        .getState()
-        .finish(activityId, controller.signal.aborted ? "cancelled" : "failed");
-      if (!mountedRef.current || requestRef.current !== controller) return;
-      if (controller.signal.aborted) {
-        // The editor aborted the request (Cancel button / new run); the old
-        // silent return left no trace that the run had stopped.
-        setStatus("idle");
-        toast("Discovery cancelled");
-        return;
-      }
-      const message = caught instanceof Error ? caught.message : String(caught);
-      setStatus("error");
-      setError(message);
-      toast.error("Clip discovery failed", { description: message });
-    } finally {
-      if (requestRef.current === controller) requestRef.current = null;
-    }
+        try {
+          const result = await discoverClips(
+            {
+              transcript_id: transcriptId,
+              base_prompt: current.basePrompt,
+              session_guide: current.sessionGuide,
+              refinement_note: note.trim(),
+              excluded_ranges: replaceAll ? [] : approvedRanges,
+              max_clips: current.discovery.maxClips,
+              min_duration: current.discovery.minDuration,
+              max_duration: current.discovery.maxDuration,
+              language: settings.editor.language || "th",
+              provider: buildProviderFor(settings, "discovery"),
+              decision_provider: decisionSlot,
+              // L("Start over") is a clean search: no old clip is kept or used as
+              // feedback, and their subtitle tracks are cleared on apply.
+              approved_exemplars: replaceAll ? [] : exemplarsFor(current, true),
+              rejected_exemplars: replaceAll ? [] : exemplarsFor(current, false),
+            },
+            { signal },
+          );
+          // With a fast-judgment slot the first pass is the ranking model, so the
+          // report's writing model would mislabel the run.
+          useAiActivityStore
+            .getState()
+            .finish(activityId, "done", decisionRoute ? undefined : result.model || undefined);
+          const latestSettings = useSettingsStore.getState();
+          const proposals = result.clips
+            .map((proposal, index) =>
+              proposalToClip(
+                proposal,
+                index,
+                duration,
+                latestSettings.editor.cutBufferSeconds,
+                latestSettings.editor.autoPad,
+              ),
+            )
+            .filter((clip): clip is ProjectClip => clip !== null);
+          return {
+            kind: "discovery" as const,
+            proposals,
+            replaceAll,
+            excludedRangesApplied: result.excluded_ranges_applied,
+          };
+        } catch (caught) {
+          useAiActivityStore
+            .getState()
+            .finish(activityId, signal.aborted ? "cancelled" : "failed");
+          throw caught;
+        }
+      },
+      onSuccess: (payload) => {
+        if (payload?.kind !== "discovery") return;
+        if (note.trim()) setRefinement("");
+        const count = payload.proposals.length;
+        const excluded = payload.excludedRangesApplied ?? 0;
+        toast.success(
+          mode === "replace"
+            ? "Started over with new clips"
+            : mode === "reroll"
+              ? L("More clips found")
+              : L("Clip proposals ready"),
+          {
+            description: `${count} new clip${count === 1 ? "" : "s"}${
+              !replaceAll && excluded > 0
+                ? ` — ${excluded} approved clip${excluded === 1 ? " was" : "s were"} kept`
+                : ""
+            }`,
+          },
+        );
+        if (count === 0) {
+          toast(L("No new clips"), {
+            description: "Add a note about what to look for and search again.",
+          });
+        }
+      },
+      onError: (message) => {
+        toast.error("Clip discovery failed", { description: message });
+      },
+      onCancel: () => toast(L("Discovery cancelled")),
+    });
   }, []);
 
   /**
@@ -753,7 +652,7 @@ export function Step2Discovery() {
 
   function handleRemove(clip: ProjectClip) {
     removeClip(clip.id);
-    toast("Clip removed", { description: clip.title });
+    toast(L("Clip removed"), { description: clip.title });
   }
 
   function moveSelection(direction: -1 | 1) {
@@ -841,9 +740,9 @@ export function Step2Discovery() {
     return (
       <StepEmptyState
         icon={FolderSearch}
-        title="No project open"
+        title={L("No project open")}
         description="Create or resume a lecture on Step 1 to start finding clips."
-        action={<Button onClick={() => setStep(1)}>Go to Step 1</Button>}
+        action={<Button onClick={() => setStep(1)}>{L("Go to Step 1")}</Button>}
       />
     );
   }
@@ -852,9 +751,9 @@ export function Step2Discovery() {
     return (
       <StepEmptyState
         icon={FileAudio}
-        title="Transcript missing"
+        title={L("Transcript missing")}
         description="Add the lecture on Step 1 first — we'll transcribe it and then find clips."
-        action={<Button onClick={() => setStep(1)}>Back to upload</Button>}
+        action={<Button onClick={() => setStep(1)}>{L("Back to upload")}</Button>}
       />
     );
   }
@@ -867,7 +766,7 @@ export function Step2Discovery() {
             Step 2 of 4 · Review &amp; find more
           </p>
           <div className="flex min-w-0 items-baseline gap-2">
-            <h1 className="text-base font-medium text-foreground">Find clips</h1>
+            <h1 className="text-base font-medium text-foreground">{L("Find clips")}</h1>
             <span className="truncate text-[11px] text-muted-foreground">{project.name}</span>
           </div>
         </div>
@@ -885,7 +784,7 @@ export function Step2Discovery() {
             {project.transcript.segments.length} segments
           </span>
           <Button variant="ghost" size="xs" onClick={() => setStep(1)}>
-            Change lecture
+            {L("Change lecture")}
           </Button>
         </div>
       </header>
@@ -895,7 +794,7 @@ export function Step2Discovery() {
         <section className="flex min-h-0 flex-col border-r border-border">
           <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-2.5">
             <div className="flex items-center gap-2">
-              <h2 className="text-[13px] font-medium text-foreground">Proposed clips</h2>
+              <h2 className="text-[13px] font-medium text-foreground">{L("Proposed clips")}</h2>
               <Badge variant="outline" className="text-[10px] tabular-nums">
                 {clips.length}
               </Badge>
@@ -910,11 +809,11 @@ export function Step2Discovery() {
             {error ? (
               <InlineError
                 className="mb-2"
-                title="Clip finding failed"
+                title={L("Clip finding failed")}
                 action={
                   <>
                     <Button variant="outline" size="xs" onClick={handleRetry}>
-                      Retry
+                      {L("Retry")}
                     </Button>
                     <Button
                       variant="ghost"
@@ -922,7 +821,7 @@ export function Step2Discovery() {
                       className="text-destructive"
                       onClick={() => setStep(1)}
                     >
-                      Re-transcribe
+                      {L("Re-transcribe")}
                     </Button>
                   </>
                 }
@@ -935,7 +834,7 @@ export function Step2Discovery() {
               <div className="mb-2 space-y-1">
                 <p className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                   <Loader2 className="size-3 animate-spin" />
-                  Looking for more moments…
+                  {L("Looking for more moments…")}
                 </p>
                 {activeDiscovery ? <AiActivityLine entry={activeDiscovery} /> : null}
               </div>
@@ -950,7 +849,7 @@ export function Step2Discovery() {
                   />
                 ))}
                 <p className="pt-1 text-center text-[11px] text-muted-foreground">
-                  Reading the transcript for self-contained moments…
+                  {L("Reading the transcript for self-contained moments…")}
                 </p>
                 {activeDiscovery ? (
                   <AiActivityLine entry={activeDiscovery} className="justify-center" />
@@ -959,7 +858,7 @@ export function Step2Discovery() {
             ) : clips.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
                 <ListVideo className="size-5 text-muted-foreground" />
-                <p className="text-xs font-medium text-foreground">No clips proposed yet</p>
+                <p className="text-xs font-medium text-foreground">{L("No clips proposed yet")}</p>
                 <p className="text-xs leading-relaxed text-muted-foreground">
                   Let the AI search the transcript for moments — or add a note about what to look
                   for and try again.
@@ -976,7 +875,7 @@ export function Step2Discovery() {
                   ) : (
                     <RefreshCw className="size-3.5" />
                   )}
-                  Find clips
+                  {L("Find clips")}
                 </Button>
               </div>
             ) : (
@@ -999,15 +898,15 @@ export function Step2Discovery() {
           <div className="shrink-0 space-y-2 border-t border-border bg-card/20 px-3 py-3">
             <div className="flex items-center justify-between gap-2">
               <h2 className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                Search setup
+                {L("Search setup")}
               </h2>
-              <span className="text-[10px] text-muted-foreground">Set up, then Start</span>
+              <span className="text-[10px] text-muted-foreground">{L("Set up, then Start")}</span>
             </div>
 
             <div className="flex items-end gap-2">
               <div className="min-w-0 flex-1 space-y-1">
                 <Label htmlFor="clip-min-seconds" className="text-[10px] text-muted-foreground">
-                  Shortest (s)
+                  {L("Shortest (s)")}
                 </Label>
                 <Input
                   id="clip-min-seconds"
@@ -1025,7 +924,7 @@ export function Step2Discovery() {
               </div>
               <div className="min-w-0 flex-1 space-y-1">
                 <Label htmlFor="clip-max-seconds" className="text-[10px] text-muted-foreground">
-                  Longest (s)
+                  {L("Longest (s)")}
                 </Label>
                 <Input
                   id="clip-max-seconds"
@@ -1045,11 +944,11 @@ export function Step2Discovery() {
 
             {clips.length > 0 ? (
               <SegmentedToggle<RefindMode>
-                label="Re-find mode"
+                label={L("Re-find mode")}
                 value={refindMode}
                 options={[
-                  { value: "reroll", label: "Find more" },
-                  { value: "replace", label: "Start over" },
+                  { value: "reroll", label: L("Find more") },
+                  { value: "replace", label: L("Start over") },
                 ]}
                 onChange={setRefindMode}
                 disabled={status === "running"}
@@ -1058,7 +957,7 @@ export function Step2Discovery() {
 
             <div className="space-y-1">
               <Label htmlFor="refinement-note" className="text-[11px] font-medium text-foreground/90">
-                Additional instructions for this search
+                {L("Additional instructions for this search")}
               </Label>
               <Textarea
                 id="refinement-note"
@@ -1078,17 +977,17 @@ export function Step2Discovery() {
                 <RefreshCw className="size-3.5" />
               )}
               {status === "running"
-                ? "Looking for more moments…"
+                ? L("Looking for more moments…")
                 : clips.length === 0
-                  ? "Find clips"
+                  ? L("Find clips")
                   : refindMode === "replace"
-                    ? "Start over with new clips"
-                    : "Find more clips"}
+                    ? L("Start over with new clips")
+                    : L("Find more clips")}
             </Button>
             <div className="flex items-center justify-between gap-2">
               <p className="text-[10px] leading-relaxed text-muted-foreground">
                 {clips.length === 0
-                  ? "Approve clips to keep them out of the next search."
+                  ? L("Approve clips to keep them out of the next search.")
                   : refindMode === "replace"
                     ? `All ${clips.length} clips and their subtitles will be replaced.`
                     : approvedCount > 0
@@ -1098,7 +997,11 @@ export function Step2Discovery() {
                       : "Unapproved clips are dropped from the next search."}
               </p>
               {status === "running" ? (
-                <Button variant="ghost" size="xs" onClick={() => requestRef.current?.abort()}>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => useJobStore.getState().cancelKind("discovery", project?.id ?? null)}
+                >
                   Cancel
                 </Button>
               ) : null}
@@ -1111,10 +1014,10 @@ export function Step2Discovery() {
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
             <div className="flex min-w-0 items-center gap-2">
               <span className="shrink-0 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                {selected ? `Clip ${selectedIndex + 1} of ${clips.length}` : "No clip selected"}
+                {selected ? `Clip ${selectedIndex + 1} of ${clips.length}` : L("No clip selected")}
               </span>
               <span className="truncate text-[13px] font-medium text-foreground">
-                {selected?.title ?? "Select a clip to preview"}
+                {selected?.title ?? L("Select a clip to preview")}
               </span>
               {selected?.approved ? (
                 <Badge variant="secondary" className="shrink-0 text-[10px]">
@@ -1171,7 +1074,7 @@ export function Step2Discovery() {
             ) : (
               <div className="flex h-24 w-full items-center justify-center gap-2 rounded-lg border border-border bg-card/30">
                 <FileVideo2 className="size-4 text-muted-foreground" />
-                <span className="text-[11px] text-muted-foreground">No video preview available</span>
+                <span className="text-[11px] text-muted-foreground">{L("No video preview available")}</span>
               </div>
             )}
 
@@ -1199,38 +1102,11 @@ export function Step2Discovery() {
 
             {selected ? (
               <div className="mt-3 space-y-2">
-                <div className="grid grid-cols-2 gap-2">
-                  <TrimRow
-                    label="Cut in"
-                    value={selected.start}
-                    speechValue={selected.speechStart}
-                    step={buttonStep}
-                    active={activeEdge === "start"}
-                    onActivate={() => setActiveEdge("start")}
-                    onNudge={(delta) => {
-                      setActiveEdge("start");
-                      adjustEdge("start", delta);
-                    }}
-                  />
-                  <TrimRow
-                    label="Cut out"
-                    value={selected.end}
-                    speechValue={selected.speechEnd}
-                    step={buttonStep}
-                    active={activeEdge === "end"}
-                    onActivate={() => setActiveEdge("end")}
-                    onNudge={(delta) => {
-                      setActiveEdge("end");
-                      adjustEdge("end", delta);
-                    }}
-                  />
-                </div>
-
                 <div className="rounded-md border border-border bg-card/30 px-3 py-2.5">
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-2">
                       <Clock3 className="size-3.5 text-muted-foreground" />
-                      <span className="text-xs font-medium text-foreground">Edge step size</span>
+                      <span className="text-xs font-medium text-foreground">{L("Edge step size")}</span>
                     </div>
                     <Switch
                       checked={editor.edgeShareStep}
@@ -1297,13 +1173,13 @@ export function Step2Discovery() {
                     <div className="flex items-center gap-2">
                       <Scissors className="size-3.5 text-muted-foreground" />
                       <span className="text-xs font-medium text-foreground">
-                        Auto-pad cut buffer
+                        {L("Auto-pad cut buffer")}
                       </span>
                     </div>
                     <Switch
                       checked={editor.autoPad}
                       onCheckedChange={(checked) => updateEditor({ autoPad: checked })}
-                      aria-label="Auto-pad cut buffer"
+                      aria-label={L("Auto-pad cut buffer")}
                     />
                   </div>
                   <div className="mt-2 flex items-center gap-3">
@@ -1352,7 +1228,7 @@ export function Step2Discovery() {
             ) : (
               <div className="mt-3 flex flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-border px-6 py-10 text-center">
                 <Scissors className="size-4 text-muted-foreground" />
-                <p className="text-xs text-muted-foreground">Select a clip to preview and trim it.</p>
+                <p className="text-xs text-muted-foreground">{L("Select a clip to preview and trim it.")}</p>
               </div>
             )}
           </div>
@@ -1368,7 +1244,7 @@ export function Step2Discovery() {
         </div>
         <div className="flex items-center gap-1.5">
           <Button variant="ghost" size="sm" onClick={() => setStep(1)}>
-            Back to upload
+            {L("Back to upload")}
           </Button>
           <Button
             size="sm"
@@ -1376,7 +1252,7 @@ export function Step2Discovery() {
             disabled={approvedCount === 0}
             onClick={() => setStep(3)}
           >
-            Continue to subtitles
+            {L("Continue to subtitles")}
             <ArrowRight className="size-3.5" />
           </Button>
         </div>
@@ -1407,7 +1283,7 @@ export function Step2Discovery() {
                 void runDiscovery("replace", refinement);
               }}
             >
-              Start over
+              {L("Start over")}
             </Button>
           </DialogFooter>
         </DialogContent>

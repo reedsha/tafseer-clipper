@@ -21,6 +21,11 @@ import {
   writeAutosave,
   writeAutosaveFile,
 } from "@/lib/projectFile";
+import {
+  applyPendingResults,
+  applyTaskResult as mergeTaskResult,
+  type TaskResultPayload,
+} from "@/lib/taskResults";
 import { useSettingsStore, type EditorDefaults } from "./settingsStore";
 
 const MAX_RECENT_SESSIONS = 30;
@@ -66,6 +71,11 @@ export interface ProjectState {
   updateExportSettings: (patch: Partial<ProjectExportSettings>) => void;
   /** Apply the Settings → 4 · Export defaults to the active project only. */
   applyExportDefaults: (patch: Partial<ProjectExportSettings>) => void;
+  /**
+   * Merge a finished background-task result into the open project. A result
+   * for any other project is journaled by the caller (see `taskResults`).
+   */
+  applyTaskResult: (projectId: string, payload: TaskResultPayload) => void;
 
   autosave: () => boolean;
   resumeRecent: (projectId: string) => Promise<boolean>;
@@ -278,7 +288,7 @@ export const useProjectStore = create<ProjectState>()(
           transcriptId: null,
           transcript: null,
           audioPath: null,
-          basePrompt: "",
+          basePrompt: "You are a senior Thai Tafseer video editor. You cut long Thai Tafseer lectures (Thai speech with Arabic Qur'anic recitation, often transliterated into Thai script by the speech-to-text) into standalone social clips for a Thai Muslim audience.\n\nA GOOD clip:\n- Delivers ONE clear lesson, ruling, story, or reminder that a viewer can understand with no prior context.\n- Has a strong hook (a question, a verse, a story, a striking statement) and a clear takeaway or conclusion.\n- Is self-contained: if a name, verse, or event needs context, the passage itself must supply it. Avoid clips that only make sense after an earlier part of the lecture.\n- Prefers emotionally resonant, practical, shareable moments (hope, patience, trust in Allah, gratitude, moral stories, clear fiqh answers, reminders about death/the Hereafter) over admin, greetings, repetition, or filler.\n- When a passage contains Arabic Qur'anic recitation, include the whole recitation together with its Thai explanation. Do not split a recitation from the explanation that follows it.\n\nBOUNDARIES (decide these carefully):\n- Start where the actual point begins. Skip preparatory discussion, setup, or background that only makes sense with an earlier part of the lecture, unless that sentence is needed for the clip to be understood on its own.\n- End at the point's conclusion or final takeaway. Stop before the lecturer moves on to the next point, the next verse, a new story, or the consequences/follow-up of the same point.\n- Never cut mid-sentence or mid-recitation. Start and end on complete sentences. If a sentence is very long, include it whole rather than truncating.\n- When in doubt between two possible end points, choose the earlier one that still contains the complete point and its conclusion.\n\nDO NOT propose clips that:\n- Are greetings, announcements, fundraising, or channel admin.\n- Are only Qur'anic recitation with no explanation, or only Thai filler / repetition.\n- End before the lesson reaches its conclusion.\n- Bundle two or more unrelated points into one clip.\n- Start or end inside an Arabic recitation.\n- Depend on context from earlier in the lecture that is not included.\n\nTitle (Thai, max 70 chars): name the moment or lesson, not the editing process. Rationale (Thai, one sentence): why this passage works as a standalone clip.\n\nWrite titles and rationales in Thai.",
           promptPresetId: null,
           sessionGuide: "",
           discovery: { ...DEFAULT_DISCOVERY_SETTINGS },
@@ -315,15 +325,19 @@ export const useProjectStore = create<ProjectState>()(
 
       openProject: (project) => {
         if (get().project && get().dirty) get().autosave();
+        // A task that finished while another session was visible left its result
+        // in the journal; merging here is the only place those results land.
+        const { project: merged, applied } = applyPendingResults(project);
         const previousRecent = get().recentProjects;
-        const recentProjects = upsertRecent(previousRecent, toRecentProject(project));
+        const recentProjects = upsertRecent(previousRecent, toRecentProject(merged));
         pruneEvictedAutosaves(previousRecent, recentProjects);
         set({
-          project,
+          project: merged,
           autosavedAt: null,
-          dirty: false,
+          // Pending results are real work and must be written back to disk.
+          dirty: applied > 0,
           lastAutosaveError: null,
-          lastProjectId: project.id,
+          lastProjectId: merged.id,
           recentProjects,
         });
       },
@@ -511,6 +525,14 @@ export const useProjectStore = create<ProjectState>()(
             project: touch(state.project, { export: { ...state.project.export, ...patch } }),
             dirty: true,
           };
+        }),
+
+      applyTaskResult: (projectId, payload) =>
+        set((state) => {
+          if (!state.project || state.project.id !== projectId) return {};
+          const next = mergeTaskResult(state.project, payload);
+          if (next === state.project) return {};
+          return { project: touch(state.project, next), dirty: true };
         }),
 
       autosave: () => {

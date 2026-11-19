@@ -1,3 +1,4 @@
+import { L } from "@/lib/i18n";
 /**
  * The no-session landing screen shown whenever there is no open project — on a
  * cold start and immediately after deleting the open session (`removeRecent`
@@ -69,12 +70,10 @@ export function SessionLanding() {
           <BrandMark variant="fine" className="size-12 text-muted-foreground/70" />
           <div className="space-y-1.5">
             <h1 className="text-xl font-medium text-foreground">
-              You're not in a session
+              {L("You're not in a session")}
             </h1>
             <p className="mx-auto max-w-prose text-sm leading-relaxed text-muted-foreground">
-              A session keeps one lecture's transcript, clips and subtitles
-              together. Open a saved session to pick up where you left off, or
-              create a new one to start with a lecture.
+              {L("A session keeps one lecture's transcript, clips and subtitles together. Open a saved session to pick up where you left off, or create a new one to start with a lecture.")}
             </p>
           </div>
         </div>
@@ -86,15 +85,14 @@ export function SessionLanding() {
               <Plus className="size-4 text-foreground/80" />
             </div>
             <h2 className="text-sm font-medium text-foreground">
-              Create new session
+              {L("Create new session")}
             </h2>
             <p className="mt-1 flex-1 text-xs leading-relaxed text-muted-foreground">
-              Start with a fresh lecture. You'll transcribe the audio and find
-              clips in Step 1.
+              {L("Start with a fresh lecture. You'll transcribe the audio and find clips in Step 1.")}
             </p>
             <Button className="mt-4 w-full" onClick={() => createProject()}>
               <Plus className="size-4" />
-              Create new session
+              {L("Create new session")}
             </Button>
           </section>
 
@@ -103,9 +101,9 @@ export function SessionLanding() {
             <div className="mb-3 flex size-9 items-center justify-center rounded-lg border border-border bg-secondary/60">
               <FolderOpen className="size-4 text-foreground/80" />
             </div>
-            <h2 className="text-sm font-medium text-foreground">Open a session</h2>
+            <h2 className="text-sm font-medium text-foreground">{L("Open a session")}</h2>
             <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              Resume a recent session or open a saved .tafseer file.
+              {L("Resume a recent session or open a saved .tafseer file.")}
             </p>
 
             {recents.length ? (
@@ -131,8 +129,7 @@ export function SessionLanding() {
               </ul>
             ) : (
               <p className="mt-3 rounded-md border border-dashed border-border px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
-                No recent sessions yet. Your sessions appear here automatically
-                as you work.
+                {L("No recent sessions yet. Your sessions appear here automatically as you work.")}
               </p>
             )}
 
@@ -142,14 +139,13 @@ export function SessionLanding() {
               onClick={() => void handleOpenFile()}
             >
               <FolderOpen className="size-4" />
-              Open a .tafseer file…
+              {L("Open a .tafseer file…")}
             </Button>
           </section>
         </div>
 
         <p className="text-center text-[11px] text-muted-foreground/80">
-          Transcripts and clips stay on this machine. Settings are available from
-          the Ctrl + K menu.
+          {L("Transcripts and clips stay on this machine. Settings are available from the Ctrl + K menu.")}
         </p>
       </div>
     </div>

@@ -11,9 +11,11 @@ mod acceleration;
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use tauri::{Manager, WindowEvent};
+use tauri::tray::{TrayIcon, TrayIconBuilder};
+use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
@@ -35,10 +37,16 @@ const SIDECAR_EXE: &str = "backend";
 /// answers.
 const FALLBACK_SIDECAR_PORT: u16 = 8008;
 
-/// Process-wide handle to the spawned sidecar.
+/// Process-wide handle to the spawned sidecar and the tray that keeps it alive
+/// while the window is hidden.
 struct SidecarState {
     /// `None` when spawning failed; the renderer then talks to the fallback port.
     child: Mutex<Option<CommandChild>>,
+    /// Kept so `set_running_jobs` can refresh the tooltip.
+    tray: Mutex<Option<TrayIcon>>,
+    /// Number of tasks the renderer reports as running; drives the close dialog
+    /// and the tray tooltip.
+    running_jobs: AtomicUsize,
 }
 
 /// Writable, user-scoped directories handed to `backend.exe` through the
@@ -204,6 +212,72 @@ fn stop_sidecar(app: &tauri::AppHandle) {
     }
 }
 
+/// Bring the main window back from the tray.
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// Tray "Stop tasks & quit": reuse the same close dialog when work is running
+/// so the user makes the same explicit choice, otherwise quit immediately.
+fn request_quit(app: &tauri::AppHandle) {
+    let jobs = app
+        .try_state::<SidecarState>()
+        .map(|state| state.running_jobs.load(Ordering::SeqCst))
+        .unwrap_or(0);
+    show_main_window(app);
+    if jobs > 0 {
+        if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+            let _ = window.emit("app://close-requested", jobs);
+        }
+    } else {
+        stop_sidecar(app);
+        app.exit(0);
+    }
+}
+
+/// Renderer → shell: how many tasks are running. Drives the close dialog and
+/// the tray tooltip; cheap enough to call on every job transition.
+#[tauri::command]
+fn set_running_jobs(app: tauri::AppHandle, count: usize) {
+    let Some(state) = app.try_state::<SidecarState>() else {
+        return;
+    };
+    state.running_jobs.store(count, Ordering::SeqCst);
+    let tooltip = if count == 0 {
+        "Tafseer Clipper".to_string()
+    } else {
+        format!(
+            "Tafseer Clipper — {count} task{} running",
+            if count == 1 { "" } else { "s" }
+        )
+    };
+    let tray = state
+        .tray
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(tray) = tray.as_ref() {
+        let _ = tray.set_tooltip(Some(tooltip.as_str()));
+    }
+}
+
+/// Close dialog → shell: stop every task and exit.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    stop_sidecar(&app);
+    app.exit(0);
+}
+
+/// Close dialog → shell: keep tasks alive with the window hidden in the tray.
+#[tauri::command]
+fn minimize_to_tray(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.hide();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -215,7 +289,10 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             acceleration::acceleration_status,
-            acceleration::download_acceleration_pack
+            acceleration::download_acceleration_pack,
+            set_running_jobs,
+            quit_app,
+            minimize_to_tray
         ])
         .setup(|app| {
             let paths = sidecar_paths(app.handle());
@@ -232,8 +309,46 @@ pub fn run() {
             } else {
                 format!("http://127.0.0.1:{FALLBACK_SIDECAR_PORT}")
             };
+
+            // A tray icon is the "keep running" affordance: closing with active
+            // tasks can hide the window here while the sidecar finishes them.
+            let show = tauri::menu::MenuItem::with_id(
+                app,
+                "show",
+                "Show window",
+                true,
+                None::<&str>,
+            )?;
+            let quit = tauri::menu::MenuItem::with_id(
+                app,
+                "quit",
+                "Stop tasks & quit",
+                true,
+                None::<&str>,
+            )?;
+            let menu = tauri::menu::Menu::with_items(app, &[&show, &quit])?;
+            let icon = app
+                .default_window_icon()
+                .cloned()
+                .ok_or("tauri.conf.json must declare a window icon")?;
+            let tray = TrayIconBuilder::new()
+                .icon(icon)
+                .menu(&menu)
+                .tooltip("Tafseer Clipper")
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => request_quit(app),
+                    _ => {}
+                })
+                .build(app.handle())?;
+
+            // Managed before the window loads so an early `set_running_jobs`
+            // call from the renderer always finds the state.
             app.manage(SidecarState {
                 child: Mutex::new(child),
+                tray: Mutex::new(Some(tray)),
+                running_jobs: AtomicUsize::new(0),
             });
 
             // The window is declared in `tauri.conf.json` with `create: false`
@@ -255,8 +370,25 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if matches!(event, WindowEvent::Destroyed) && window.label() == MAIN_WINDOW_LABEL {
-                stop_sidecar(window.app_handle());
+            if window.label() != MAIN_WINDOW_LABEL {
+                return;
+            }
+            match event {
+                WindowEvent::CloseRequested { api, .. } => {
+                    // Only intercept when there is work to lose; the renderer
+                    // then asks whether to stop it or keep it in the tray.
+                    let jobs = window
+                        .app_handle()
+                        .try_state::<SidecarState>()
+                        .map(|state| state.running_jobs.load(Ordering::SeqCst))
+                        .unwrap_or(0);
+                    if jobs > 0 {
+                        api.prevent_close();
+                        let _ = window.emit("app://close-requested", jobs);
+                    }
+                }
+                WindowEvent::Destroyed => stop_sidecar(window.app_handle()),
+                _ => {}
             }
         })
         .build(tauri::generate_context!())

@@ -104,6 +104,8 @@ export interface ArabicStyle {
   /** Multiplier that keeps Arabic diacritics from clipping. */
   lineHeightPad: number;
   bold: boolean;
+  /** Vertical move from the default anchor, in export-frame pixels. */
+  verticalOffset: number;
 }
 
 export interface ThaiStyle {
@@ -114,6 +116,8 @@ export interface ThaiStyle {
   outlineColor: string;
   boxOpacity: number;
   bold: boolean;
+  /** Vertical move from the default anchor, in export-frame pixels. */
+  verticalOffset: number;
 }
 
 export interface StylePreset {
@@ -260,6 +264,7 @@ const DEFAULT_ARABIC: ArabicStyle = {
   boxOpacity: 0,
   lineHeightPad: 1.35,
   bold: false,
+  verticalOffset: 0,
 };
 
 const DEFAULT_THAI: ThaiStyle = {
@@ -270,6 +275,7 @@ const DEFAULT_THAI: ThaiStyle = {
   outlineColor: "#0b0c0d",
   boxOpacity: 0.15,
   bold: false,
+  verticalOffset: 0,
 };
 
 function preset(id: string, name: string, arabic: ArabicStyle, thai: ThaiStyle): StylePreset {
@@ -291,6 +297,14 @@ const DEFAULT_PRESETS: StylePreset[] = [
     { ...DEFAULT_THAI, color: "#ffffff", boxOpacity: 0.45, outlineWidth: 2 },
   ),
 ];
+
+/**
+ * Ids of the presets the app ships with. The style editor's library splits
+ * these from the user's own saved presets; every other id counts as saved.
+ */
+export const BUILTIN_PRESET_IDS: ReadonlySet<string> = new Set(
+  DEFAULT_PRESETS.map((preset) => preset.id),
+);
 
 // No built-in clip-brief presets: the brief is the user's own editorial brief,
 // seeded empty. Users can still save their own presets from the prompt drawer.
@@ -446,6 +460,7 @@ function coerceArabic(value: unknown, fallback: ArabicStyle): ArabicStyle {
     boxOpacity: asRangedNumber(value.boxOpacity, fallback.boxOpacity, "boxOpacity"),
     lineHeightPad: asRangedNumber(value.lineHeightPad, fallback.lineHeightPad, "arabicLineHeightPad"),
     bold: asBoolean(value.bold, fallback.bold),
+    verticalOffset: asRangedNumber(value.verticalOffset, fallback.verticalOffset, "verticalOffset"),
   };
 }
 
@@ -459,6 +474,7 @@ function coerceThai(value: unknown, fallback: ThaiStyle): ThaiStyle {
     outlineColor: asString(value.outlineColor, fallback.outlineColor),
     boxOpacity: asRangedNumber(value.boxOpacity, fallback.boxOpacity, "boxOpacity"),
     bold: asBoolean(value.bold, fallback.bold),
+    verticalOffset: asRangedNumber(value.verticalOffset, fallback.verticalOffset, "verticalOffset"),
   };
 }
 

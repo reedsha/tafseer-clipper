@@ -25,7 +25,7 @@ import {
   CommandList,
   CommandSeparator,
 } from "@/components/ui/command";
-import { describeAcceleration } from "@/lib/acceleration";
+import { describeAcceleration, isGpuEncodingAvailable } from "@/lib/acceleration";
 import { openProjectFile, saveProjectFile, suggestProjectFileName } from "@/lib/projectFile";
 import { STEP_LABELS, type Resolution, type WizardStep } from "@/lib/projectTypes";
 import { useProjectStore } from "@/store/projectStore";
@@ -66,6 +66,7 @@ export function CommandMenu() {
   const updateEditor = useSettingsStore((state) => state.updateEditor);
   const updateWhisper = useSettingsStore((state) => state.updateWhisper);
   const refreshHealth = useSettingsStore((state) => state.refreshHealth);
+  const sidecarHealth = useSettingsStore((state) => state.sidecar.health);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -133,6 +134,10 @@ export function CommandMenu() {
   // export that Step 3/4 will actually run.
   const resolution: Resolution = project?.export.resolution ?? editor.resolution;
   const useNvenc = project?.export.useNvenc ?? editor.useNvenc;
+  // The stored flag is a preference; show whether GPU encoding is actually in
+  // effect, so the palette never claims "on" on a machine falling back to CPU.
+  const hardwareEncodingOn =
+    useNvenc && isGpuEncodingAvailable(describeAcceleration(sidecarHealth));
   const exportSrt = project?.export.exportSrt ?? editor.exportSrt;
   const aspectTarget = resolution === "1080x1920" ? "16:9" : "9:16";
   const nextResolution: Resolution = resolution === "1080x1920" ? "1920x1080" : "1080x1920";
@@ -241,7 +246,7 @@ export function CommandMenu() {
             onSelect={() => run(() => setExportDefault({ useNvenc: !useNvenc }))}
           >
             <Cpu />
-            Hardware encoding (GPU): {useNvenc ? "on" : "off"}
+            Hardware encoding when available: {hardwareEncodingOn ? "on" : "off"}
           </CommandItem>
           <CommandItem
             value="export srt subtitles"

@@ -1,3 +1,4 @@
+import { L } from "@/lib/i18n";
 import { useMemo } from "react";
 import NumberFlow from "@number-flow/react";
 import { toast } from "sonner";
@@ -22,7 +23,6 @@ import {
 
 import { encodingAvailabilityText } from "@/components/GpuAcceleration";
 import { InlineError } from "@/components/InlineError";
-import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { TimeFlow } from "@/components/TimeFlow";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -65,11 +65,11 @@ function statusVariant(status: ClipStatus): "secondary" | "outline" | "default" 
 }
 
 function statusLabel(status: ClipStatus): string {
-  if (status === "done") return "Rendered";
-  if (status === "error") return "Failed";
-  if (status === "rendering") return "Rendering";
-  if (status === "cancelled") return "Cancelled";
-  return "Queued";
+  if (status === "done") return L("Rendered");
+  if (status === "error") return L("Failed");
+  if (status === "rendering") return L("Rendering");
+  if (status === "cancelled") return L("Cancelled");
+  return L("Queued");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -125,6 +125,7 @@ export function Step4Export() {
           outline: arabicSettings.outlineWidth,
           bold: arabicSettings.bold,
           lineHeightPad: arabicSettings.lineHeightPad,
+          verticalOffset: arabicSettings.verticalOffset,
         },
         {
           font: thaiSettings.fontFamily,
@@ -133,6 +134,7 @@ export function Step4Export() {
           outline: thaiSettings.outlineWidth,
           bold: thaiSettings.bold,
           lineHeightPad: 1.2,
+          verticalOffset: thaiSettings.verticalOffset,
         },
       ),
     [resolution, arabicSettings, thaiSettings],
@@ -221,7 +223,7 @@ export function Step4Export() {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
         <FileVideo2 className="size-5 text-muted-foreground" />
-        <p className="text-sm font-medium text-foreground">Nothing to export yet</p>
+        <p className="text-sm font-medium text-foreground">{L("Nothing to export yet")}</p>
         <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
           Approve the clips you want in Step 2. Approved clips become the batch render queue.
         </p>
@@ -233,7 +235,7 @@ export function Step4Export() {
   }
 
   const running = job.status === "running";
-  const resolutionLabel = resolution === "1080x1920" ? "9:16 Vertical" : "16:9 Widescreen";
+  const resolutionLabel = resolution === "1080x1920" ? L("9:16 Vertical") : L("16:9 Widescreen");
   const framingLabel = FRAMING_LABELS[framing];
   // Framing only changes the 9:16 canvas; a 16:9 export never letterboxes.
   const framingApplies = resolution === "1080x1920";
@@ -252,10 +254,10 @@ export function Step4Export() {
       <header className="flex shrink-0 flex-wrap items-end justify-between gap-3 border-b border-border px-4 py-3">
         <div className="min-w-0 space-y-0.5">
           <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-            Step 4 of 4 · Batch render
+            {L("Step 4 of 4 · Batch render")}
           </p>
           <div className="flex min-w-0 items-baseline gap-2">
-            <h1 className="text-base font-medium text-foreground">Export</h1>
+            <h1 className="text-base font-medium text-foreground">{L("Export")}</h1>
             <span className="truncate text-[11px] text-muted-foreground">{project.name}</span>
           </div>
         </div>
@@ -280,7 +282,7 @@ export function Step4Export() {
         <section className="flex min-h-0 flex-col border-r border-border">
           <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-2.5">
             <div className="flex items-center gap-2">
-              <h2 className="text-[13px] font-medium text-foreground">Export queue</h2>
+              <h2 className="text-[13px] font-medium text-foreground">{L("Export queue")}</h2>
               <Badge variant="outline" className="text-[10px] tabular-nums">
                 {approvedClips.length}
               </Badge>
@@ -435,52 +437,18 @@ export function Step4Export() {
         {/* ----------------------------- settings ----------------------------- */}
         <section className="flex min-h-0 flex-col overflow-y-auto">
           <div className="space-y-4 px-4 py-4">
-            <div className="space-y-1.5">
-              <Label className="text-[13px] font-medium text-foreground">Aspect ratio</Label>
-              <SegmentedToggle<Resolution>
-                label="Aspect ratio"
-                value={resolution}
-                options={[
-                  { value: "1080x1920", label: "9:16 Vertical", hint: "1080x1920" },
-                  { value: "1920x1080", label: "16:9 Widescreen", hint: "1920x1080" },
-                ]}
-                onChange={(value) => updateExportSettings({ resolution: value })}
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label className="text-[13px] font-medium text-foreground">Framing mode</Label>
-              <SegmentedToggle<FramingMode>
-                label="Framing mode"
-                value={framing}
-                disabled={!framingApplies}
-                options={[
-                  {
-                    value: "blur-fill",
-                    label: FRAMING_LABELS["blur-fill"],
-                    hint: "Keeps the slide visible inside blurred bars",
-                  },
-                  {
-                    value: "center-crop",
-                    label: FRAMING_LABELS["center-crop"],
-                    hint: "Crops to fill the frame",
-                  },
-                ]}
-                onChange={(value) => updateExportSettings({ framing: value })}
-              />
-              {!framingApplies ? (
-                <p className="text-[10px] leading-relaxed text-muted-foreground">
-                  16:9 output uses the whole frame, so 9:16 framing does not apply.
-                </p>
-              ) : null}
-            </div>
+            {/* Aspect ratio and framing live above the preview on Step 3,
+                where the change is visible; this step only reports them. */}
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Aspect ratio and framing are set above the preview on the Subtitles step.
+            </p>
 
             <Separator />
 
             <div className="space-y-2">
               <div className="flex items-start justify-between gap-3 rounded-md border border-border bg-card/40 px-3 py-2.5">
                 <div className="space-y-0.5">
-                  <p className="text-xs font-medium text-foreground">Also export .SRT</p>
+                  <p className="text-xs font-medium text-foreground">{L("Also export .SRT")}</p>
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     Also saves a separate .SRT file next to each video.
                   </p>
@@ -488,7 +456,7 @@ export function Step4Export() {
                 <Checkbox
                   checked={exportSrt}
                   onCheckedChange={(checked) => updateExportSettings({ exportSrt: checked === true })}
-                  aria-label="Also export .SRT file"
+                  aria-label={L("Also export .SRT file")}
                 />
               </div>
 
@@ -496,7 +464,7 @@ export function Step4Export() {
                 <div className="space-y-0.5">
                   <p className="flex items-center gap-1.5 text-xs font-medium text-foreground">
                     <Cpu className="size-3.5" />
-                    Hardware encoding (GPU)
+                    {L("Hardware encoding when available")}
                   </p>
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     {encodingAvailabilityText(acceleration)}
@@ -506,10 +474,10 @@ export function Step4Export() {
                   </p>
                 </div>
                 <Switch
-                  checked={useNvenc}
+                  checked={useNvenc && encodingAvailable}
                   onCheckedChange={(checked) => updateExportSettings({ useNvenc: checked })}
                   disabled={!encodingAvailable}
-                  aria-label="Use hardware encoding (GPU)"
+                  aria-label="Use hardware encoding when available"
                 />
               </div>
             </div>
@@ -519,11 +487,11 @@ export function Step4Export() {
             <div className="space-y-1.5">
               <div className="flex items-center justify-between gap-2">
                 <Label htmlFor="filename-template" className="text-[13px] font-medium text-foreground">
-                  Filename template
+                  {L("Filename template")}
                 </Label>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <span className="text-[10px] text-muted-foreground">Windows-safe</span>
+                    <span className="text-[10px] text-muted-foreground">{L("Windows-safe")}</span>
                   </TooltipTrigger>
                   <TooltipContent side="left" className="max-w-56 text-xs">
                     Invalid characters are replaced with underscores automatically.
@@ -556,7 +524,7 @@ export function Step4Export() {
 
               <div className="mt-2 space-y-1 rounded-md border border-border bg-background/40 px-2.5 py-2">
                 <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                  Resulting names
+                  {L("Resulting names")}
                 </p>
                 {plannedNames.slice(0, 4).map((name, index) => (
                   <p
@@ -577,7 +545,7 @@ export function Step4Export() {
 
             <div className="space-y-1.5">
               <Label htmlFor="output-dir" className="text-[13px] font-medium text-foreground">
-                Output folder
+                {L("Output folder")}
               </Label>
               <div className="flex items-center gap-2">
                 <Input
@@ -586,7 +554,7 @@ export function Step4Export() {
                   onChange={(event) =>
                     updateExportSettings({ outputDir: event.target.value || null })
                   }
-                  placeholder={resolvedOutputDir || "Choose a folder"}
+                  placeholder={resolvedOutputDir || L("Choose a folder")}
                   spellCheck={false}
                   className="font-mono text-xs"
                 />
@@ -596,7 +564,7 @@ export function Step4Export() {
                   className="shrink-0"
                   onClick={() => void chooseOutputFolder()}
                 >
-                  Browse…
+                  {L("Browse…")}
                 </Button>
               </div>
               <p className="text-xs leading-relaxed text-muted-foreground">
@@ -612,7 +580,7 @@ export function Step4Export() {
               <CollapsibleTrigger className="group flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left">
                 <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
                   <Type className="size-3.5" />
-                  Burned-in subtitle styles
+                  {L("Burned-in subtitle styles")}
                 </span>
                 <ChevronDown className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
               </CollapsibleTrigger>
@@ -672,7 +640,7 @@ export function Step4Export() {
             {running ? (
               <Button variant="outline" className="w-full gap-2" onClick={cancelRender}>
                 <Square className="size-3.5" />
-                Cancel render
+                {L("Cancel render")}
               </Button>
             ) : (
               <Button className="w-full gap-2" onClick={startRender}>
@@ -682,7 +650,7 @@ export function Step4Export() {
             )}
             <p className="text-center text-[10px] text-muted-foreground">
               {running
-                ? "Rendering your clips…"
+                ? L("Rendering your clips…")
                 : `Burned-in subtitles, ${exportSrt ? ".SRT file, " : ""}${
                     useNvenc && encodingAvailable ? "GPU rendering" : "CPU rendering"
                   }.`}
@@ -723,7 +691,7 @@ export function Step4Export() {
                 disabled={!sidecarOutputDir && !resolvedOutputDir}
                 onClick={() => void openOutputFolder()}
               >
-                Open folder
+                {L("Open folder")}
               </Button>
               <Button
                 variant="ghost"
@@ -731,19 +699,19 @@ export function Step4Export() {
                 disabled={!sidecarOutputDir && !resolvedOutputDir}
                 onClick={() => void copyOutputPath()}
               >
-                Copy path
+                {L("Copy path")}
               </Button>
             </>
           )}
         </div>
         <div className="flex items-center gap-1.5">
           <Button variant="ghost" size="sm" onClick={() => setStep(3)}>
-            Back to subtitles
+            {L("Back to subtitles")}
           </Button>
           {job.status === "done" ? (
             <Button variant="secondary" size="sm" className="gap-1.5" onClick={startRender}>
               <RotateCw className="size-3.5" />
-              Render again
+              {L("Render again")}
             </Button>
           ) : null}
         </div>

@@ -3,10 +3,8 @@
  * full-lecture toggle, and the only boundary changes come from the edge
  * buttons or the Shift (cut-in) / Alt (cut-out) arrow shortcuts.
  *
- * The seeded project has no audio extract, so this spec exercises the
- * orchestration (keyboard mapping + step settings) rather than wavesurfer
- * rendering. The clip times are read from the TrimRow aria-labels, which use
- * the same absolute clock the renderer uses everywhere else in Step 2.
+ * The clip times are read from the compact "speech … · cut … → …" readout,
+ * which uses the same absolute clock the renderer uses everywhere else in Step 2.
  */
 
 import { expect, test, type Page } from "@playwright/test";
@@ -35,9 +33,16 @@ function silentWavDataUrl(): string {
 }
 
 function trimTime(page: Page, edge: "Cut in" | "Cut out", clock: string) {
-  return page
-    .getByRole("button", { name: `${edge} trim controls` })
-    .locator(`[aria-label="${clock}"]`);
+  // The two per-edge TrimRows were replaced by one compact readout:
+  // "speech <t> → <t> · cut <t> → <t>". The cut pair are the 3rd and 4th
+  // labelled TimeFlow spans; keep `edge` in the locator so a clock can never
+  // be matched against the wrong boundary.
+  const readout = page.locator("p").filter({ hasText: /· cut/ });
+  const cutIndex = edge === "Cut in" ? 2 : 3;
+  return readout
+    .locator("span[aria-label]")
+    .nth(cutIndex)
+    .and(page.locator(`[aria-label="${clock}"]`));
 }
 
 test.describe("Step 2 waveform edge controls", () => {

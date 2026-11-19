@@ -1,3 +1,4 @@
+import { L } from "@/lib/i18n";
 import { useEffect, useState } from "react";
 import { Drawer } from "vaul";
 import { toast } from "sonner";
@@ -49,7 +50,7 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
     setBasePrompt(trimmed);
     if (!trimmed) {
       setPromptPreset(null);
-      toast("Using the built-in defaults", {
+      toast(L("Using the built-in defaults"), {
         description: "You can add an initial prompt any time from Step 1.",
       });
       onOpenChange(false);
@@ -57,11 +58,11 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
     }
     if (activePreset && trimmed !== activePreset.prompt.trim()) {
       setPromptPreset(null);
-      toast.success("Initial prompt updated", {
+      toast.success(L("Initial prompt updated"), {
         description: "Edited away from the preset — this project now uses a custom prompt.",
       });
     } else {
-      toast.success("Initial prompt updated");
+      toast.success(L("Initial prompt updated"));
     }
     onOpenChange(false);
   }
@@ -70,13 +71,13 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
     const name = presetName.trim();
     const prompt = draft.trim();
     if (!name) {
-      toast.error("Name the preset first", {
+      toast.error(L("Name the preset first"), {
         description: "Give it a short name such as “Short reminders”.",
       });
       return;
     }
     if (!prompt) {
-      toast.error("The prompt is empty", {
+      toast.error(L("The prompt is empty"), {
         description: "Write the initial prompt before saving a preset.",
       });
       return;
@@ -92,7 +93,7 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
     });
     setBasePrompt(prompt);
     setPromptPreset(id);
-    toast.success("Prompt preset saved", { description: name });
+    toast.success(L("Prompt preset saved"), { description: name });
     setPresetName("");
     onOpenChange(false);
   }
@@ -100,11 +101,11 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
   function handleResetToPreset() {
     if (!activePreset) {
       setDraft("");
-      toast("Draft cleared", { description: "Leave it empty to use the built-in defaults." });
+      toast(L("Draft cleared"), { description: "Leave it empty to use the built-in defaults." });
       return;
     }
     setDraft(activePreset.prompt);
-    toast("Preset text restored", { description: activePreset.name });
+    toast(L("Preset text restored"), { description: activePreset.name });
   }
 
   const words = draft.trim() ? draft.trim().split(/\s+/).length : 0;
@@ -117,12 +118,12 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
       shouldScaleBackground={false}
     >
       <Drawer.Portal>
-        <Drawer.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-[1px]" />
-        <Drawer.Content className="fixed inset-y-0 right-0 z-50 flex w-full max-w-xl flex-col border-l border-border bg-background outline-none">
+        <Drawer.Overlay className="fixed inset-x-0 bottom-0 top-[var(--titlebar-height)] z-50 bg-black/60 backdrop-blur-[1px]" />
+        <Drawer.Content className="fixed bottom-0 top-[var(--titlebar-height)] right-0 z-50 flex w-full max-w-xl flex-col border-l border-border bg-background outline-none">
           <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
             <div className="space-y-0.5">
               <Drawer.Title className="text-sm font-medium text-foreground">
-                Initial prompt — clip finding
+                {L("Initial prompt — clip finding")}
               </Drawer.Title>
               <Drawer.Description className="text-xs text-muted-foreground">
                 The standing instructions the AI follows when finding clips. Timing and formatting
@@ -130,7 +131,7 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
               </Drawer.Description>
             </div>
             <Drawer.Close asChild>
-              <Button variant="ghost" size="icon-sm" aria-label="Close initial prompt">
+              <Button variant="ghost" size="icon-sm" aria-label={L("Close initial prompt")}>
                 <X className="size-4" />
               </Button>
             </Drawer.Close>
@@ -140,7 +141,7 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
             <div className="space-y-4">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant="outline">
-                  {activePreset ? activePreset.name : "Custom / default"}
+                  {activePreset ? activePreset.name : L("Custom / default")}
                 </Badge>
                 {activePreset ? (
                   <span className="text-[11px] text-muted-foreground">
@@ -149,14 +150,14 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
                   </span>
                 ) : (
                   <span className="text-[11px] text-muted-foreground">
-                    Leave empty to use the built-in defaults.
+                    {L("Leave empty to use the built-in defaults.")}
                   </span>
                 )}
               </div>
 
               <div className="space-y-1.5">
                 <Label htmlFor="base-prompt" className="text-xs font-medium text-foreground/90">
-                  What to look for
+                  {L("What to look for")}
                 </Label>
                 <Textarea
                   id="base-prompt"
@@ -175,7 +176,7 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
               <div className="flex flex-wrap gap-2">
                 <Button variant="outline" size="sm" className="gap-1.5" onClick={handleResetToPreset}>
                   <RotateCcw className="size-3.5" />
-                  {activePreset ? "Reset to preset" : "Clear draft"}
+                  {activePreset ? L("Reset to preset") : L("Clear draft")}
                 </Button>
               </div>
 
@@ -183,7 +184,7 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
 
               <div className="space-y-2">
                 <div className="space-y-0.5">
-                  <p className="text-xs font-medium text-foreground/90">Save as a preset</p>
+                  <p className="text-xs font-medium text-foreground/90">{L("Save as a preset")}</p>
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
                     Presets live in Settings, travel with the portable backup, and can be picked
                     again from Step 1.
@@ -193,7 +194,7 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
                   <Input
                     value={presetName}
                     onChange={(event) => setPresetName(event.target.value)}
-                    placeholder="Preset name"
+                    placeholder={L("Preset name")}
                     aria-label="New prompt preset name"
                     className="h-8 text-xs"
                     onKeyDown={(event) => {
@@ -210,7 +211,7 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
                     onClick={handleSaveAsPreset}
                   >
                     <BookmarkPlus className="size-3.5" />
-                    Save preset
+                    {L("Save preset")}
                   </Button>
                 </div>
               </div>
@@ -220,12 +221,12 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
           <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
             <Drawer.Close asChild>
               <Button variant="ghost" size="sm">
-                Cancel
+                {L("Cancel")}
               </Button>
             </Drawer.Close>
             <Button size="sm" className="gap-1.5" onClick={handleSave}>
               <Save className="size-3.5" />
-              Save prompt
+              {L("Save prompt")}
             </Button>
           </div>
         </Drawer.Content>

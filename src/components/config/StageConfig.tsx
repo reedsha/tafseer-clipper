@@ -1,3 +1,4 @@
+import { L } from "@/lib/i18n";
 /**
  * Full-page "<Stage> configuration" screen.
  *
@@ -7,7 +8,7 @@
  * render — keeps going. A Back button returns to the step.
  */
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { ArrowLeft, Loader2, MoveRight, Pencil, Plus, Save, Trash2, Upload } from "lucide-react";
 
@@ -22,6 +23,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import {
   Select,
@@ -31,30 +33,46 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GpuStatusLine } from "@/components/GpuAcceleration";
 import { FitBadge } from "@/components/FitBadge";
 import { SegmentedToggle } from "@/components/SegmentedToggle";
+import { SubtitleFrame } from "@/components/subtitles/SubtitleFrame";
 import { importFonts } from "@/lib/api";
-import { describeAcceleration, isGpuEncodingAvailable } from "@/lib/acceleration";
+import { describeAcceleration } from "@/lib/acceleration";
 import {
   sanitizeFileNameTemplate,
   TEMPLATE_TOKEN_HINTS,
   unknownTemplateTokens,
 } from "@/lib/filenameTemplate";
 import { loadImportedFonts } from "@/lib/fonts";
-import { STEP_LABELS, type WizardStep } from "@/lib/projectTypes";
+import { STEP_LABELS, type Resolution, type WizardStep } from "@/lib/projectTypes";
 import { describeProviderGap, resolveSttConnection, whisperFitSentence } from "@/lib/providers";
+import {
+  nudgeVerticalOffset,
+  resolveAssStyles,
+  type AssStyle,
+  type SubtitleLine,
+} from "@/lib/subtitleStyles";
 import type { HardwareTier } from "@/lib/api";
 import { NUMERIC_LIMITS } from "@/lib/settingsLimits";
 import { useProjectStore } from "@/store/projectStore";
-import { useSettingsStore, type EngineMode } from "@/store/settingsStore";
+import {
+  BUILTIN_PRESET_IDS,
+  useSettingsStore,
+  type ArabicStyle,
+  type EditorDefaults,
+  type EngineMode,
+  type StylePreset,
+  type ThaiStyle,
+} from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
 import { cn } from "cn";
 
 import {
   ARABIC_COLORS,
   BOX_OPACITY_PERCENT,
-  ColorSelect,
+  ColorSwatchField,
   Field,
   LineWidthHint,
   ModelSelect,
@@ -68,11 +86,27 @@ import {
 } from "@/components/config/shared";
 
 const STAGE_DESCRIPTIONS: Record<WizardStep, string> = {
-  1: "Speech-to-text engine and model. Changes save automatically.",
-  2: "Clip finding engine, model and cut buffer. Changes save automatically.",
-  3: "Fonts, Arabic and Thai typography, style presets, and Arabic verification. Changes save automatically.",
-  4: "File names, subtitles and export defaults. Changes save automatically.",
+  1: L("Speech-to-text engine and model. Changes save automatically."),
+  2: L("Clip finding engine, model and cut buffer. Changes save automatically."),
+  3: L("Fonts, Arabic and Thai typography, style presets, and Arabic verification. Changes save automatically."),
+  4: L("File names, subtitles and export defaults. Changes save automatically."),
 };
+
+/**
+ * The fixed sample line the Subtitles config preview draws. It is deliberately
+ * generic — the preview exists to judge type, colour and placement, so it must
+ * not depend on a session, a clip or anything that has been detected.
+ */
+const PREVIEW_ARABIC = "إِنَّ مَعَ الْعُسْرِ يُسْرًا";
+const PREVIEW_THAI = "แท้จริงความยากลำบากนั้นมีทางออกเสมอ";
+
+/**
+ * The Stage 3 preview rail (sample line on a black ratio grid + the
+ * Both/Arabic/Thai toggle) is parked, not deleted: the settings render
+ * centered while this is false. Flip to true to bring back the split layout —
+ * the rail markup, `SubtitleFrame` and `SubtitleOverlay` all stay intact.
+ */
+const STAGE3_PREVIEW_ENABLED = false;
 
 export function StageConfig({ step }: { step: WizardStep }) {
   const closeConfig = useUiStore((state) => state.closeConfig);
@@ -87,19 +121,26 @@ export function StageConfig({ step }: { step: WizardStep }) {
           onClick={closeConfig}
         >
           <ArrowLeft className="size-4" />
-          Back
+          {L("Back")}
         </Button>
         <Separator orientation="vertical" className="h-6" />
         <div className="space-y-0.5">
           <h1 className="text-sm font-medium text-foreground">
-            {STEP_LABELS[step]} configuration
+            {L(`${STEP_LABELS[step]} configuration`)}
           </h1>
           <p className="text-xs text-muted-foreground">{STAGE_DESCRIPTIONS[step]}</p>
         </div>
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-3xl space-y-5 px-8 py-6">
+        <div
+          className={cn(
+            "mx-auto w-full space-y-5 px-8 py-6",
+            // Stage 3's preview rail is hidden for now (kept for a follow-up
+            // idea); when it returns, this page widens to max-w-5xl again.
+            step === 3 && STAGE3_PREVIEW_ENABLED ? "max-w-5xl" : "max-w-3xl",
+          )}
+        >
           {step === 1 ? <Stage1Config /> : null}
           {step === 2 ? <Stage2Config /> : null}
           {step === 3 ? <Stage3Config /> : null}
@@ -150,15 +191,15 @@ function Stage1Config() {
   return (
     <>
       <Section
-        title="Speech-to-text"
+        title={L("Speech-to-text")}
         description="Where transcription runs, and which model it uses. Cloud mode fetches the model list live from the configured speech service."
       >
         <SegmentedToggle<"local" | "cloud">
           label="Speech-to-text engine"
           value={transcriptionMode}
           options={[
-            { value: "local", label: "This computer" },
-            { value: "cloud", label: "AI service (cloud)" },
+            { value: "local", label: L("This computer") },
+            { value: "cloud", label: L("AI service (cloud)") },
           ]}
           onChange={setTranscriptionMode}
         />
@@ -179,7 +220,7 @@ function Stage1Config() {
                 onChange={(value) => updateWhisper({ model: value })}
               />
             </Field>
-            <Field label="Transcription precision">
+            <Field label="Transcription precision" hint="Precision only">
               <Select
                 value={whisper.computeType}
                 onValueChange={(value) =>
@@ -190,12 +231,16 @@ function Stage1Config() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="int8">Automatic (recommended)</SelectItem>
-                  <SelectItem value="float16">GPU, more accurate</SelectItem>
-                  <SelectItem value="float32">CPU, most compatible</SelectItem>
+                  <SelectItem value="int8">Standard (recommended)</SelectItem>
+                  <SelectItem value="float16">Higher precision</SelectItem>
+                  <SelectItem value="float32">Highest precision</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+              Transcription uses the GPU automatically when available and falls back to the CPU
+              otherwise. Higher precision may be reduced on the CPU.
+            </p>
             <SwitchRow
               label="Free up memory after transcription"
               description="Releases the transcription model from GPU memory before rendering. No effect when transcription runs on the CPU."
@@ -215,7 +260,7 @@ function Stage1Config() {
             </p>
             <Field
               label="Cloud model"
-              hint={sttConnection.dedicated ? "From the speech service" : "From your AI connection"}
+              hint={sttConnection.dedicated ? "From the speech service" : L("From your AI connection")}
             >
               <ModelSelect
                 source="cloud"
@@ -387,19 +432,19 @@ function Stage2Config() {
   const editor = useSettingsStore((state) => state.editor);
   const updateEditor = useSettingsStore((state) => state.updateEditor);
 
-  const engineLabel = analysisMode === "cloud" ? "AI service (cloud)" : "This computer";
+  const engineLabel = analysisMode === "cloud" ? L("AI service (cloud)") : L("This computer");
 
   return (
     <>
       <Section
-        title="AI model"
+        title={L("AI model")}
         description="Clip finding engine and model. Changing the model applies to the next search; Step 3 can inherit the same choice."
       >
         <SegmentedToggle<EngineMode>
           label="Clip finding engine"
           value={analysisMode}
           options={[
-            { value: "local", label: "This computer" },
+            { value: "local", label: L("This computer") },
             { value: "cloud", label: "Your AI account" },
           ]}
           onChange={setAnalysisMode}
@@ -438,11 +483,11 @@ function Stage2Config() {
       <Separator />
 
       <Section
-        title="Cut buffer padding"
+        title={L("Cut buffer padding")}
         description="Extra headroom kept before and after detected speech so clips never cut mid-word."
       >
         <NumberField
-          ariaLabel="Cut buffer padding"
+          ariaLabel={L("Cut buffer padding")}
           value={editor.cutBufferSeconds}
           onChange={(value) => updateEditor({ cutBufferSeconds: value })}
           suffix=" s"
@@ -458,6 +503,641 @@ function Stage2Config() {
 /* -------------------------------------------------------------------------- */
 /* Stage 3 · Subtitles                                                        */
 /* -------------------------------------------------------------------------- */
+
+interface NumberLimits {
+  min: number;
+  max: number;
+  step: number;
+}
+
+/** A numeric style control in the inspector's stacked label + slider rhythm. */
+function StyleNumberField({
+  label,
+  ariaLabel,
+  value,
+  onChange,
+  limits,
+  suffix,
+}: {
+  label: string;
+  ariaLabel?: string;
+  value: number;
+  onChange: (value: number) => void;
+  limits: NumberLimits;
+  suffix: string;
+}) {
+  return (
+    <NumberField
+      layout="stacked"
+      ariaLabel={ariaLabel ?? label}
+      displayLabel={label}
+      value={value}
+      onChange={onChange}
+      suffix={suffix}
+      min={limits.min}
+      max={limits.max}
+      step={limits.step}
+    />
+  );
+}
+
+/** Font-family row: label on the left, compact trigger on the right. */
+function FontFamilyField({
+  label,
+  ariaLabel,
+  value,
+  families,
+  onChange,
+}: {
+  label: string;
+  ariaLabel: string;
+  value: string;
+  families: string[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <Label className="text-[11px] font-medium text-foreground/80">{label}</Label>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger
+          className="h-7 w-[62%] border-border bg-card/40 text-[11px]"
+          aria-label={ariaLabel}
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {families.map((family) => (
+            <SelectItem key={family} value={family} className="text-xs">
+              {family}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+/** A bold on/off row in the same label-left, control-right rhythm. */
+function StyleSwitchRow({
+  label,
+  checked,
+  onCheckedChange,
+}: {
+  label: string;
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-[11px] font-medium text-foreground/80">{label}</span>
+      <Switch
+        checked={checked}
+        onCheckedChange={onCheckedChange}
+        aria-label={label}
+      />
+    </div>
+  );
+}
+
+/** An uppercase inspector section heading with a hairline above it. */
+function ControlSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="space-y-2.5 border-t border-border pt-3 first:border-t-0 first:pt-0">
+      <p className="text-[9px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+        {title}
+      </p>
+      <div className="space-y-2.5">{children}</div>
+    </section>
+  );
+}
+
+/**
+ * A preset library thumbnail: the sample line drawn in that preset's own
+ * colours and weight. It is a miniature of the preview, not a screenshot —
+ * the point is to tell the themes apart at a glance.
+ */
+function PresetSwatch({ preset }: { preset: StylePreset }) {
+  const arabicSize = Math.round(Math.min(11, Math.max(7, preset.arabic.fontSize * 0.16)) * 10) / 10;
+  const thaiSize = Math.round(Math.min(8, Math.max(5.5, preset.thai.fontSize * 0.16)) * 10) / 10;
+  return (
+    <div className="relative flex aspect-video w-full flex-col items-center justify-end gap-[2px] overflow-hidden rounded-[4px] border border-border bg-black pb-[7%]">
+      <span
+        dir="rtl"
+        lang="ar"
+        className="w-full truncate px-1 text-center leading-tight"
+        style={{
+          fontFamily: `'${preset.arabic.fontFamily}', 'Noto Naskh Arabic', serif`,
+          fontSize: `${arabicSize}px`,
+          fontWeight: preset.arabic.bold ? 700 : 400,
+          color: preset.arabic.color,
+          backgroundColor:
+            preset.arabic.boxOpacity > 0
+              ? `rgba(0, 0, 0, ${preset.arabic.boxOpacity})`
+              : undefined,
+        }}
+      >
+        {PREVIEW_ARABIC}
+      </span>
+      <span
+        lang="th"
+        className="w-full truncate px-1 text-center leading-tight"
+        style={{
+          fontFamily: `'${preset.thai.fontFamily}', 'Leelawadee UI', 'Tahoma', sans-serif`,
+          fontSize: `${thaiSize}px`,
+          fontWeight: preset.thai.bold ? 700 : 400,
+          color: preset.thai.color,
+          backgroundColor:
+            preset.thai.boxOpacity > 0
+              ? `rgba(0, 0, 0, ${preset.thai.boxOpacity})`
+              : undefined,
+        }}
+      >
+        {PREVIEW_THAI}
+      </span>
+    </div>
+  );
+}
+
+function PresetGrid({
+  presets,
+  editingPresetId,
+  onPick,
+}: {
+  presets: StylePreset[];
+  editingPresetId: string | null;
+  onPick: (preset: StylePreset) => void;
+}) {
+  if (presets.length === 0) {
+    return (
+      <p className="px-1 py-4 text-center text-[11px] leading-relaxed text-muted-foreground">
+        No presets in this group yet.
+      </p>
+    );
+  }
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      {presets.map((preset) => {
+        const editing = preset.id === editingPresetId;
+        return (
+          <button
+            key={preset.id}
+            type="button"
+            onClick={() => onPick(preset)}
+            aria-pressed={editing}
+            className={cn(
+              "flex min-w-0 flex-col gap-1.5 rounded-md border p-1.5 text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              editing
+                ? "border-ring/50 bg-accent/40"
+                : "border-border bg-card/40 hover:border-ring/30 hover:bg-accent/20",
+            )}
+          >
+            <PresetSwatch preset={preset} />
+            <span className="min-w-0">
+              <span className="block truncate text-[10px] font-medium text-foreground">
+                {preset.name}
+              </span>
+              <span className="block truncate text-[9px] tabular-nums text-muted-foreground">
+                AR {preset.arabic.fontSize} · TH {preset.thai.fontSize}
+              </span>
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * The left rail: the preset library, split into the app's built-in themes and
+ * the user's saved ones. Picking a card makes that preset the one being edited.
+ */
+function PresetLibraryPanel({
+  presets,
+  editingPresetId,
+  onPick,
+  onNew,
+  className,
+}: {
+  presets: StylePreset[];
+  editingPresetId: string | null;
+  onPick: (preset: StylePreset) => void;
+  onNew: () => void;
+  className?: string;
+}) {
+  const [tab, setTab] = useState<"builtin" | "saved">(() =>
+    editingPresetId && !BUILTIN_PRESET_IDS.has(editingPresetId) ? "saved" : "builtin",
+  );
+  const builtin = presets.filter((preset) => BUILTIN_PRESET_IDS.has(preset.id));
+  const saved = presets.filter((preset) => !BUILTIN_PRESET_IDS.has(preset.id));
+
+  useEffect(() => {
+    if (!editingPresetId) return;
+    setTab(BUILTIN_PRESET_IDS.has(editingPresetId) ? "builtin" : "saved");
+  }, [editingPresetId]);
+
+  return (
+    <div
+      className={cn(
+        "flex min-h-0 flex-col gap-2.5 rounded-lg border border-border bg-card/40 p-2.5",
+        className,
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+          {L("Presets")}
+        </p>
+        <span className="text-[10px] tabular-nums text-muted-foreground">
+          {presets.length}
+        </span>
+      </div>
+      <Tabs
+        value={tab}
+        onValueChange={(value) => setTab(value as "builtin" | "saved")}
+        className="flex min-h-0 flex-1 flex-col gap-2"
+      >
+        <TabsList variant="line" className="w-full">
+          <TabsTrigger value="builtin" className="flex-1 text-[11px]">
+            Built-in · {builtin.length}
+          </TabsTrigger>
+          <TabsTrigger value="saved" className="flex-1 text-[11px]">
+            Saved · {saved.length}
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="builtin" className="min-h-0 flex-1 overflow-y-auto">
+          <PresetGrid
+            presets={builtin}
+            editingPresetId={editingPresetId}
+            onPick={onPick}
+          />
+        </TabsContent>
+        <TabsContent value="saved" className="min-h-0 flex-1 overflow-y-auto">
+          <PresetGrid presets={saved} editingPresetId={editingPresetId} onPick={onPick} />
+        </TabsContent>
+      </Tabs>
+      <Button
+        variant="outline"
+        size="sm"
+        className={cn(
+          "w-full gap-1.5 border-dashed text-[11px] text-muted-foreground",
+          editingPresetId === null && "border-ring/50 bg-accent/30 text-foreground",
+        )}
+        onClick={onNew}
+      >
+        <Plus className="size-3.5" />
+        {L("New preset")}
+      </Button>
+    </div>
+  );
+}
+
+/** The centre canvas: the live export frame on a near-black surface. */
+function StylePreviewCanvas({
+  aspect,
+  styles,
+  onAspectChange,
+  showClip,
+  onShowClipChange,
+  clipAvailable,
+  clip,
+  offsets,
+  onNudgeLine,
+  className,
+}: {
+  aspect: Resolution;
+  styles: { arabic: AssStyle; thai: AssStyle };
+  onAspectChange: (resolution: Resolution) => void;
+  showClip: boolean;
+  onShowClipChange: (value: boolean) => void;
+  clipAvailable: boolean;
+  clip: { sourcePath: string; clipStart: number } | null;
+  offsets: { arabic: number; thai: number };
+  onNudgeLine: (kind: SubtitleLine, deltaExportPx: number) => void;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex min-h-0 flex-col gap-2.5 rounded-lg border border-border bg-black p-3",
+        className,
+      )}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+          {L("Preview")}
+        </p>
+        <div className="flex items-center gap-2">
+          <label
+            className={cn(
+              "flex items-center gap-1.5 text-[10px] text-muted-foreground",
+              !clipAvailable && "opacity-50",
+            )}
+            title={
+              clipAvailable
+                ? "Show a paused frame of the selected clip from Step 3"
+                : "Approve a clip in Step 3 to enable this view"
+            }
+          >
+            <Switch
+              checked={showClip && clipAvailable}
+              disabled={!clipAvailable}
+              onCheckedChange={onShowClipChange}
+              aria-label={L("Show clip")}
+              size="sm"
+            />
+            {L("Show clip")}
+          </label>
+          <SegmentedToggle<Resolution>
+            label="Preview aspect"
+            value={aspect}
+            options={[
+              { value: "1080x1920", label: "9:16" },
+              { value: "1920x1080", label: "16:9" },
+            ]}
+            onChange={onAspectChange}
+            className="w-fit"
+          />
+        </div>
+      </div>
+      <div className="min-h-0 flex-1">
+        <SubtitleFrame
+          resolution={aspect}
+          styles={styles}
+          arabic={PREVIEW_ARABIC}
+          thai={PREVIEW_THAI}
+          video={showClip ? clip : null}
+          interactive
+          offsets={offsets}
+          onNudgeLine={onNudgeLine}
+          className="h-full w-full"
+        />
+      </div>
+      <div className="flex flex-wrap items-center justify-center gap-1.5">
+        <Badge variant="outline" className="text-[10px] font-normal tabular-nums">
+          Arabic {styles.arabic.size}px
+        </Badge>
+        <Badge variant="outline" className="text-[10px] font-normal tabular-nums">
+          Thai {styles.thai.size}px
+        </Badge>
+      </div>
+      <p className="text-center text-[10px] leading-relaxed text-muted-foreground">
+        {L("Sample line at export size. Drag a line or use ↑↓ to move it.")}
+      </p>
+    </div>
+  );
+}
+
+/** The right rail: one language's typography at a time, in inspector rows. */
+function StyleControlsPanel({
+  arabic,
+  thai,
+  editor,
+  fontFamilies,
+  modified,
+  onArabicChange,
+  onThaiChange,
+  onEditorChange,
+  className,
+}: {
+  arabic: ArabicStyle;
+  thai: ThaiStyle;
+  editor: EditorDefaults;
+  fontFamilies: string[];
+  modified: boolean;
+  onArabicChange: (patch: Partial<ArabicStyle>) => void;
+  onThaiChange: (patch: Partial<ThaiStyle>) => void;
+  onEditorChange: (patch: Partial<EditorDefaults>) => void;
+  className?: string;
+}) {
+  const [tab, setTab] = useState<"arabic" | "thai">("arabic");
+
+  return (
+    <div
+      className={cn(
+        "flex min-h-0 flex-col rounded-lg border border-border bg-card/40",
+        className,
+      )}
+    >
+      <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+        <p className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+          {L("Controls")}
+        </p>
+        {modified ? (
+          <Badge variant="outline" className="text-[9px] text-status-warning">
+            {L("Modified")}
+          </Badge>
+        ) : null}
+      </div>
+      <Tabs
+        value={tab}
+        onValueChange={(value) => setTab(value as "arabic" | "thai")}
+        className="flex min-h-0 flex-1 flex-col"
+      >
+        <TabsList variant="line" className="mx-3 mt-2 w-[calc(100%-1.5rem)]">
+          <TabsTrigger value="arabic" className="flex-1 text-[11px]">
+            {L("Arabic")}
+          </TabsTrigger>
+          <TabsTrigger value="thai" className="flex-1 text-[11px]">
+            {L("Thai")}
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="arabic" className="min-h-0 flex-1 overflow-y-auto p-3">
+          <div className="space-y-4">
+            <ControlSection title={L("Typography")}>
+              <FontFamilyField
+                label={L("Font family")}
+                ariaLabel="Arabic font family"
+                value={arabic.fontFamily}
+                families={fontFamilies}
+                onChange={(value) => onArabicChange({ fontFamily: value })}
+              />
+              <ColorSwatchField
+                label={L("Color")}
+                value={arabic.color}
+                onChange={(value) => onArabicChange({ color: value })}
+                options={ARABIC_COLORS}
+              />
+              <StyleNumberField
+                label={L("Font size")}
+                ariaLabel="Arabic font size"
+                value={arabic.fontSize}
+                onChange={(value) => onArabicChange({ fontSize: value })}
+                limits={NUMERIC_LIMITS.arabicFontSize}
+                suffix=" px"
+              />
+              <StyleNumberField
+                label={L("Outline width")}
+                ariaLabel="Arabic outline width"
+                value={arabic.outlineWidth}
+                onChange={(value) => onArabicChange({ outlineWidth: value })}
+                limits={NUMERIC_LIMITS.arabicOutlineWidth}
+                suffix=" px"
+              />
+              <StyleNumberField
+                label="Harakat padding"
+                ariaLabel="Arabic harakat padding"
+                value={arabic.lineHeightPad}
+                onChange={(value) => onArabicChange({ lineHeightPad: value })}
+                limits={NUMERIC_LIMITS.arabicLineHeightPad}
+                suffix="×"
+              />
+              <StyleNumberField
+                label={L("Box opacity")}
+                ariaLabel="Arabic box opacity"
+                value={Math.round(arabic.boxOpacity * 100)}
+                onChange={(value) => onArabicChange({ boxOpacity: value / 100 })}
+                limits={BOX_OPACITY_PERCENT}
+                suffix="%"
+              />
+              <StyleSwitchRow
+                label={L("Bold")}
+                checked={arabic.bold}
+                onCheckedChange={(checked) => onArabicChange({ bold: checked })}
+              />
+            </ControlSection>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="thai" className="min-h-0 flex-1 overflow-y-auto p-3">
+          <div className="space-y-4">
+            <ControlSection title={L("Typography")}>
+              <FontFamilyField
+                label={L("Font family")}
+                ariaLabel="Thai font family"
+                value={thai.fontFamily}
+                families={fontFamilies}
+                onChange={(value) => onThaiChange({ fontFamily: value })}
+              />
+              <ColorSwatchField
+                label={L("Color")}
+                value={thai.color}
+                onChange={(value) => onThaiChange({ color: value })}
+                options={THAI_COLORS}
+              />
+              <StyleNumberField
+                label={L("Font size")}
+                ariaLabel="Thai font size"
+                value={thai.fontSize}
+                onChange={(value) => onThaiChange({ fontSize: value })}
+                limits={NUMERIC_LIMITS.thaiFontSize}
+                suffix=" px"
+              />
+              <StyleNumberField
+                label={L("Outline width")}
+                ariaLabel="Thai outline width"
+                value={thai.outlineWidth}
+                onChange={(value) => onThaiChange({ outlineWidth: value })}
+                limits={NUMERIC_LIMITS.thaiOutlineWidth}
+                suffix=" px"
+              />
+              <StyleNumberField
+                label={L("Box opacity")}
+                ariaLabel="Thai box opacity"
+                value={Math.round(thai.boxOpacity * 100)}
+                onChange={(value) => onThaiChange({ boxOpacity: value / 100 })}
+                limits={BOX_OPACITY_PERCENT}
+                suffix="%"
+              />
+              <StyleSwitchRow
+                label={L("Bold")}
+                checked={thai.bold}
+                onCheckedChange={(checked) => onThaiChange({ bold: checked })}
+              />
+            </ControlSection>
+
+            <ControlSection title={L("Line breaking")}>
+              <StyleNumberField
+                label={L("Max characters per line")}
+                ariaLabel={L("Max characters per line")}
+                value={editor.maxCharsPerLine}
+                onChange={(value) =>
+                  onEditorChange({ maxCharsPerLine: Math.round(value) })
+                }
+                limits={NUMERIC_LIMITS.maxCharsPerLine}
+                suffix=" chars"
+              />
+              <div className="space-y-1.5">
+                <span className="text-[11px] font-medium text-foreground/80">
+                  {L("Lines per subtitle")}
+                </span>
+                <SegmentedToggle<"1" | "2">
+                  label={L("Lines per subtitle")}
+                  value={String(editor.subtitleMaxLines) as "1" | "2"}
+                  options={[
+                    { value: "2", label: L("Two") },
+                    { value: "1", label: L("One") },
+                  ]}
+                  onChange={(value) =>
+                    onEditorChange({ subtitleMaxLines: value === "1" ? 1 : 2 })
+                  }
+                  className="w-full"
+                />
+              </div>
+              <LineWidthHint
+                fontFamily={thai.fontFamily}
+                fontSize={thai.fontSize}
+                maxChars={editor.maxCharsPerLine}
+                bold={thai.bold}
+                resolution={editor.resolution}
+                onUseSuggestion={(chars) =>
+                  onEditorChange({ maxCharsPerLine: chars })
+                }
+              />
+              <p className="text-[10px] leading-relaxed text-muted-foreground">
+                Thai has no inter-word spaces, so cues are broken with
+                dictionary-aware word segmentation before the .ass is written.
+                Arabic is never character-wrapped.
+              </p>
+            </ControlSection>
+          </div>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+/**
+ * The live preview styles for a given frame shape, resolved from the editor's
+ * current Arabic/Thai settings — the same merge the sidecar performs, so what
+ * a preview shows is what the render burns in.
+ */
+function resolveSubtitleStyles(
+  resolution: Resolution,
+  arabic: ArabicStyle,
+  thai: ThaiStyle,
+) {
+  return resolveAssStyles(
+    resolution,
+    {
+      font: arabic.fontFamily,
+      size: arabic.fontSize,
+      primaryColor: arabic.color,
+      outline: arabic.outlineWidth,
+      outlineColor: arabic.outlineColor,
+      boxOpacity: arabic.boxOpacity,
+      bold: arabic.bold,
+      lineHeightPad: arabic.lineHeightPad,
+      verticalOffset: arabic.verticalOffset,
+    },
+    {
+      font: thai.fontFamily,
+      size: thai.fontSize,
+      primaryColor: thai.color,
+      outline: thai.outlineWidth,
+      outlineColor: thai.outlineColor,
+      boxOpacity: thai.boxOpacity,
+      bold: thai.bold,
+      lineHeightPad: 1.2,
+      verticalOffset: thai.verticalOffset,
+    },
+  );
+}
 
 function Stage3Config() {
   const arabic = useSettingsStore((state) => state.arabic);
@@ -478,15 +1158,21 @@ function Stage3Config() {
   const updateEditor = useSettingsStore((state) => state.updateEditor);
   const verificationProvider = useSettingsStore((state) => state.verificationProvider);
   const updateVerificationProvider = useSettingsStore((state) => state.updateVerificationProvider);
+  const project = useProjectStore((state) => state.project);
 
   const fontInputRef = useRef<HTMLInputElement>(null);
   const [importingFonts, setImportingFonts] = useState(false);
 
   const [presetDialogOpen, setPresetDialogOpen] = useState(false);
   const [presetName, setPresetName] = useState("");
-  const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState("");
+  const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  /** Which line(s) the sticky preview draws; a preview control, not a setting. */
+  const [previewLines, setPreviewLines] = useState<"both" | "arabic" | "thai">("both");
+  /** Aspect chosen inside the Add-preset window; preview-only, never saved. */
+  const [presetAspect, setPresetAspect] = useState<Resolution>(editor.resolution);
+  /** View-only clip frame in the preset preview; never saved in a preset. */
+  const [showClip, setShowClip] = useState(false);
 
   const fontFamilies = useMemo(() => {
     const families = new Set(SYSTEM_FONTS);
@@ -502,11 +1188,67 @@ function Stage3Config() {
     ? !presetMatchesStyle(activePreset, arabic, thai)
     : false;
 
-  /** Rename can only do something when the trimmed name is new and non-empty. */
-  const renamingPreset = renamingId
-    ? (presets.find((item) => item.id === renamingId) ?? null)
+  /**
+   * The preview is a typography sample, not the open session: a fixed line on
+   * a black ratio grid, so the styling can be judged before (or without) any
+   * clip. Nothing in it comes from the lecture.
+   */
+  const previewResolution = project?.export.resolution ?? editor.resolution;
+  const previewStyles = useMemo(
+    () => resolveSubtitleStyles(previewResolution, arabic, thai),
+    [previewResolution, arabic, thai],
+  );
+  const presetStyles = useMemo(
+    () => resolveSubtitleStyles(presetAspect, arabic, thai),
+    [presetAspect, arabic, thai],
+  );
+  const previewArabic = previewLines === "thai" ? "" : PREVIEW_ARABIC;
+  const previewThai = previewLines === "arabic" ? "" : PREVIEW_THAI;
+
+  const editingPreset = editingPresetId
+    ? (presets.find((item) => item.id === editingPresetId) ?? null)
     : null;
-  const renameUnchanged = !renameValue.trim() || renameValue.trim() === renamingPreset?.name;
+  /** The live style drifted from the preset open in the editor. */
+  const editingPresetModified = editingPreset
+    ? !presetMatchesStyle(editingPreset, arabic, thai)
+    : false;
+
+  /** A paused frame of the selected approved clip, when the session has one. */
+  const approvedClips = useMemo(
+    () => (project?.clips ?? []).filter((clip) => clip.approved),
+    [project?.clips],
+  );
+  const previewClip =
+    approvedClips.find((clip) => clip.id === project?.selectedClipId) ?? approvedClips[0] ?? null;
+  const clipPreview =
+    project?.sourcePath && previewClip
+      ? { sourcePath: project.sourcePath, clipStart: previewClip.start }
+      : null;
+
+  /** Drag/arrow moves update the live style, so saving a preset captures them. */
+  const nudgePreviewLine = (kind: SubtitleLine, delta: number) => {
+    const state = useSettingsStore.getState();
+    const resolution = project?.export.resolution ?? editor.resolution;
+    if (kind === "arabic") {
+      updateArabic({
+        verticalOffset: nudgeVerticalOffset(
+          "arabic",
+          resolution,
+          state.arabic.verticalOffset,
+          delta,
+        ),
+      });
+    } else {
+      updateThai({
+        verticalOffset: nudgeVerticalOffset(
+          "thai",
+          resolution,
+          state.thai.verticalOffset,
+          delta,
+        ),
+      });
+    }
+  };
 
   async function handleFontFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -516,11 +1258,11 @@ function Stage3Config() {
       setImportedFonts(result.fonts, result.fonts_dir);
       // Make the new faces resolvable in the Step 3 preview (asset protocol).
       void loadImportedFonts(result.fonts);
-      toast.success("Custom font imported", {
+      toast.success(L("Custom font imported"), {
         description: result.imported_fonts.join(", "),
       });
     } catch (error) {
-      toast.error("Font import failed", {
+      toast.error(L("Font import failed"), {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -531,453 +1273,389 @@ function Stage3Config() {
 
   return (
     <>
-      <Section
-        title="Custom font importer"
-        description="Fonts are added to the app so exported subtitles always render Thai and Uthmani Arabic correctly."
-      >
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            ref={fontInputRef}
-            type="file"
-            accept=".ttf,.otf"
-            multiple
-            className="hidden"
-            onChange={(event) => void handleFontFiles(event.target.files)}
-          />
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5"
-            disabled={importingFonts}
-            onClick={() => fontInputRef.current?.click()}
-          >
-            {importingFonts ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <Upload className="size-3.5" />
-            )}
-            Import .TTF / .OTF
-          </Button>
-          <span className="text-[11px] text-muted-foreground">
-            {importedFonts.length} custom font
-            {importedFonts.length === 1 ? "" : "s"} available
-          </span>
-        </div>
+      {/* Preview rail + settings: a fixed narrow rail (like an editor's
+          inspector) with the settings taking the remaining width. The rail
+          shows a sample line on a black ratio grid — nothing here is the
+          lecture and nothing here plays.
 
-        {importedFonts.length > 0 ? (
-          <div className="flex flex-wrap gap-1.5">
-            {importedFonts.map((font) => (
-              <Badge
-                key={`${font.family}::${font.style}`}
-                variant="secondary"
-                className="font-normal"
-              >
-                {font.family}
-                <span className="ml-1 text-muted-foreground">{font.style}</span>
-              </Badge>
-            ))}
-          </div>
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            No custom fonts imported yet — system fonts are used until you import.
-          </p>
+          Currently DISABLED (STAGE3_PREVIEW_ENABLED): the settings render
+          centered like every other stage. The rail, its toggle and the
+          SubtitleFrame component are kept intact for a follow-up idea — flip
+          the flag to bring the split layout back. */}
+      <div
+        className={cn(
+          "grid gap-8",
+          STAGE3_PREVIEW_ENABLED &&
+            "md:grid-cols-[320px_minmax(0,1fr)] md:gap-0",
         )}
-
-        {fontsDir ? (
-          <p className="break-all font-mono text-[11px] text-muted-foreground">
-            fontsdir: {fontsDir}
-          </p>
-        ) : null}
-      </Section>
-
-      <Separator />
-
-      <Section
-        title="Arabic defaults"
-        description="Quranic / Hadith line styling. Warm gold is a content color used only in the preview and .ass output."
       >
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Font family">
-            <Select
-              value={arabic.fontFamily}
-              onValueChange={(value) => updateArabic({ fontFamily: value })}
-            >
-              <SelectTrigger className="w-full" aria-label="Arabic font family">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {fontFamilies.map((family) => (
-                  <SelectItem key={family} value={family}>
-                    {family}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-          <Field label="Color">
-            <ColorSelect
-              label="Arabic color"
-              value={arabic.color}
-              onChange={(value) => updateArabic({ color: value })}
-              options={ARABIC_COLORS}
-            />
-          </Field>
-        </div>
-        <Field label="Font size">
-          <NumberField
-            ariaLabel="Arabic font size"
-            value={arabic.fontSize}
-            onChange={(value) => updateArabic({ fontSize: value })}
-            suffix=" px"
-            min={NUMERIC_LIMITS.arabicFontSize.min}
-            max={NUMERIC_LIMITS.arabicFontSize.max}
-            step={NUMERIC_LIMITS.arabicFontSize.step}
-          />
-        </Field>
-        <Field label="Harakat line-height padding">
-          <NumberField
-            ariaLabel="Arabic harakat padding"
-            value={arabic.lineHeightPad}
-            onChange={(value) => updateArabic({ lineHeightPad: value })}
-            suffix="×"
-            min={NUMERIC_LIMITS.arabicLineHeightPad.min}
-            max={NUMERIC_LIMITS.arabicLineHeightPad.max}
-            step={NUMERIC_LIMITS.arabicLineHeightPad.step}
-          />
-        </Field>
-        <Field label="Outline width">
-          <NumberField
-            ariaLabel="Arabic outline width"
-            value={arabic.outlineWidth}
-            onChange={(value) => updateArabic({ outlineWidth: value })}
-            suffix=" px"
-            min={NUMERIC_LIMITS.arabicOutlineWidth.min}
-            max={NUMERIC_LIMITS.arabicOutlineWidth.max}
-            step={NUMERIC_LIMITS.arabicOutlineWidth.step}
-          />
-        </Field>
-        <Field label="Box opacity">
-          <NumberField
-            ariaLabel="Arabic box opacity"
-            value={Math.round(arabic.boxOpacity * 100)}
-            onChange={(value) => updateArabic({ boxOpacity: value / 100 })}
-            suffix="%"
-            min={BOX_OPACITY_PERCENT.min}
-            max={BOX_OPACITY_PERCENT.max}
-            step={BOX_OPACITY_PERCENT.step}
-          />
-        </Field>
-        <SwitchRow
-          label="Bold Arabic"
-          checked={arabic.bold}
-          onCheckedChange={(checked) => updateArabic({ bold: checked })}
-        />
-      </Section>
-
-      <Separator />
-
-      <Section
-        title="Thai defaults"
-        description="Subtitle line styling for the Thai translation under each Arabic verse."
-      >
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Font family">
-            <Select
-              value={thai.fontFamily}
-              onValueChange={(value) => updateThai({ fontFamily: value })}
-            >
-              <SelectTrigger className="w-full" aria-label="Thai font family">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {fontFamilies.map((family) => (
-                  <SelectItem key={family} value={family}>
-                    {family}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-          <Field label="Color">
-            <ColorSelect
-              label="Thai color"
-              value={thai.color}
-              onChange={(value) => updateThai({ color: value })}
-              options={THAI_COLORS}
-            />
-          </Field>
-        </div>
-        <Field label="Font size">
-          <NumberField
-            ariaLabel="Thai font size"
-            value={thai.fontSize}
-            onChange={(value) => updateThai({ fontSize: value })}
-            suffix=" px"
-            min={NUMERIC_LIMITS.thaiFontSize.min}
-            max={NUMERIC_LIMITS.thaiFontSize.max}
-            step={NUMERIC_LIMITS.thaiFontSize.step}
-          />
-        </Field>
-        <Field label="Max characters per line">
-          <NumberField
-            ariaLabel="Max characters per line"
-            value={editor.maxCharsPerLine}
-            onChange={(value) => updateEditor({ maxCharsPerLine: Math.round(value) })}
-            suffix=" chars"
-            min={NUMERIC_LIMITS.maxCharsPerLine.min}
-            max={NUMERIC_LIMITS.maxCharsPerLine.max}
-            step={NUMERIC_LIMITS.maxCharsPerLine.step}
-          />
-        </Field>
-        <Field label="Lines per subtitle" hint="Two keeps a full sentence together">
-          <Select
-            value={String(editor.subtitleMaxLines)}
-            onValueChange={(value) =>
-              updateEditor({ subtitleMaxLines: value === "1" ? 1 : 2 })
-            }
-          >
-            <SelectTrigger className="w-full" aria-label="Lines per subtitle">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="2">Two lines (recommended)</SelectItem>
-              <SelectItem value="1">One line</SelectItem>
-            </SelectContent>
-          </Select>
-        </Field>
-        <LineWidthHint
-          fontFamily={thai.fontFamily}
-          fontSize={thai.fontSize}
-          maxChars={editor.maxCharsPerLine}
-          bold={thai.bold}
-          resolution={editor.resolution}
-          onUseSuggestion={(chars) => updateEditor({ maxCharsPerLine: chars })}
-        />
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          Thai has no inter-word spaces, so cues are broken with dictionary-aware word
-          segmentation before the .ass is written. Applies to the Thai line in every cue;
-          Arabic is never character-wrapped.
-        </p>
-        <Field label="Outline width">
-          <NumberField
-            ariaLabel="Thai outline width"
-            value={thai.outlineWidth}
-            onChange={(value) => updateThai({ outlineWidth: value })}
-            suffix=" px"
-            min={NUMERIC_LIMITS.thaiOutlineWidth.min}
-            max={NUMERIC_LIMITS.thaiOutlineWidth.max}
-            step={NUMERIC_LIMITS.thaiOutlineWidth.step}
-          />
-        </Field>
-        <Field label="Box opacity">
-          <NumberField
-            ariaLabel="Thai box opacity"
-            value={Math.round(thai.boxOpacity * 100)}
-            onChange={(value) => updateThai({ boxOpacity: value / 100 })}
-            suffix="%"
-            min={BOX_OPACITY_PERCENT.min}
-            max={BOX_OPACITY_PERCENT.max}
-            step={BOX_OPACITY_PERCENT.step}
-          />
-        </Field>
-        <SwitchRow
-          label="Bold Thai"
-          checked={thai.bold}
-          onCheckedChange={(checked) => updateThai({ bold: checked })}
-        />
-      </Section>
-
-      <Separator />
-
-      <Section
-        title="Saved style presets"
-        description="One-click visual themes applied to the dual-line preview and the exported subtitles."
-      >
-        <div className="space-y-1.5">
-          {presets.map((preset) => {
-            const isActive = preset.id === activePresetId;
-            const drifted = isActive && activePresetModified;
-            return (
-              <div
-                key={preset.id}
-                className={cn(
-                  "flex items-center gap-1.5 rounded-md border px-2.5 py-2",
-                  isActive
-                    ? "border-ring/40 bg-accent/40"
-                    : "border-border bg-card/40",
-                )}
-              >
-                <Button
-                  variant="ghost"
-                  className="h-auto min-w-0 flex-1 flex-col items-start justify-start gap-0 px-0 py-0 text-left font-normal hover:bg-transparent"
-                  onClick={() => applyPreset(preset.id)}
-                >
-                  <span className="flex items-center gap-1.5">
-                    <span className="truncate text-xs font-medium text-foreground">
-                      {preset.name}
-                    </span>
-                    {drifted ? (
-                      <Badge variant="outline" className="text-[9px] text-status-warning">
-                        Modified
-                      </Badge>
-                    ) : null}
-                  </span>
-                  <span className="text-[11px] text-muted-foreground">
-                    Arabic {preset.arabic.fontSize}px · Thai {preset.thai.fontSize}px
-                  </span>
-                </Button>
-                {drifted ? (
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label={`Update ${preset.name} with the current style`}
-                    title="Update this preset with the current style"
-                    onClick={() => {
-                      updatePreset(preset.id);
-                      toast.success("Preset updated", { description: preset.name });
-                    }}
-                  >
-                    <Save className="size-3.5" />
-                  </Button>
-                ) : null}
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label={`Rename ${preset.name}`}
-                  onClick={() => {
-                    setRenamingId(preset.id);
-                    setRenameValue(preset.name);
-                  }}
-                >
-                  <Pencil className="size-3.5" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label={`Delete ${preset.name}`}
-                  onClick={() => setDeletingId(preset.id)}
-                >
-                  <Trash2 className="size-3.5" />
-                </Button>
+        {STAGE3_PREVIEW_ENABLED ? (
+          <div className="min-w-0 md:pr-8">
+            <div className="space-y-2.5 md:sticky md:top-0">
+              <div className="flex items-baseline justify-between gap-3">
+                <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                  {L("Preview")}
+                </p>
+                <span className="text-[10px] tabular-nums text-muted-foreground">
+                  {previewResolution === "1080x1920" ? "9:16" : "16:9"}
+                </span>
               </div>
-            );
-          })}
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          className="gap-1.5"
-          onClick={() => {
-            setPresetName("");
-            setPresetDialogOpen(true);
-          }}
+              <SubtitleFrame
+                resolution={previewResolution}
+                styles={previewStyles}
+                arabic={previewArabic}
+                thai={previewThai}
+                className="h-[min(46vh,420px)] w-full"
+              />
+              {/* Content-sized, centered: a stretched full-width switch reads
+                  like a form control, not a preview filter. */}
+              <div className="flex justify-center">
+                <SegmentedToggle<"both" | "arabic" | "thai">
+                  label="Preview lines"
+                  value={previewLines}
+                  options={[
+                    { value: "both", label: "Both" },
+                    { value: "arabic", label: L("Arabic") },
+                    { value: "thai", label: L("Thai") },
+                  ]}
+                  onChange={setPreviewLines}
+                  className="w-fit"
+                />
+              </div>
+              {/* Live values, so scrolling the typography cards never loses the
+                  numbers the preview is showing. */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Badge variant="outline" className="text-[10px] font-normal">
+                  {activePreset?.name ?? "Custom style"}
+                  {activePresetModified ? (
+                    <span className="ml-1 text-status-warning">modified</span>
+                  ) : null}
+                </Badge>
+                <Badge variant="outline" className="text-[10px] font-normal tabular-nums">
+                  Arabic {previewStyles.arabic.size}px
+                </Badge>
+                <Badge variant="outline" className="text-[10px] font-normal tabular-nums">
+                  Thai {previewStyles.thai.size}px
+                </Badge>
+              </div>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                {L("A sample line drawn on the export frame with the current typography. The frame never plays and never uses the lecture.")}
+              </p>
+            </div>
+          </div>
+        ) : null}
+
+        <div
+          className={cn(
+            "min-w-0 space-y-5",
+            STAGE3_PREVIEW_ENABLED && "md:border-l md:border-border md:pl-8",
+          )}
         >
-          <Plus className="size-3.5" />
-          Save current as preset
-        </Button>
-      </Section>
-
-      <Separator />
-
-      <Section
-        title="Arabic verification"
-        description="Checks the Uthmani Quranic/Hadith spelling of each Arabic line in Step 3. Used for Arabic spelling checks only and defaults to the Find Clips model."
-      >
-        <SegmentedToggle<"inherit" | "local" | "cloud">
-          label="Verification model"
-          value={verificationProvider.mode}
-          options={[
-            { value: "inherit", label: "Inherit" },
-            { value: "local", label: "This computer" },
-            { value: "cloud", label: "AI service" },
-          ]}
-          onChange={(mode) => updateVerificationProvider({ mode })}
-        />
-        {verificationProvider.mode === "inherit" ? (
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
-            Uses the same engine and model chosen for clip finding. Change them in the
-            Find Clips configuration.
-          </p>
-        ) : (
-          <Field
-            label="Model"
-            hint={
-              verificationProvider.mode === "cloud"
-                ? "From your AI connection"
-                : "Installed Ollama models"
-            }
+          <Section
+            title={L("Style presets")}
+            description={L("One-click themes applied to the preview and the exported subtitles. Open the live style editor to create a new preset or edit an existing one.")}
           >
-            <ModelSelect
-              source={verificationProvider.mode === "cloud" ? "cloud" : "ollama"}
-              label="Arabic verification model"
-              filter="text"
-              value={verificationProvider.model}
-              onChange={(value) => updateVerificationProvider({ model: value })}
+            <div className="space-y-1.5">
+              {presets.map((preset) => {
+                const isActive = preset.id === activePresetId;
+                const drifted = isActive && activePresetModified;
+                return (
+                  <div
+                    key={preset.id}
+                    className={cn(
+                      "flex items-center gap-1.5 rounded-md border px-2.5 py-2",
+                      isActive
+                        ? "border-ring/40 bg-accent/40"
+                        : "border-border bg-card/40",
+                    )}
+                  >
+                    <Button
+                      variant="ghost"
+                      className="h-auto min-w-0 flex-1 flex-col items-start justify-start gap-0 px-0 py-0 text-left font-normal hover:bg-transparent"
+                      onClick={() => applyPreset(preset.id)}
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <span className="truncate text-xs font-medium text-foreground">
+                          {preset.name}
+                        </span>
+                        {drifted ? (
+                          <Badge variant="outline" className="text-[9px] text-status-warning">
+                            {L("Modified")}
+                          </Badge>
+                        ) : null}
+                      </span>
+                      <span className="text-[11px] text-muted-foreground">
+                        Arabic {preset.arabic.fontSize}px · Thai {preset.thai.fontSize}px
+                      </span>
+                    </Button>
+                    {drifted ? (
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`Update ${preset.name} with the current style`}
+                        title="Update this preset with the current style"
+                        onClick={() => {
+                          updatePreset(preset.id);
+                          toast.success("Preset updated", { description: preset.name });
+                        }}
+                      >
+                        <Save className="size-3.5" />
+                      </Button>
+                    ) : null}
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label={`Edit ${preset.name}`}
+                      title="Edit preset style and name"
+                      onClick={() => {
+                        applyPreset(preset.id);
+                        setEditingPresetId(preset.id);
+                        setPresetName(preset.name);
+                        setPresetAspect(project?.export.resolution ?? editor.resolution);
+                        setPresetDialogOpen(true);
+                      }}
+                    >
+                      <Pencil className="size-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label={`Delete ${preset.name}`}
+                      onClick={() => setDeletingId(preset.id)}
+                    >
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => {
+                setEditingPresetId(null);
+                setPresetName("");
+                setPresetAspect(project?.export.resolution ?? editor.resolution);
+                setPresetDialogOpen(true);
+              }}
+            >
+              <Plus className="size-3.5" />
+              {L("Add preset")}
+            </Button>
+          </Section>
+
+          <Separator />
+
+          <Section
+            title={L("Custom fonts")}
+            description={L("Fonts are added to the app so exported subtitles always render Thai and Uthmani Arabic correctly.")}
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={fontInputRef}
+                type="file"
+                accept=".ttf,.otf"
+                multiple
+                className="hidden"
+                onChange={(event) => void handleFontFiles(event.target.files)}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                disabled={importingFonts}
+                onClick={() => fontInputRef.current?.click()}
+              >
+                {importingFonts ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Upload className="size-3.5" />
+                )}
+                {L("Import .TTF / .OTF")}
+              </Button>
+              <span className="text-[11px] text-muted-foreground">
+                {importedFonts.length} custom font
+                {importedFonts.length === 1 ? "" : "s"} available
+              </span>
+            </div>
+
+            {importedFonts.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {importedFonts.map((font) => (
+                  <Badge
+                    key={`${font.family}::${font.style}`}
+                    variant="secondary"
+                    className="font-normal"
+                  >
+                    {font.family}
+                    <span className="ml-1 text-muted-foreground">{font.style}</span>
+                  </Badge>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                {L("No custom fonts imported yet — system fonts are used until you import.")}
+              </p>
+            )}
+
+            {fontsDir ? (
+              <p className="break-all font-mono text-[11px] text-muted-foreground">
+                fontsdir: {fontsDir}
+              </p>
+            ) : null}
+          </Section>
+
+          <Separator />
+
+          <Section
+            title={L("Arabic verification")}
+            description={L("Checks the Uthmani Quranic/Hadith spelling of each Arabic line in Step 3. Used for Arabic spelling checks only and defaults to the Find Clips model.")}
+          >
+            <SegmentedToggle<"inherit" | "local" | "cloud">
+              label={L("Verification model")}
+              value={verificationProvider.mode}
+              options={[
+                { value: "inherit", label: L("Inherit") },
+                { value: "local", label: L("This computer") },
+                { value: "cloud", label: L("AI service") },
+              ]}
+              onChange={(mode) => updateVerificationProvider({ mode })}
             />
-          </Field>
-        )}
-      </Section>
+            {verificationProvider.mode === "inherit" ? (
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                {L("Uses the same engine and model chosen for clip finding. Change them in the Find Clips configuration.")}
+              </p>
+            ) : (
+              <Field
+                label="Model"
+                hint={
+                  verificationProvider.mode === "cloud"
+                    ? L("From your AI connection")
+                    : L("Installed Ollama models")
+                }
+              >
+                <ModelSelect
+                  source={verificationProvider.mode === "cloud" ? "cloud" : "ollama"}
+                  label="Arabic verification model"
+                  filter="text"
+                  value={verificationProvider.model}
+                  onChange={(value) => updateVerificationProvider({ model: value })}
+                />
+              </Field>
+            )}
+          </Section>
+        </div>
+      </div>
 
       {/* ----------------------------- Preset dialogs ----------------------------- */}
+      {/* The style editor: a preset library on the left, the live export frame
+          in the middle, and one language's typography on the right. Edits
+          apply immediately like every setting here; Save snapshots the
+          typography under a name. */}
       <Dialog open={presetDialogOpen} onOpenChange={setPresetDialogOpen}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Save style preset</DialogTitle>
-            <DialogDescription>
-              Snapshots the current Arabic and Thai typography.
-            </DialogDescription>
+        <DialogContent className="flex h-[min(92vh,840px)] flex-col gap-0 overflow-hidden p-0 sm:max-w-6xl">
+          <DialogHeader className="shrink-0 space-y-3 border-b border-border px-5 py-4 pr-12 text-left sm:px-6">
+            <div className="space-y-1">
+              <DialogTitle>
+                {editingPreset ? L("Edit style preset") : L("New style preset")}
+              </DialogTitle>
+              <DialogDescription>
+                {editingPreset
+                  ? "Adjust the typography and name, then save your changes to this preset."
+                  : "Tune the Arabic and Thai lines against a live export preview, then save the look as a preset."}
+              </DialogDescription>
+            </div>
+            <div className="max-w-sm space-y-1.5">
+              <Label
+                htmlFor="preset-name"
+                className="text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground"
+              >
+                {L("Preset name")}
+              </Label>
+              <Input
+                id="preset-name"
+                value={presetName}
+                onChange={(event) => setPresetName(event.target.value)}
+                placeholder={L("e.g. Lecture gold")}
+                aria-label={L("Preset name")}
+                autoFocus
+                className="h-9"
+              />
+            </div>
           </DialogHeader>
-          <Input
-            value={presetName}
-            onChange={(event) => setPresetName(event.target.value)}
-            placeholder="Preset name"
-            autoFocus
-          />
-          <DialogFooter>
-            <Button variant="ghost" size="sm" onClick={() => setPresetDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button
-              size="sm"
-              disabled={!presetName.trim()}
-              onClick={() => {
-                const name = presetName.trim();
-                createPreset(name);
-                setPresetDialogOpen(false);
-                toast.success("Style preset saved", { description: name });
-              }}
-            >
-              Save preset
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
-      <Dialog open={renamingId !== null} onOpenChange={(open) => !open && setRenamingId(null)}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Rename preset</DialogTitle>
-          </DialogHeader>
-          <Input
-            value={renameValue}
-            onChange={(event) => setRenameValue(event.target.value)}
-            placeholder="Preset name"
-          />
-          <DialogFooter>
-            <Button variant="ghost" size="sm" onClick={() => setRenamingId(null)}>
-              Cancel
-            </Button>
-            <Button
-              size="sm"
-              disabled={renameUnchanged}
-              onClick={() => {
-                if (renamingId) renamePreset(renamingId, renameValue);
-                setRenamingId(null);
-                toast.success("Preset renamed", { description: renameValue.trim() });
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3 lg:flex-row lg:overflow-hidden">
+            <PresetLibraryPanel
+              presets={presets}
+              editingPresetId={editingPresetId}
+              onPick={(preset) => {
+                applyPreset(preset.id);
+                setEditingPresetId(preset.id);
+                setPresetName(preset.name);
+                setPresetAspect(project?.export.resolution ?? editor.resolution);
               }}
-            >
-              Rename
-            </Button>
+              onNew={() => {
+                setEditingPresetId(null);
+                setPresetName("");
+              }}
+              className="shrink-0 lg:w-[240px] lg:min-h-0 lg:overflow-hidden"
+            />
+
+            <StylePreviewCanvas
+              aspect={presetAspect}
+              styles={presetStyles}
+              onAspectChange={setPresetAspect}
+              showClip={showClip}
+              onShowClipChange={setShowClip}
+              clipAvailable={clipPreview !== null}
+              clip={clipPreview}
+              offsets={{ arabic: arabic.verticalOffset, thai: thai.verticalOffset }}
+              onNudgeLine={nudgePreviewLine}
+              className="min-h-[320px] flex-1 lg:min-h-0"
+            />
+
+            <StyleControlsPanel
+              arabic={arabic}
+              thai={thai}
+              editor={editor}
+              fontFamilies={fontFamilies}
+              modified={editingPresetModified}
+              onArabicChange={updateArabic}
+              onThaiChange={updateThai}
+              onEditorChange={updateEditor}
+              className="shrink-0 lg:w-[320px] lg:min-h-0 lg:overflow-hidden"
+            />
+          </div>
+
+          <DialogFooter className="shrink-0 flex-col gap-2 border-t border-border px-5 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              {L("Edits apply live while you tune the style.")}
+            </p>
+            <div className="flex items-center gap-2 sm:justify-end">
+              <Button variant="ghost" size="sm" onClick={() => setPresetDialogOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                disabled={!presetName.trim()}
+                onClick={() => {
+                  const name = presetName.trim();
+                  if (editingPresetId) {
+                    updatePreset(editingPresetId);
+                    renamePreset(editingPresetId, name);
+                    setPresetDialogOpen(false);
+                    toast.success(L("Style preset updated"), { description: name });
+                  } else {
+                    createPreset(name);
+                    setPresetDialogOpen(false);
+                    toast.success(L("Style preset saved"), { description: name });
+                  }
+                }}
+              >
+                {editingPreset ? L("Save changes") : L("Save preset")}
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -985,9 +1663,9 @@ function Stage3Config() {
       <Dialog open={deletingId !== null} onOpenChange={(open) => !open && setDeletingId(null)}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>Delete preset?</DialogTitle>
+            <DialogTitle>{L("Delete preset?")}</DialogTitle>
             <DialogDescription>
-              This removes the saved theme. Current typography stays as it is.
+              {L("This removes the saved theme. Current typography stays as it is.")}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -1000,10 +1678,10 @@ function Stage3Config() {
               onClick={() => {
                 if (deletingId) deletePreset(deletingId);
                 setDeletingId(null);
-                toast.success("Preset deleted");
+                toast.success(L("Preset deleted"));
               }}
             >
-              Delete
+              {L("Delete")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1021,9 +1699,7 @@ function Stage4Config() {
   const updateEditor = useSettingsStore((state) => state.updateEditor);
   const project = useProjectStore((state) => state.project);
   const applyExportDefaults = useProjectStore((state) => state.applyExportDefaults);
-  const health = useSettingsStore((state) => state.sidecar.health);
 
-  const acceleration = describeAcceleration(health);
   const templateTokens = unknownTemplateTokens(editor.filenameTemplate);
 
   return (
@@ -1101,86 +1777,14 @@ function Stage4Config() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="th">Thai (with Arabic)</SelectItem>
+              <SelectItem value="th">{L("Thai (with Arabic)")}</SelectItem>
               <SelectItem value="en">English</SelectItem>
-              <SelectItem value="auto">Auto-detect</SelectItem>
+              <SelectItem value="auto">{L("Auto-detect")}</SelectItem>
             </SelectContent>
           </Select>
         </Field>
       </Section>
 
-      <Separator />
-
-      <Section title="Export defaults">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Target resolution">
-            <Select
-              value={editor.resolution}
-              onValueChange={(value) => {
-                const resolution = value as typeof editor.resolution;
-                updateEditor({ resolution });
-                applyExportDefaults({ resolution });
-              }}
-            >
-              <SelectTrigger className="w-full" aria-label="Target resolution">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="1080x1920">1080 × 1920 (9:16)</SelectItem>
-                <SelectItem value="1920x1080">1920 × 1080 (16:9)</SelectItem>
-              </SelectContent>
-            </Select>
-          </Field>
-          <Field label="9:16 framing">
-            <Select
-              value={editor.framing}
-              onValueChange={(value) => {
-                const framing = value as typeof editor.framing;
-                updateEditor({ framing });
-                applyExportDefaults({ framing });
-              }}
-            >
-              <SelectTrigger className="w-full" aria-label="9:16 framing">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="blur-fill">Blurred background fill</SelectItem>
-                <SelectItem value="center-crop">Smart center crop</SelectItem>
-              </SelectContent>
-            </Select>
-          </Field>
-        </div>
-        <SwitchRow
-          label="Hardware encoding (GPU)"
-          description={
-            isGpuEncodingAvailable(acceleration)
-              ? "GPU ready — falls back to CPU encoding automatically if the driver refuses."
-              : "CPU encoding is in use. Enable GPU acceleration in Settings to turn this on."
-          }
-          // Never claim GPU encoding is on while the hardware path is
-          // unavailable; the stored preference is kept for when it is.
-          checked={isGpuEncodingAvailable(acceleration) && editor.useNvenc}
-          disabled={!isGpuEncodingAvailable(acceleration)}
-          onCheckedChange={(checked) => {
-            updateEditor({ useNvenc: checked });
-            applyExportDefaults({ useNvenc: checked });
-          }}
-        />
-        <SwitchRow
-          label="Also export .SRT file"
-          description="Writes a soft-subtitle .srt next to every burned-in MP4."
-          checked={editor.exportSrt}
-          onCheckedChange={(checked) => {
-            updateEditor({ exportSrt: checked });
-            applyExportDefaults({ exportSrt: checked });
-          }}
-        />
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {project
-            ? "These are the defaults for new projects; the change also applies to the open project right away."
-            : "These defaults seed every new project."}
-        </p>
-      </Section>
     </>
   );
 }

@@ -112,25 +112,21 @@ test.describe("settings persistence edges", () => {
     await goToWorkspace(page);
     await openStepConfig(page, 3, "Subtitles");
 
-    // Scope to the configuration pane: the sidebar also has per-session
-    // "Rename …" buttons once a session exists.
-    await page
-      .getByRole("main")
-      .getByRole("button", { name: /^Rename / })
-      .first()
-      .click();
-    const nameInput = page.getByPlaceholder("Preset name");
-    const renameButton = page.getByRole("button", { name: "Rename", exact: true });
+    // Renaming happens in the style editor's edit dialog now.
+    await page.getByRole("button", { name: "Edit Studio default" }).click();
+    const dialog = page.locator('[data-slot="dialog-content"]');
+    const nameInput = dialog.getByRole("textbox", { name: "Preset name" });
+    const saveButton = dialog.getByRole("button", { name: "Save changes" });
 
     // Prefilled with the current name: confirming would be a no-op.
-    await expect(renameButton).toBeDisabled();
+    await expect(nameInput).toHaveValue("Studio default");
     await nameInput.fill("");
-    await expect(renameButton).toBeDisabled();
+    await expect(saveButton).toBeDisabled();
 
     await nameInput.fill("Mobile studio");
-    await expect(renameButton).toBeEnabled();
-    await renameButton.click();
-    await expect(page.getByText("Preset renamed")).toBeVisible();
+    await expect(saveButton).toBeEnabled();
+    await saveButton.click();
+    await expect(page.getByText("Style preset updated")).toBeVisible();
   });
 });
 
@@ -304,15 +300,18 @@ test.describe("settings affordances", () => {
     await goToWorkspace(page);
     await openStepConfig(page, 3, "Subtitles");
 
-    const slider = page.getByRole("slider", { name: "Arabic font size" });
-    await expect(page.getByText("Modified", { exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Edit Studio default" }).click();
+    const dialog = page.locator('[data-slot="dialog-content"]');
+    const slider = dialog.getByRole("slider", { name: "Arabic font size" });
+    const modified = dialog.getByText("Modified", { exact: true });
+    await expect(modified).toHaveCount(0);
 
     await slider.focus();
     await slider.press("ArrowRight");
-    await expect(page.getByText("Modified", { exact: true })).toBeVisible();
+    await expect(modified).toBeVisible();
 
-    await page.getByRole("button", { name: /Update Studio default/ }).click();
-    await expect(page.getByText("Preset updated")).toBeVisible();
+    await dialog.getByRole("button", { name: "Save changes" }).click();
+    await expect(page.getByText("Style preset updated")).toBeVisible();
     await expect(page.getByText("Modified", { exact: true })).toHaveCount(0);
 
     const persisted = await page.evaluate(() =>
@@ -324,17 +323,66 @@ test.describe("settings affordances", () => {
     expect(studio.arabic.fontSize).toBe(persisted.state.arabic.fontSize);
   });
 
+  test("subtitle lines can be nudged and dragged, and the position is saved in the preset", async ({
+    page,
+  }) => {
+    await goToWorkspace(page);
+    await openStepConfig(page, 3, "Subtitles");
+    await page.getByRole("button", { name: "Edit Studio default" }).click();
+    const dialog = page.locator('[data-slot="dialog-content"]');
+    const arabicLine = dialog.getByRole("slider", {
+      name: "Arabic subtitle line vertical position",
+    });
+    const thaiLine = dialog.getByRole("slider", {
+      name: "Thai subtitle line vertical position",
+    });
+
+    await expect(arabicLine).toHaveAttribute("aria-valuenow", "0");
+    await arabicLine.focus();
+    await arabicLine.press("ArrowUp");
+    const arabicOffset = Number(await arabicLine.getAttribute("aria-valuenow"));
+    expect(arabicOffset).toBeGreaterThan(0);
+
+    const thaiBefore = Number(await thaiLine.getAttribute("aria-valuenow"));
+    const box = await thaiLine.boundingBox();
+    if (!box) throw new Error("Thai subtitle line was not rendered");
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 - 30, { steps: 6 });
+    await page.mouse.up();
+    const thaiOffset = Number(await thaiLine.getAttribute("aria-valuenow"));
+    expect(thaiOffset).toBeGreaterThan(thaiBefore);
+
+    await dialog.getByRole("button", { name: "Save changes" }).click();
+    const persisted = await page.evaluate(() =>
+      JSON.parse(window.localStorage.getItem("tafseer.settings.v1") ?? "null"),
+    );
+    const studio = persisted.state.presets.find(
+      (item: { id: string }) => item.id === "studio-default",
+    );
+    expect(studio.arabic.verticalOffset).toBe(arabicOffset);
+    expect(studio.thai.verticalOffset).toBe(thaiOffset);
+
+    // The clip view is view-only and unavailable without an approved Step 3 clip.
+    await page.getByRole("button", { name: "Edit Studio default" }).click();
+    await expect(
+      page.locator('[data-slot="dialog-content"]').getByRole("switch", { name: "Show clip" }),
+    ).toBeDisabled();
+  });
+
   test("a slider read-out accepts an exact typed value and snaps it into range", async ({
     page,
   }) => {
     await goToWorkspace(page);
     await openStepConfig(page, 3, "Subtitles");
+    await page.getByRole("button", { name: "Edit Studio default" }).click();
+    const dialog = page.locator('[data-slot="dialog-content"]');
 
-    const trigger = page.getByRole("button", {
+    const trigger = dialog.getByRole("button", {
       name: "Type an exact value for Arabic font size",
     });
     const input = page.getByRole("textbox", { name: "Arabic font size" });
-    const slider = page.getByRole("slider", { name: "Arabic font size" });
+    const slider = dialog.getByRole("slider", { name: "Arabic font size" });
 
     // A value between two slider positions is reachable by typing it.
     await trigger.click();
@@ -347,6 +395,8 @@ test.describe("settings affordances", () => {
     await input.fill("500");
     await input.press("Enter");
     await expect(slider).toHaveAttribute("aria-valuenow", "120");
+
+    await dialog.getByRole("button", { name: "Cancel" }).click();
 
     // Fractional steps snap to the grid the slider can show.
     await openStepConfig(page, 2, "Find Clips");
@@ -364,25 +414,32 @@ test.describe("settings affordances", () => {
   }) => {
     await goToWorkspace(page);
     await openStepConfig(page, 3, "Subtitles");
+    await page.getByRole("button", { name: "Edit Studio default" }).click();
+    const dialog = page.locator('[data-slot="dialog-content"]');
+    await dialog.getByRole("tab", { name: "Thai" }).click();
 
     // Max chars per line belongs to the Thai defaults, next to the font size it
     // multiplies into a rendered line width.
-    const maxChars = page.getByRole("slider", { name: "Max characters per line" });
+    const maxChars = dialog.getByRole("slider", { name: "Max characters per line" });
     await expect(maxChars).toBeVisible();
 
     // The largest Thai size at 40 chars overruns the .ass text column.
-    await page.getByRole("button", { name: "Type an exact value for Thai font size" }).click();
+    await dialog
+      .getByRole("button", { name: "Type an exact value for Thai font size" })
+      .click();
     await page.getByRole("textbox", { name: "Thai font size" }).fill("96");
     await page.getByRole("textbox", { name: "Thai font size" }).press("Enter");
 
-    const warning = page.getByText(/runs past the subtitle column/);
+    const warning = dialog.getByText(/runs past the subtitle column/);
     await expect(warning).toBeVisible();
 
     // One click applies the measured suggestion and clears the warning.
-    await page.getByRole("button", { name: /^Use \d+ chars$/ }).click();
+    await dialog.getByRole("button", { name: /^Use \d+ chars$/ }).click();
     await expect(warning).toHaveCount(0);
     const shortened = Number(await maxChars.getAttribute("aria-valuenow"));
     expect(shortened).toBeLessThan(40);
+
+    await dialog.getByRole("button", { name: "Cancel" }).click();
 
     // The control no longer lives with the export configuration.
     await openStepConfig(page, 4, "Export");

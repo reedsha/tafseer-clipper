@@ -9,6 +9,7 @@
 
 import { getAccelerationPackState } from "@/lib/acceleration";
 import { getHealth, SIDECAR_URL, type HealthResponse } from "@/lib/api";
+import { getAppVersion } from "@/lib/appVersion";
 import { isTauriRuntime } from "@/lib/media";
 import { getUpdaterStatus } from "@/lib/updater";
 import { useAiActivityStore } from "@/store/aiActivityStore";
@@ -72,14 +73,16 @@ export async function buildDiagnostics(input: DiagnosticsInput): Promise<string>
     }
   }
 
+  const appVersion = await getAppVersion();
+
   const bundle: DiagnosticsBundle = {
     generatedAt: new Date().toISOString(),
     app: {
       name: "Tafseer Clipper",
-      // The sidecar reports the app version it was bundled with; there is no
-      // separate renderer version channel in the six-endpoint contract.
-      version: health?.version ?? null,
-      versionSource: "GET /health",
+      // The shell knows the installed app version; the sidecar only knows the
+      // version of the engine binary it was bundled with, which can lag behind.
+      version: appVersion ?? health?.version ?? null,
+      versionSource: appVersion ? "app shell" : "GET /health",
       runtime: isTauriRuntime() ? "desktop" : "browser",
       platform: typeof navigator === "undefined" ? "unknown" : navigator.platform,
       userAgent: typeof navigator === "undefined" ? "unknown" : navigator.userAgent,
