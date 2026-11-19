@@ -225,6 +225,8 @@ function normalizeProject(raw: unknown): ProjectData {
     sessionGuide: str(project.sessionGuide),
     discovery: normalizeDiscovery(project.discovery),
     clips: normalizeClips(project.clips),
+    // Additive field: absent in every project saved before it existed.
+    trashedClips: normalizeClips(project.trashedClips).slice(-20),
     selectedClipId: strOrNull(project.selectedClipId),
     subtitles,
     export: {

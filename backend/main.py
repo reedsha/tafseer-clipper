@@ -1885,7 +1885,7 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                         cancel_event=cancel_event,
                     )
 
-            if body.group_sentences and (provider is not None or decision_provider is not None):
+            if body.group_sentences:
                 thai_segments = [
                     {
                         "id": segment.id,
@@ -1896,16 +1896,26 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                     for segment in result.segments
                     if segment.language != "ar" and segment.text.strip()
                 ]
-                try:
-                    sentence_map = await analyzer.group_sentences_with_decision(
-                        segments=thai_segments,
-                        provider=provider,
-                        decision_provider=decision_provider,
-                        cancel_event=cancel_event,
-                    )
-                except analyzer.LLMError as exc:
-                    logger.warning("Sentence grouping failed; leaving segments ungrouped: %s", exc)
-                    sentence_map = {}
+                sentence_map: dict[int, int] = {}
+                if provider is not None or decision_provider is not None:
+                    try:
+                        sentence_map = await analyzer.group_sentences_with_decision(
+                            segments=thai_segments,
+                            provider=provider,
+                            decision_provider=decision_provider,
+                            cancel_event=cancel_event,
+                        )
+                    except analyzer.LLMError as exc:
+                        logger.warning(
+                            "Sentence grouping failed; leaving segments ungrouped: %s", exc
+                        )
+                        sentence_map = {}
+                else:
+                    # Offline editing: no model is configured, so the
+                    # deterministic pause/punctuation grouping still gives
+                    # Step 3 real sentence boundaries.
+                    starts, _ = analyzer.group_sentences_heuristic(thai_segments)
+                    sentence_map = analyzer.rebuild_sentence_map(thai_segments, starts)
                 if sentence_map:
                     for segment in result.segments:
                         if segment.id in sentence_map:
@@ -1988,12 +1998,13 @@ async def discover_clips(body: DiscoverRequest, request: Request) -> DiscoverRes
     record = _get_transcript(body.transcript_id)
     decision_provider = _decision_provider(body.decision_provider)
     provider = None
-    if body.provider is not None or decision_provider is None:
-        # Without a clip-scoring slot, the writing model stays mandatory exactly
-        # as today.  With a slot, titles may fall back to neutral text.
-        provider = analyzer.merge_provider(
-            "reasoning", body.provider.to_service() if body.provider else None
-        )
+    if body.provider is not None:
+        provider = analyzer.merge_provider("reasoning", body.provider.to_service())
+    elif decision_provider is None:
+        # No clip-scoring slot either, so the writing model stays mandatory
+        # exactly as today. With only a decision slot, scoring runs and the
+        # titles fall back to neutral text instead of failing the request.
+        provider = analyzer.merge_provider("reasoning", None)
     excluded = [item.model_dump() for item in body.excluded_ranges]
     approved = [item.model_dump() for item in body.approved_exemplars]
     rejected = [item.model_dump() for item in body.rejected_exemplars]
@@ -2042,20 +2053,19 @@ async def discover_clips(body: DiscoverRequest, request: Request) -> DiscoverRes
 @app.post(
     "/verify-arabic",
     response_model=VerifyArabicResponse,
-    summary="Uthmani spelling / Harakat verification with the fast text model",
+    summary="Uthmani spelling / Harakat verification (offline Qur'an gate + text model)",
 )
 async def verify_arabic(body: VerifyArabicRequest) -> VerifyArabicResponse:
     decision_provider = _decision_provider(body.decision_provider)
+    provider = None
     if body.provider is not None:
         provider = analyzer.merge_provider("fast", body.provider.to_service())
     else:
-        # The fast proofreader stays mandatory exactly as today; with a triage
-        # slot configured it becomes optional (every line may be gated away).
+        # A configured default is still preferred, but its absence is no longer
+        # an error: the offline Qur'an gate verifies known verses with no model.
         try:
             provider = analyzer.merge_provider("fast", None)
         except analyzer.LLMError:
-            if decision_provider is None:
-                raise
             provider = None
 
     if body.lines is not None:
@@ -2079,13 +2089,28 @@ async def verify_arabic(body: VerifyArabicRequest) -> VerifyArabicResponse:
             ],
         )
 
-    # The editor's per-line "Check Arabic" keeps today's exact path: one
-    # proofread call, no corpus gate and no triage (a single line gains nothing
-    # from either, and Phase 2.1 pins this shape unchanged).
+    # Per-line "Check Arabic": the corpus gate answers a known verse with no
+    # model round-trip; anything else goes to the proofreader exactly as today.
+    gated = verify_service.corpus_gate(body.arabic_text)
+    if gated is not None:
+        return VerifyArabicResponse(
+            verified_text=gated.verified_text,
+            correction_applied=gated.correction_applied,
+            notes=gated.notes,
+            model=provider.model if provider is not None else "",
+            source=gated.source,
+            reference=gated.reference,
+        )
     if provider is None:
-        raise analyzer.LLMError(
-            "A proofreader model is required to check one line. Choose a fast "
-            "text model in Settings."
+        outcome = verify_service.needs_model_outcome(
+            verify_service.VerifyLine(arabic_text=body.arabic_text)
+        )
+        return VerifyArabicResponse(
+            verified_text=outcome.verified_text,
+            correction_applied=outcome.correction_applied,
+            notes=outcome.notes,
+            model="",
+            source=outcome.source,
         )
     result = await analyzer.verify_arabic(
         arabic_text=body.arabic_text,
@@ -2097,6 +2122,7 @@ async def verify_arabic(body: VerifyArabicRequest) -> VerifyArabicResponse:
         correction_applied=result["correction_applied"],
         notes=result["notes"],
         model=provider.model,
+        source="proofread",
     )
 
 

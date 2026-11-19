@@ -26,6 +26,12 @@ logger = logging.getLogger("tafseer.verify")
 #: Batches larger than this are split; System One requests stay small.
 TRIAGE_BATCH_SIZE = 64
 
+#: Shown for a line that is not an exact Qur'an verse when no text model exists.
+NEEDS_MODEL_NOTE = (
+    "A text model is required to proofread lines that are not exact Qur'an "
+    "verses. Exact verses are still verified offline against the corpus."
+)
+
 
 @dataclass(slots=True)
 class VerifyLine:
@@ -73,6 +79,22 @@ def corpus_gate(text: str) -> VerifyOutcome | None:
     )
 
 
+def needs_model_outcome(line: VerifyLine) -> VerifyOutcome:
+    """Report a line that has no offline answer instead of failing the request.
+
+    The text is returned unchanged: nothing was proofread, so nothing may look
+    verified.  ``source="needs_model"`` tells the editor to configure a text
+    model for this line while the corpus-gated lines stay valid.
+    """
+    return VerifyOutcome(
+        verified_text=line.arabic_text,
+        correction_applied=False,
+        notes=NEEDS_MODEL_NOTE,
+        source="needs_model",
+        cue_id=line.cue_id,
+    )
+
+
 async def verify_lines(
     lines: list[VerifyLine],
     *,
@@ -82,8 +104,9 @@ async def verify_lines(
 ) -> VerifyBatchResult:
     """Verify every line through the escalation chain.
 
-    ``provider`` is the fast generative proofreader; it may be ``None`` when the
-    caller only has a decision model and every line is gated or triaged away.
+    ``provider`` is the fast generative proofreader and may be ``None`` (offline
+    editing): a line the corpus or the triage pass cannot settle is returned
+    unchanged with ``source="needs_model"`` instead of failing the whole batch.
     """
     outcomes: list[VerifyOutcome | None] = [None] * len(lines)
     pending: list[int] = []
@@ -125,10 +148,10 @@ async def verify_lines(
         raise_if_cancelled(cancel_event)
         line = lines[index]
         if provider is None:
-            raise analyzer.LLMError(
-                "A proofreader model is required: the fast check flagged a line "
-                "and no text model is configured."
-            )
+            # Offline: the corpus and triage already answered what they could,
+            # the rest is reported honestly rather than failing the request.
+            outcomes[index] = needs_model_outcome(line)
+            continue
         result = await analyzer.verify_arabic(
             arabic_text=line.arabic_text,
             context_thai=line.context_thai,

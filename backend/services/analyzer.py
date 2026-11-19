@@ -95,12 +95,39 @@ class ProviderOverride:
 # --------------------------------------------------------------------------- #
 # Chat plumbing
 # --------------------------------------------------------------------------- #
+#: Ollama's OpenAI-compatible server defaults to a 2,048-token context, which
+#: silently truncates a lecture-length prompt mid-sentence.  Its compat layer
+#: reads the native ``options`` block from the request body.
+DEFAULT_OLLAMA_NUM_CTX = 8192
+
+
+def is_ollama_endpoint(base_url: str, api_key: str | None) -> bool:
+    """True only for a local/self-hosted Ollama server.
+
+    Cloud gateways must never receive Ollama-only body keys, so the match is
+    deliberately narrow: the standard Ollama port, or a host that names Ollama
+    and sends no API key.
+    """
+    try:
+        parsed = httpx.URL(base_url or "")
+        port = parsed.port
+    except (httpx.InvalidURL, ValueError, TypeError):
+        return False
+    host = (parsed.host or "").strip().lower()
+    if not host:
+        return False
+    if port == 11434:
+        return True
+    return "ollama" in host and not api_key
+
+
 async def chat(
     provider: ProviderConfig,
     messages: list[dict[str, str]],
     *,
     temperature: float = 0.2,
     json_mode: bool = True,
+    transport: httpx.AsyncBaseTransport | None = None,
 ) -> str:
     headers = {"Content-Type": "application/json"}
     if provider.api_key:
@@ -113,9 +140,13 @@ async def chat(
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    if is_ollama_endpoint(provider.base_url, provider.api_key):
+        payload["options"] = {"num_ctx": DEFAULT_OLLAMA_NUM_CTX}
 
     try:
-        async with httpx.AsyncClient(timeout=provider.timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=provider.timeout, transport=transport
+        ) as client:
             response: httpx.Response | None = None
             for attempt in range(2):
                 try:
@@ -305,6 +336,53 @@ def split_transcript_windows(
     return packed
 
 
+#: Re-roll feedback is bounded so a replayed prompt can never blow up.
+EXEMPLAR_MAX_ITEMS = 12
+EXEMPLAR_MAX_CHARS = 400
+
+
+def format_exemplars(
+    approved: list[dict[str, Any]] | None,
+    rejected: list[dict[str, Any]] | None,
+) -> str:
+    """Render the editor's kept/passed clips as prompt guidance.
+
+    Returns an empty string when there is nothing to say, so the prompt of a
+    first discovery pass is byte-identical to before.
+    """
+
+    def rows(items: list[dict[str, Any]] | None) -> list[str]:
+        rendered: list[str] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            text = str(item.get("text") or "").strip()
+            if not title and not text:
+                continue
+            label = title[:80] or "(untitled)"
+            rendered.append(
+                f"- {label}: {text[:EXEMPLAR_MAX_CHARS]}" if text else f"- {label}"
+            )
+            if len(rendered) >= EXEMPLAR_MAX_ITEMS:
+                break
+        return rendered
+
+    blocks: list[str] = []
+    kept = rows(approved)
+    if kept:
+        blocks.append(
+            "PREVIOUSLY APPROVED CLIPS (imitate their shape):\n" + "\n".join(kept)
+        )
+    passed = rows(rejected)
+    if passed:
+        blocks.append(
+            "PREVIOUSLY PASSED CLIPS (do not propose their shape):\n"
+            + "\n".join(passed)
+        )
+    return "\n\n".join(blocks)
+
+
 def build_discover_messages(
     *,
     segments: list[dict[str, Any]],
@@ -316,6 +394,7 @@ def build_discover_messages(
     max_duration: float,
     max_clips: int,
     language: str,
+    exemplar_block: str = "",
 ) -> list[dict[str, str]]:
     system = f"{base_prompt.strip() or DEFAULT_BASE_PROMPT}\n\n{CLIP_SYSTEM_RULES}"
     language_code = normalize_language(language)
@@ -348,6 +427,10 @@ CONSTRAINTS:
 TRANSCRIPT:
 {_format_transcript(segments)}
 """
+    if exemplar_block.strip():
+        # Re-roll feedback rides after the transcript so the window text and its
+        # timestamps stay contiguously readable for the model.
+        user += "\n" + exemplar_block.strip() + "\n"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
@@ -505,6 +588,8 @@ async def _discover_with_prompts(
     max_clips: int = 8,
     language: str = "th",
     cancel_event: threading.Event | None = None,
+    approved_exemplars: list[dict[str, Any]] | None = None,
+    rejected_exemplars: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Propose clips across the *whole* lecture, not just its tail.
 
@@ -517,11 +602,16 @@ async def _discover_with_prompts(
     the response contract is unchanged.  A window whose proportional budget is
     zero is skipped, but ``max_clips >= 1`` and the window count is capped by
     ``max_clips``, so no window is dropped in practice.
+
+    ``approved_exemplars`` / ``rejected_exemplars`` are the editor's Keep &
+    Re-roll feedback; they are rendered once (bounded) and appended to every
+    window prompt so the writing model learns from earlier passes.
     """
     window_budget = min(MAX_DISCOVERY_WINDOWS, max(1, max_clips))
     windows = split_transcript_windows(segments, max_windows=window_budget)
     window_total = len(windows)
     per_window, remainder = divmod(max_clips, window_total)
+    exemplar_block = format_exemplars(approved_exemplars, rejected_exemplars)
 
     proposals: list[Any] = []
     failed_windows = 0
@@ -543,6 +633,7 @@ async def _discover_with_prompts(
             max_duration=max_duration,
             max_clips=budget,
             language=language,
+            exemplar_block=exemplar_block,
         )
         reply = await chat(provider, messages, temperature=0.3)
         try:
@@ -661,6 +752,13 @@ def build_sentence_units(
     return units
 
 
+#: Candidate starts are sampled about three times denser than the old
+#: one-per-capacity stride, so a clip that begins mid-window is still offered.
+CANDIDATE_STRIDE_DIVISOR = 3
+#: A pause at least this long between sentence units is a natural clip start.
+CANDIDATE_PAUSE_SECONDS = 1.5
+
+
 def generate_clip_candidates(
     segments: list[dict[str, Any]],
     *,
@@ -668,13 +766,18 @@ def generate_clip_candidates(
     excluded_ranges: list[dict[str, float]],
     min_duration: float,
     max_duration: float,
-    max_candidates: int = 48,
+    max_candidates: int = 144,
 ) -> list[dict[str, Any]]:
     """Deterministic candidate windows: sentence starts, sentence ends, bounds.
 
     The reasoning LLM no longer invents timestamps from raw text; it only names
     and explains windows that already respect the lecture's sentence and
     duration bounds.
+
+    Starts are sampled about three times denser than a single pass budget, plus
+    every pause, so a clip that begins mid-window is still offered. When that
+    sampling exceeds the budget the starts are thinned *evenly* across the whole
+    lecture - never truncated at a cap, which would leave the tail unsearched.
     """
     units = build_sentence_units(segments)
     if not units:
@@ -682,7 +785,32 @@ def generate_clip_candidates(
     finite_duration = math.isfinite(duration) and duration > 0
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[int, int]] = set()
-    stride = max(1, len(units) // max(1, max_candidates // 2))
+    stride = max(
+        1, len(units) // max(1, (max_candidates // 2) * CANDIDATE_STRIDE_DIVISOR)
+    )
+    start_budget = max(1, max_candidates // 2)
+
+    def even_sample(indexes: list[int], count: int) -> list[int]:
+        """Evenly spaced subset, so a cap never chops off the lecture tail."""
+        if count <= 0 or not indexes:
+            return []
+        if len(indexes) <= count:
+            return list(indexes)
+        step = len(indexes) / count
+        return [indexes[min(len(indexes) - 1, int(pos * step))] for pos in range(count)]
+
+    # Pause-anchored starts are the most likely sentence/clip boundaries, so they
+    # claim the budget first; the denser stride grid fills what is left.
+    paused = [
+        index
+        for index in range(1, len(units))
+        if units[index]["start"] - units[index - 1]["end"] >= CANDIDATE_PAUSE_SECONDS
+    ]
+    chosen: set[int] = {0} | set(even_sample(paused, start_budget))
+    remaining = start_budget - len(chosen)
+    if remaining > 0:
+        chosen |= set(even_sample(list(range(0, len(units), stride)), remaining))
+    starts = sorted(chosen)
 
     def add(start_index: int, end_index: int) -> None:
         if end_index <= start_index:
@@ -709,11 +837,11 @@ def generate_clip_candidates(
                 "id": f"cand{len(candidates)}",
                 "start": round(start, 3),
                 "end": round(end, 3),
-                "text": text[:900],
+                "text": text[:400],
             }
         )
 
-    for start_index in range(0, len(units), stride):
+    for start_index in starts:
         end_index = start_index + 1
         while (
             end_index <= len(units)
@@ -862,6 +990,12 @@ def _exemplar_brief(
     return "\n\n".join(parts)
 
 
+#: Candidate windows per decision call. Kept small so a fast-judgment prompt
+#: stays short; the loop step and the slice must use this one value, because a
+#: step smaller than the slice scores every other window twice.
+CANDIDATE_SCORE_BATCH = 8
+
+
 async def score_clip_candidates(
     candidates: list[dict[str, Any]],
     *,
@@ -873,9 +1007,9 @@ async def score_clip_candidates(
 ) -> list[tasks.CandidateScore]:
     """Score candidate windows in small batches; a failure aborts the pass."""
     scored: list[tasks.CandidateScore] = []
-    for offset in range(0, len(candidates), 16):
+    for offset in range(0, len(candidates), CANDIDATE_SCORE_BATCH):
         raise_if_cancelled(cancel_event)
-        chunk = candidates[offset : offset + 16]
+        chunk = candidates[offset : offset + CANDIDATE_SCORE_BATCH]
         payload = [
             tasks.ClipCandidate(
                 id=str(candidate["id"]),
@@ -1051,9 +1185,38 @@ async def discover_clips(
                 exc,
             )
     if provider is None:
-        raise LLMError(
-            "No clip-finding model is configured. Choose a model in Settings or "
-            "configure a fast-judgment model for clip scoring."
+        # Graceful degradation: with no writing model available, still return the
+        # deterministic candidate windows with neutral titles so clip finding
+        # never hard-fails just because the decision slot misbehaved.
+        logger.warning(
+            "No clip-finding model configured; returning unscored candidate windows."
+        )
+        candidates = generate_clip_candidates(
+            segments,
+            duration=duration,
+            excluded_ranges=excluded_ranges,
+            min_duration=min_duration,
+            max_duration=max_duration,
+        )
+        records: list[dict[str, Any]] = []
+        for candidate in candidates:
+            records.append(
+                {
+                    "start": float(candidate["start"]),
+                    "end": float(candidate["end"]),
+                    "title": str(candidate["text"]).strip()[:60]
+                    or f"Clip {len(records) + 1}",
+                    "rationale": "",
+                    "score": 0.0,
+                }
+            )
+        return sanitize_clips(
+            records,
+            duration=duration,
+            excluded_ranges=excluded_ranges,
+            min_duration=min_duration,
+            max_duration=max_duration,
+            max_clips=max_clips,
         )
     return await _discover_with_prompts(
         segments=segments,
@@ -1068,6 +1231,8 @@ async def discover_clips(
         max_clips=max_clips,
         language=language,
         cancel_event=cancel_event,
+        approved_exemplars=approved_exemplars,
+        rejected_exemplars=rejected_exemplars,
     )
 
 

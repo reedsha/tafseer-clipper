@@ -16,6 +16,7 @@ import {
   FolderOpen,
   Info,
   Loader2,
+  Pencil,
 } from "lucide-react";
 import { cn } from "cn";
 
@@ -23,6 +24,7 @@ import { AiActivityLine } from "@/components/AiActivityLine";
 import { GpuInlineHint } from "@/components/GpuAcceleration";
 import { PromptDrawer } from "@/components/PromptDrawer";
 import { InlineError } from "@/components/InlineError";
+import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { SidecarStatusDot, SIDECAR_STATUS_LABEL } from "@/components/SidecarStatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -42,7 +44,7 @@ import { describeAcceleration } from "@/lib/acceleration";
 import { aiRouteFor } from "@/lib/aiActivity";
 import { buildDiagnostics, copyText } from "@/lib/diagnostics";
 import { formatBytes, formatClock, stripExtension } from "@/lib/format";
-import { useI18n } from "@/lib/i18n";
+import { L, useI18n } from "@/lib/i18n";
 import { relaunchApp } from "@/lib/updater";
 import {
   LECTURE_EXTENSIONS,
@@ -61,7 +63,7 @@ import {
 import { useAiActivityStore } from "@/store/aiActivityStore";
 import { useJobStore, useTaskJob } from "@/store/jobStore";
 import { useProjectStore } from "@/store/projectStore";
-import { useSettingsStore } from "@/store/settingsStore";
+import { useSettingsStore, type EngineMode } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
 
 /* -------------------------------------------------------------------------- */
@@ -73,6 +75,7 @@ export function Step1Ingest() {
   const setStep = useProjectStore((state) => state.setStep);
 
   const transcriptionMode = useSettingsStore((state) => state.transcriptionMode);
+  const setTranscriptionMode = useSettingsStore((state) => state.setTranscriptionMode);
   const cloud = useSettingsStore((state) => state.cloud);
   const cloudStt = useSettingsStore((state) => state.cloudStt);
   const whisper = useSettingsStore((state) => state.whisper);
@@ -645,12 +648,17 @@ export function Step1Ingest() {
                   </p>
                   <div className="mt-2 space-y-1">
                     {activeTranscription ? <AiActivityLine entry={activeTranscription} /> : null}
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      {transcriptionMode === "local"
+                        ? "Extracting the audio, then transcribing it on this computer. The first run also downloads the AI model, so it can take several minutes; later runs are much faster."
+                        : "Extracting the audio, then sending it to your speech service. Nothing else changes while this runs."}
+                    </p>
                   </div>
                   <div className="mt-3 flex items-center justify-between gap-3">
                     <span className="text-xs tabular-nums text-muted-foreground">
                       <NumberFlow
-                        value={Math.floor(elapsed)}
-                        suffix="s elapsed"
+                        value={elapsed >= 60 ? Math.floor(elapsed / 60) : Math.floor(elapsed)}
+                        suffix={elapsed >= 60 ? " min elapsed" : "s elapsed"}
                         format={{ maximumFractionDigits: 0 }}
                       />
                     </span>
@@ -676,10 +684,32 @@ export function Step1Ingest() {
                         {t("step1.transcribe.description")}
                       </p>
                     </div>
-                    <Badge variant="outline" className="shrink-0">
-                      {transcriptionMode === "local" ? "Local" : "Cloud"}
-                    </Badge>
                   </div>
+
+                  {/* The engine belongs on this screen: a first-run editor with
+                      no Cloud connection used to be told to "switch the engine"
+                      without any control in sight. */}
+                  <SegmentedToggle<EngineMode>
+                    label={L("Speech-to-text engine")}
+                    value={transcriptionMode}
+                    options={[
+                      {
+                        value: "local",
+                        label: L("This computer"),
+                        hint: L(
+                          "Transcribes on this machine. The first run downloads the AI files.",
+                        ),
+                      },
+                      {
+                        value: "cloud",
+                        label: L("AI service (cloud)"),
+                        hint: L("Sends the lecture audio to your speech service."),
+                      },
+                    ]}
+                    onChange={(mode) => setTranscriptionMode(mode)}
+                    disabled={busy}
+                    className="mt-3"
+                  />
 
                   <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
                     <SidecarStatusDot status={sidecar.status} />
@@ -757,7 +787,6 @@ export function Step1Ingest() {
             </div>
 
             <aside className="space-y-4">
-
               <section className="rounded-lg border border-border bg-card/40 p-4">
                 <div className="space-y-0.5">
                   <Label
@@ -781,6 +810,26 @@ export function Step1Ingest() {
                   spellCheck={false}
                   className="mt-2 resize-y font-mono text-xs leading-relaxed"
                 />
+              </section>
+
+              <section className="rounded-lg border border-border bg-card/40 p-4">
+                <div className="space-y-0.5">
+                  <h2 className="text-[13px] font-medium text-foreground">
+                    {t("step1.brief.title")}
+                  </h2>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    {t("step1.brief.description")}
+                  </p>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="mt-2 w-full justify-start gap-1.5"
+                  onClick={() => setPromptOpen(true)}
+                >
+                  <Pencil className="size-3.5" />
+                  {L("Clip brief & system prompt")}
+                </Button>
               </section>
             </aside>
           </div>

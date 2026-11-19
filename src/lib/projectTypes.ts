@@ -121,6 +121,13 @@ export interface ProjectData {
   sessionGuide: string;
   discovery: DiscoverySettings;
   clips: ProjectClip[];
+  /**
+   * Clips the editor explicitly discarded, most recent last (capped). They are
+   * never shown or rendered; they only travel with a re-roll request as
+   * `rejected_exemplars` so the AI learns what to avoid. Optional so projects
+   * saved before this field still load.
+   */
+  trashedClips?: ProjectClip[];
   selectedClipId: string | null;
   /** Clip id -> bilingual cues. */
   subtitles: Record<string, SubtitleCue[]>;

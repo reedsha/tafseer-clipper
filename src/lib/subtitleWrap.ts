@@ -113,3 +113,94 @@ export function wrapSubtitleText(text: string, maxChars: number): string {
     .map((line) => wrapLine(line, maxChars))
     .join("\n");
 }
+
+/**
+ * Every offset where a line-break is *safe* for `text`, excluding the two
+ * ends. Thai boundaries come from the dictionary segmenter (Chrome segments
+ * without spaces, so a raw index would land inside a word); Arabic splits on
+ * whitespace, which can never land between a letter and its Harakat.
+ */
+export function wordBoundaries(text: string, kind: "thai" | "arabic"): number[] {
+  const boundaries: number[] = [];
+  if (!text) return boundaries;
+  if (kind === "thai") {
+    const segmenter = getThaiSegmenter();
+    if (segmenter) {
+      let offset = 0;
+      for (const part of segmenter.segment(text)) {
+        offset += part.segment.length;
+        if (offset > 0 && offset < text.length) boundaries.push(offset);
+      }
+      return boundaries;
+    }
+    for (let index = 1; index < text.length; index += 1) {
+      if (/\s/.test(text[index]) || /\s/.test(text[index - 1])) boundaries.push(index);
+    }
+    return boundaries;
+  }
+  for (let index = 1; index < text.length; index += 1) {
+    if (/\s/.test(text[index - 1])) boundaries.push(index);
+  }
+  return boundaries;
+}
+
+/**
+ * The nearest safe break offset to `ratio` of the text length.
+ *
+ * Returns `0` when the text offers no usable break (a single Arabic word, say):
+ * callers treat that as "cannot split here" instead of severing a glyph cluster
+ * or withdrawing a Harakat from its letter.
+ */
+export function splitAtWordBoundary(
+  text: string,
+  ratio: number,
+  kind: "thai" | "arabic",
+): number {
+  if (!text) return 0;
+  const target = Math.round(text.length * (Number.isFinite(ratio) ? ratio : 0.5));
+  let best = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const boundary of wordBoundaries(text, kind)) {
+    const distance = Math.abs(boundary - target);
+    if (distance < bestDistance) {
+      best = boundary;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+/**
+ * Wrap Arabic at `maxChars` per line, joining words with `\N` hard breaks.
+ *
+ * Arabic has inter-word spaces but attached Harakat, so a whitespace split is
+ * the only safe break: a character-count cut would separate a letter from its
+ * vowel marks (or split a word in half) and corrupt the verse. A word longer
+ * than the limit is left whole rather than mutilated.
+ */
+export function wrapArabicText(text: string, maxChars: number): string {
+  if (maxChars <= 0 || !text.trim()) return text;
+  return text
+    .split("\n")
+    .map((line) => {
+      const words = line.trim().split(/\s+/).filter(Boolean);
+      if (words.length === 0) return "";
+      const out: string[] = [];
+      let current = "";
+      for (const word of words) {
+        if (!current) {
+          current = word;
+          continue;
+        }
+        if (current.length + 1 + word.length <= maxChars) {
+          current += ` ${word}`;
+        } else {
+          out.push(current);
+          current = word;
+        }
+      }
+      if (current) out.push(current);
+      return out.join("\n");
+    })
+    .join("\n");
+}

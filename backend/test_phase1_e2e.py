@@ -85,6 +85,10 @@ ARABIC_TEXT_2 = "إِنَّمَا الأَعْمَالُ بِالنِّيَّا�
 
 RESULTS: list[tuple[str, bool, str]] = []
 
+#: Ordinary Arabic that is not an exact Qur'an verse. The offline corpus gate
+#: must decline it, so it exercises the proofreader / ``needs_model`` path.
+PLAIN_ARABIC = "نص عربي تجريبي للاختبار"
+
 
 # --------------------------------------------------------------------------- #
 # Harness helpers
@@ -1079,7 +1083,7 @@ def run_http_checks(
         verify = client.post(
             "/verify-arabic",
             json={
-                "arabic_text": ARABIC_TEXT,
+                "arabic_text": PLAIN_ARABIC,
                 "context_thai": THAI_TEXT,
                 "provider": {"model": "mock-fast"},
             },
@@ -1089,8 +1093,23 @@ def run_http_checks(
             "POST /verify-arabic: round trip through OpenAI-compatible provider",
             verify.status_code == 200
             and verify_body.get("verified_text") == ARABIC_TEXT
-            and verify_body.get("correction_applied") is True,
-            f"{verify.status_code} corrected={verify_body.get('correction_applied')}",
+            and verify_body.get("correction_applied") is True
+            and verify_body.get("source") == "proofread"
+            and verify_body.get("model") == "mock-fast",
+            f"{verify.status_code} corrected={verify_body.get('correction_applied')} "
+            f"source={verify_body.get('source')}",
+        )
+        # An exact Qur'an verse is answered by the offline corpus gate, so it
+        # never costs a proofreader round trip (even with a model configured).
+        gated = client.post("/verify-arabic", json={"arabic_text": ARABIC_TEXT})
+        gated_body = gated.json() if gated.status_code == 200 else {}
+        check(
+            "POST /verify-arabic: an exact Qur'an verse passes the offline corpus gate",
+            gated.status_code == 200
+            and gated_body.get("source") == "quran"
+            and gated_body.get("reference") == "1:1",
+            f"{gated.status_code} source={gated_body.get('source')} "
+            f"reference={gated_body.get('reference')}",
         )
 
         # ---- 5. /discover-clips contract ----------------------------------- #
@@ -1343,6 +1362,27 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         f"{[(segment.start, segment.end) for segment in hinted]} duration={hinted_duration}",
     )
 
+    # A.6: a provider that rejects verbose_json sends one big `text`; it must be
+    # split into sentence-ish pseudo-segments instead of one chunk-long cue.
+    long_plain_text = " ".join(f"ประโยคที่ {index}." for index in range(80))
+    pseudo, pseudo_duration = transcriber._segments_from_cloud_payload(
+        {"text": long_plain_text}, offset=300.0, duration_hint=240.0
+    )
+    check(
+        "transcriber: plain-json text with no segments splits into proportional pseudo-segments",
+        len(pseudo) > 1
+        and pseudo[0].start == 300.0
+        and abs(pseudo[-1].end - 540.0) < 0.01
+        and all(segment.end > segment.start for segment in pseudo)
+        and all(
+            pseudo[index].end <= pseudo[index + 1].start + 1e-9
+            for index in range(len(pseudo) - 1)
+        )
+        and "ประโยคที่ 0." in pseudo[0].text
+        and pseudo_duration == 240.0,
+        f"segments={len(pseudo)} first={pseudo[0].start:.2f} last={pseudo[-1].end:.2f}",
+    )
+
     chat_only = transcriber._cloud_status_error(
         httpx.Response(404, text='{"error":"not found"}'),
         "https://gateway.example/v1/audio/transcriptions",
@@ -1585,6 +1625,337 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         "SESSION TOPIC GUIDE" in last_prompt and "2.0s .. 4.0s" in last_prompt,
     )
 
+    # ---- Phase A.4: exemplars reach the standard discovery prompt ---------- #
+    exemplar_calls_before = len(MockLLMHandler.calls)
+    asyncio.run(
+        analyzer.discover_clips(
+            segments=[{"start": 0.0, "end": 10.0, "text": "เนื้อหาบทเรียนตัฟซีร"}],
+            duration=10.0,
+            base_prompt="",
+            session_guide="",
+            refinement_note="",
+            excluded_ranges=[],
+            provider=provider,
+            min_duration=3.0,
+            max_duration=90.0,
+            max_clips=4,
+            approved_exemplars=[
+                {"start": 0.0, "end": 8.0, "title": "คลิปที่อนุมัติ", "text": "ก" * 900}
+            ],
+            rejected_exemplars=[
+                {"start": 20.0, "end": 28.0, "title": "คลิปที่ผ่าน", "text": "ข"}
+            ],
+        )
+    )
+    exemplar_prompt = json.dumps(MockLLMHandler.calls[-1], ensure_ascii=False)
+    many_exemplars = [
+        {"title": f"คลิป {index}", "text": "ข้อความตัวอย่าง"} for index in range(30)
+    ]
+    exemplar_block = analyzer.format_exemplars(many_exemplars, [])
+    exemplar_rows = [
+        line for line in exemplar_block.splitlines() if line.startswith("- ")
+    ]
+    check(
+        "analyzer: re-roll exemplars reach the standard discovery prompt (bounded)",
+        len(MockLLMHandler.calls) == exemplar_calls_before + 1
+        and "PREVIOUSLY APPROVED CLIPS" in exemplar_prompt
+        and "PREVIOUSLY PASSED CLIPS" in exemplar_prompt
+        and "คลิปที่อนุมัติ" in exemplar_prompt
+        and "ก" * 400 in exemplar_prompt
+        and "ก" * 401 not in exemplar_prompt
+        and len(exemplar_rows) == analyzer.EXEMPLAR_MAX_ITEMS
+        and analyzer.format_exemplars([], []) == "",
+        f"calls={len(MockLLMHandler.calls) - exemplar_calls_before} "
+        f"rows={len(exemplar_rows)}",
+    )
+
+    # ---- Phase A.1: Ollama chats get a real context window ------------------ #
+    captured_chat: dict = {}
+
+    def _capture_chat(request: httpx.Request) -> httpx.Response:
+        captured_chat["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    chat_transport = httpx.MockTransport(_capture_chat)
+
+    def chat_payload(base_url: str, api_key: str | None) -> dict:
+        asyncio.run(
+            analyzer.chat(
+                analyzer.ProviderConfig(
+                    base_url=base_url, api_key=api_key, model="mock-chat", timeout=5.0
+                ),
+                [{"role": "user", "content": "hi"}],
+                transport=chat_transport,
+            )
+        )
+        return dict(captured_chat["payload"])
+
+    ollama_payload = chat_payload("http://localhost:11434/v1", None)
+    cloud_payload = chat_payload("https://api.openai.com/v1", "sk-test")
+    check(
+        "analyzer.chat: Ollama payloads carry options.num_ctx, cloud payloads never do",
+        ollama_payload.get("options", {}).get("num_ctx", 0) >= 8192
+        and analyzer.DEFAULT_OLLAMA_NUM_CTX >= 8192
+        and "options" not in cloud_payload
+        and analyzer.is_ollama_endpoint("http://127.0.0.1:11434/v1", "key")
+        and not analyzer.is_ollama_endpoint("https://api.openai.com/v1", "sk-test"),
+        f"ollama={ollama_payload.get('options')} "
+        f"cloud_options={'options' in cloud_payload}",
+    )
+
+    # ---- Phase A.5: dense candidate starts + pause anchors ------------------ #
+    long_segments: list[dict] = []
+    clock = 0.0
+    for index in range(600):
+        long_segments.append(
+            {"start": clock, "end": clock + 2.0, "text": f"ประโยคที่ {index}."}
+        )
+        clock += 2.5
+    dense = analyzer.generate_clip_candidates(
+        long_segments,
+        duration=clock,
+        excluded_ranges=[],
+        min_duration=15.0,
+        max_duration=90.0,
+    )
+    dense_starts = sorted({candidate["start"] for candidate in dense})
+    old_stride = max(1, len(analyzer.build_sentence_units(long_segments)) // 24)
+    check(
+        "analyzer: candidate starts are ~3x denser and still cover the whole lecture",
+        len(dense_starts) >= 48
+        and dense_starts[1] - dense_starts[0] < old_stride * 2.5
+        and dense_starts[-1] > clock * 0.9
+        and len(dense) <= 144
+        and all(15.0 <= item["end"] - item["start"] <= 90.0 for item in dense),
+        f"starts={len(dense_starts)} spacing={dense_starts[1] - dense_starts[0]}s "
+        f"old_stride={old_stride * 2.5}s last={dense_starts[-1]}s of {clock:.0f}s",
+    )
+
+    paused_segments = [dict(segment) for segment in long_segments]
+    for index in range(500, len(paused_segments)):
+        paused_segments[index]["start"] += 2.0
+        paused_segments[index]["end"] += 2.0
+    paused_units = analyzer.build_sentence_units(paused_segments)
+    paused_window = analyzer.generate_clip_candidates(
+        paused_segments,
+        duration=clock + 2.0,
+        excluded_ranges=[],
+        min_duration=15.0,
+        max_duration=90.0,
+    )
+    pause_start = paused_units[500]["start"]
+    check(
+        "analyzer: a long pause becomes a candidate start (pause-anchored injection)",
+        any(abs(item["start"] - pause_start) < 1e-6 for item in paused_window),
+        f"pause_at={pause_start}s starts={len(paused_window)}",
+    )
+
+    # ---- candidate scoring: one decision call per window, never a double ---- #
+    # The loop step and the slice must agree; a step smaller than the slice makes
+    # consecutive batches overlap, scoring (and paying for) the same window twice.
+    scoring_batches: list[list[str]] = []
+
+    async def _record_batch(_provider, _state, questions, **_kwargs):
+        scoring_batches.append(
+            sorted(name[len("score_") :] for name in questions if name.startswith("score_"))
+        )
+        return {}
+
+    scoring_candidates = [
+        {"id": f"s{index}", "start": index * 10.0, "end": index * 10.0 + 8.0, "text": "x"}
+        for index in range(20)
+    ]
+    real_decide = analyzer.decide
+    analyzer.decide = _record_batch
+    try:
+        scored_windows = asyncio.run(
+            analyzer.score_clip_candidates(
+                scoring_candidates,
+                provider=decision.DecisionProviderConfig(
+                    base_url="http://127.0.0.1:11434/v1",
+                    api_key=None,
+                    model="mock-decision",
+                    timeout=5.0,
+                    wire_format=decision.SYSTEMONE,
+                ),
+                brief="",
+                min_duration=5.0,
+                max_duration=60.0,
+            )
+        )
+    finally:
+        analyzer.decide = real_decide
+    scored_ids = [item.id for item in scored_windows]
+    check(
+        "analyzer: every candidate window is scored exactly once",
+        sorted(scored_ids) == sorted(f"s{index}" for index in range(20)),
+        f"batches={[len(batch) for batch in scoring_batches]} scored={len(scored_ids)}",
+    )
+
+    # ---- Phase A.2: decision-only discovery (no writing model) -------------- #
+    import main as sidecar_main  # noqa: PLC0415 - the sidecar module is heavy
+
+    fake_record = sidecar_main.TranscriptRecord(
+        transcript_id="a2" * 16,
+        source_path=str(source),
+        duration=60.0,
+        language="th",
+        segments=[
+            transcriber.Segment(
+                id=index,
+                start=index * 5.0,
+                end=index * 5.0 + 4.0,
+                text=f"เนื้อหาบทเรียนตัฟซีรตอนที่ {index}",
+                language="th",
+            )
+            for index in range(12)
+        ],
+        created_at=0.0,
+    )
+
+    async def fake_clip_scoring(_provider, _state, questions, **_kwargs):
+        replies: dict[str, decision.Answer] = {}
+        for name in questions:
+            if name.startswith("score_"):
+                replies[name] = decision.Answer(
+                    name=name,
+                    type="score",
+                    score=2.4,
+                    probabilities={"2": 0.6, "3": 0.4},
+                    confidence=0.9,
+                )
+            else:
+                replies[name] = decision.Answer(
+                    name=name,
+                    type="noul",
+                    noul=True,
+                    probabilities={"true": 0.9, "false": 0.1},
+                    confidence=0.9,
+                )
+        return replies
+
+    real_get_transcript = sidecar_main._get_transcript
+    real_analyzer_decide = analyzer.decide
+    sidecar_main._get_transcript = lambda _transcript_id: fake_record
+    analyzer.decide = fake_clip_scoring
+    try:
+        async def decision_only_discovery() -> httpx.Response:
+            transport = httpx.ASGITransport(
+                app=sidecar_main.app, raise_app_exceptions=False
+            )
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://sidecar"
+            ) as async_client:
+                return await async_client.post(
+                    "/discover-clips",
+                    json={
+                        "transcript_id": fake_record.transcript_id,
+                        "decision_provider": {
+                            "base_url": "http://127.0.0.1:9/v1",
+                            "model": "mock-decision",
+                            "endpoint_style": "systemone",
+                        },
+                        "min_duration": 15.0,
+                        "max_duration": 40.0,
+                        "max_clips": 3,
+                    },
+                )
+
+        decision_only = asyncio.run(decision_only_discovery())
+    finally:
+        analyzer.decide = real_analyzer_decide
+        sidecar_main._get_transcript = real_get_transcript
+    decision_only_body = decision_only.json() if decision_only.status_code == 200 else {}
+    check(
+        "POST /discover-clips: a decision-only model returns 200, not a 500",
+        decision_only.status_code == 200
+        and bool(decision_only_body.get("clips"))
+        and decision_only_body.get("model") == "mock-decision",
+        f"{decision_only.status_code} {str(decision_only_body)[:120]}",
+    )
+
+    # ---- Phase A.3: offline sentence grouping inside the endpoint ------------ #
+    # The HTTP fixture has no speech (the tiny Whisper model returns zero
+    # segments), so the endpoint path is driven in-process with a fake
+    # transcriber: no analysis/decision model, grouping must still run.
+    offline_wav = work / "offline_grouping.wav"
+    with wave.open(str(offline_wav), "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(16_000)
+        writer.writeframes(b"\x00\x00" * 16_000)
+
+    offline_transcript = transcriber.TranscriptionResult(
+        segments=[
+            transcriber.Segment(id=0, start=0.0, end=2.0, text="ประโยคแรกของบทเรียน", language="th"),
+            transcriber.Segment(id=1, start=3.0, end=5.0, text="ประโยคที่สองของบทเรียน", language="th"),
+            transcriber.Segment(id=2, start=6.0, end=8.0, text="ประโยคที่สามของบทเรียน", language="th"),
+        ],
+        duration=8.0,
+        language="th",
+        language_probability=1.0,
+        device="cpu",
+        compute_type="int8",
+        model="mock-whisper",
+        vram_unloaded=False,
+    )
+
+    class _FakeEngine:
+        def transcribe(self, _path: Path, **_kwargs):
+            return offline_transcript
+
+    def fake_extract_audio(_source: Path, out: Path) -> Path:
+        target = Path(out)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(offline_wav.read_bytes())
+        return target
+
+    real_extract_audio = transcriber.extract_audio
+    real_compute_peaks = transcriber.compute_waveform_peaks
+    real_engine_for = sidecar_main._engine_for
+    transcriber.extract_audio = fake_extract_audio
+    transcriber.compute_waveform_peaks = lambda _path: [0.5, 0.25]
+    sidecar_main._engine_for = lambda _body: _FakeEngine()
+    try:
+        async def offline_transcription() -> "httpx.Response":
+            transport = httpx.ASGITransport(
+                app=sidecar_main.app, raise_app_exceptions=False
+            )
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://sidecar"
+            ) as async_client:
+                return await async_client.post(
+                    "/extract-and-transcribe",
+                    json={
+                        "file_path": str(source),
+                        "analysis_provider": None,
+                        "decision_provider": None,
+                        "group_sentences": True,
+                        "auto_unload": False,
+                    },
+                )
+
+        offline_run = asyncio.run(offline_transcription())
+    finally:
+        transcriber.extract_audio = real_extract_audio
+        transcriber.compute_waveform_peaks = real_compute_peaks
+        sidecar_main._engine_for = real_engine_for
+
+    offline_body = offline_run.json() if offline_run.status_code == 200 else {}
+    offline_ids = [
+        segment.get("sentence_id") for segment in offline_body.get("segments", [])
+    ]
+    check(
+        "POST /extract-and-transcribe: offline (no model) sentence grouping fills sentence_id",
+        offline_run.status_code == 200
+        and len(offline_ids) == 3
+        and all(value is not None for value in offline_ids)
+        and offline_ids[0] == 0
+        and offline_ids == sorted(offline_ids)
+        and offline_ids[-1] == 2,
+        f"{offline_run.status_code} sentence_ids={offline_ids}",
+    )
+
     # ---- cooperative cancellation (services/cancel.py) ---------------------- #
     # The HTTP handlers set a shared `threading.Event` on client disconnect and
     # the services raise JobCancelled at their natural boundaries.
@@ -1734,6 +2105,38 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
     check(
         "recitation: a Thai second pass is rejected; original Thai is kept",
         len(kept) == 1 and kept[0].text == "ประโยคเดิม" and kept[0].language == "th",
+    )
+
+    # A.7: the isolated Arabic slice is padded, or Whisper clips the opening and
+    # closing syllables of the verse.
+    recorded_slices: list[tuple[float, float]] = []
+    real_slice_wav = recitation.slice_wav
+
+    def recording_slice(
+        source_path: Path, slice_start: float, slice_end: float, target: Path
+    ) -> None:
+        recorded_slices.append((slice_start, slice_end))
+        real_slice_wav(source_path, slice_start, slice_end, target)
+
+    recitation.slice_wav = recording_slice
+    try:
+        asyncio.run(
+            recitation.recover_arabic(
+                wav_path=wave_path,
+                segments=originals,
+                spans=spans,
+                transcribe_span=fake_arabic,
+            )
+        )
+    finally:
+        recitation.slice_wav = real_slice_wav
+    check(
+        "recitation: the isolated Arabic slice keeps acoustic padding on both sides",
+        len(recorded_slices) == 1
+        and abs(recorded_slices[0][0] - 0.0) < 1e-9
+        and abs(recorded_slices[0][1] - (1.8 + recitation.RECITATION_PAD_SECONDS)) < 1e-9
+        and recitation.RECITATION_PAD_SECONDS >= 0.2,
+        f"slices={recorded_slices}",
     )
 
     # ====================================================================== #
@@ -2640,28 +3043,102 @@ def run_decision_checks(work: Path, source: Path) -> None:
             f"batches={[len(call) for call in decide_calls]}",
         )
 
-        # D6: a flagged line without any text model is an honest error.
+        # D6: a flagged line without any text model is reported honestly, never
+        # dropped and never "all good" (offline editing must still batch-check).
         decide_calls.clear()
         decision.decide = make_triage(flag_index=0)
-        missing_provider: Exception | None = None
-        try:
-            asyncio.run(
-                verify_service.verify_lines(
-                    [verify_service.VerifyLine(arabic_text=not_a_verse)],
-                    provider=None,
-                    decision_provider=provider,
-                )
+        missing = asyncio.run(
+            verify_service.verify_lines(
+                [verify_service.VerifyLine(arabic_text=not_a_verse, cue_id="cue-x")],
+                provider=None,
+                decision_provider=provider,
             )
-        except Exception as exc:  # noqa: BLE001 - asserting the type
-            missing_provider = exc
+        )
         check(
-            "verify: a flagged line with no proofreader raises LLMError (502), never 'all good'",
-            isinstance(missing_provider, analyzer.LLMError),
-            type(missing_provider).__name__ if missing_provider else "no exception",
+            "verify: a flagged line with no proofreader reports needs_model, text unchanged",
+            len(missing.lines) == 1
+            and missing.lines[0].source == "needs_model"
+            and missing.lines[0].verified_text == not_a_verse
+            and missing.lines[0].correction_applied is False
+            and missing.lines[0].cue_id == "cue-x"
+            and missing.proofread_lines == 0,
+            f"source={missing.lines[0].source if missing.lines else 'none'} "
+            f"proof={missing.proofread_lines}",
         )
     finally:
         decision.decide = real_decide
         analyzer.verify_arabic = real_verify_arabic
+
+    # ---- Offline corpus verification with no text model (plan D.5) ---------- #
+    # The sidecar's default env configures a fast model, so "no model" is
+    # simulated by clearing TAFSEER_FAST_MODEL for these in-process requests.
+    import main as sidecar_main  # noqa: PLC0415 - the sidecar module is heavy
+
+    async def verify_post(payload: dict) -> "httpx.Response":
+        transport = httpx.ASGITransport(
+            app=sidecar_main.app, raise_app_exceptions=False
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://sidecar"
+        ) as async_client:
+            return await async_client.post("/verify-arabic", json=payload)
+
+    saved_fast_model = os.environ.pop("TAFSEER_FAST_MODEL", None)
+    proofread_calls.clear()
+    analyzer.verify_arabic = fake_proofread
+    try:
+        corpus_only = asyncio.run(verify_post({"arabic_text": ARABIC_TEXT}))
+        plain_only = asyncio.run(verify_post({"arabic_text": PLAIN_ARABIC}))
+        mixed = asyncio.run(
+            verify_post(
+                {
+                    "lines": [
+                        {"arabic_text": ARABIC_TEXT, "cue_id": "cue-quran"},
+                        {"arabic_text": PLAIN_ARABIC, "cue_id": "cue-plain"},
+                    ]
+                }
+            )
+        )
+    finally:
+        analyzer.verify_arabic = real_verify_arabic
+        if saved_fast_model is not None:
+            os.environ["TAFSEER_FAST_MODEL"] = saved_fast_model
+
+    corpus_body = corpus_only.json() if corpus_only.status_code == 200 else {}
+    plain_body = plain_only.json() if plain_only.status_code == 200 else {}
+    mixed_body = mixed.json() if mixed.status_code == 200 else {}
+    mixed_lines = mixed_body.get("lines") or []
+    mixed_by_cue = {line.get("cue_id"): line for line in mixed_lines}
+    check(
+        "POST /verify-arabic: an exact Qur'an verse needs no text model (offline gate)",
+        corpus_only.status_code == 200
+        and corpus_body.get("source") == "quran"
+        and corpus_body.get("reference") == "1:1"
+        and corpus_body.get("model") == "",
+        f"{corpus_only.status_code} source={corpus_body.get('source')} "
+        f"reference={corpus_body.get('reference')}",
+    )
+    check(
+        "POST /verify-arabic: a non-corpus line with no model reports needs_model, text unchanged",
+        plain_only.status_code == 200
+        and plain_body.get("source") == "needs_model"
+        and plain_body.get("verified_text") == PLAIN_ARABIC
+        and plain_body.get("correction_applied") is False
+        and bool(plain_body.get("notes"))
+        and proofread_calls == [],
+        f"{plain_only.status_code} source={plain_body.get('source')} "
+        f"proof={len(proofread_calls)}",
+    )
+    check(
+        "POST /verify-arabic: a mixed batch completes offline (quran + needs_model)",
+        mixed.status_code == 200
+        and len(mixed_lines) == 2
+        and mixed_by_cue.get("cue-quran", {}).get("source") == "quran"
+        and mixed_by_cue.get("cue-plain", {}).get("source") == "needs_model"
+        and mixed_by_cue.get("cue-plain", {}).get("verified_text") == PLAIN_ARABIC
+        and proofread_calls == [],
+        f"{mixed.status_code} sources={[line.get('source') for line in mixed_lines]}",
+    )
 
     # ---- E. recitation decisions + escalator ------------------------------ #
     recitation_segments = [

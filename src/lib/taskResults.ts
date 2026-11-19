@@ -14,7 +14,12 @@
  */
 
 import { rangesOverlap } from "@/lib/clipMath";
-import type { ProjectClip, ProjectData, TranscriptData } from "@/lib/projectTypes";
+import type {
+  ProjectClip,
+  ProjectData,
+  SubtitleCue,
+  TranscriptData,
+} from "@/lib/projectTypes";
 
 export type TaskKind = "transcribe" | "discovery" | "verify";
 
@@ -37,8 +42,19 @@ export type TaskResultPayload =
   | {
       kind: "verify";
       clipId: string;
-      /** Only the Arabic text is written; other cue fields stay untouched. */
-      lines: Array<{ cueId: string; arabic: string }>;
+      /**
+       * One entry per verified line. The text and the corpus provenance are
+       * written together: a line can be confirmed *without* a correction, and
+       * dropping `source`/`reference` for those is what left verified verses
+       * unbadged in Step 3.
+       */
+      lines: Array<{
+        cueId: string;
+        arabic: string;
+        source?: string;
+        reference?: string | null;
+        confidence?: number | null;
+      }>;
     };
 
 interface PendingResult {
@@ -79,6 +95,11 @@ function applyDiscovery(
     (clip) =>
       !approved.some((kept) => rangesOverlap(clip.start, clip.end, kept.start, kept.end)),
   );
+  // An empty re-roll means "nothing more was found", never "throw away the deck
+  // the editor is reviewing". This also covers "Start over": a clean search
+  // that returns nothing must not delete the kept clips and their hand-edited
+  // subtitles, which no rebuild could restore.
+  if (fresh.length === 0) return project;
   const merged = [...approved, ...fresh].sort((a, b) => a.start - b.start);
   const selectedClipId = merged.some((clip) => clip.id === project.selectedClipId)
     ? project.selectedClipId
@@ -98,13 +119,23 @@ function applyVerify(
 ): ProjectData {
   const cues = project.subtitles[payload.clipId];
   if (!cues?.length) return project;
-  const byCue = new Map(payload.lines.map((line) => [line.cueId, line.arabic]));
+  const byCue = new Map(payload.lines.map((line) => [line.cueId, line]));
   let changed = false;
   const next = cues.map((cue) => {
-    const arabic = byCue.get(cue.id);
-    if (!arabic || arabic === cue.arabic) return cue;
+    const line = byCue.get(cue.id);
+    if (!line) return cue;
+    const patch: Partial<SubtitleCue> = {};
+    // A confirmed line keeps its text; only the provenance is new. Treating
+    // "same text" as "nothing to do" is what hid every corpus match.
+    if (line.arabic && line.arabic !== cue.arabic) patch.arabic = line.arabic;
+    if (line.source && line.source !== cue.source) patch.source = line.source;
+    if (line.reference && line.reference !== cue.reference) patch.reference = line.reference;
+    if (typeof line.confidence === "number" && line.confidence !== cue.confidence) {
+      patch.confidence = line.confidence;
+    }
+    if (Object.keys(patch).length === 0) return cue;
     changed = true;
-    return { ...cue, arabic };
+    return { ...cue, ...patch };
   });
   if (!changed) return project;
   return { ...project, subtitles: { ...project.subtitles, [payload.clipId]: next } };
