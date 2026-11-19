@@ -1,7 +1,7 @@
 {
   "name": "tafseer-clipper",
   "private": true,
-  "version": "0.2.0-beta",
+  "version": "0.2.1-beta",
   "type": "module",
   "packageManager": "pnpm@11.28.12",
   "engines": {
