@@ -428,4 +428,119 @@ test.describe("batched Arabic check", () => {
     await expect(page.locator("[data-cue-row]").first()).toContainText("الرَّحِيمِ");
     await expect(page.locator("[data-cue-row]").nth(1)).not.toContainText("الرَّحِيمِ");
   });
+
+  test("offline check sends no provider and reports the lines that need a model", async ({
+    page,
+  }) => {
+    // Nothing is configured at all: the batch must still be sent with
+    // provider: null so the sidecar can gate exact Qur'an verses offline.
+    const now = Date.now();
+    await seedProjectFile(page, {
+      schemaVersion: 1,
+      id: "e2e-offline-verify",
+      name: "Offline check lecture",
+      sourcePath: null,
+      sourceFileName: "offline.mp4",
+      duration: 10,
+      step: 3,
+      transcriptId: "e2e-offline-transcript",
+      transcript: {
+        language: "th",
+        segments: [
+          { id: 0, start: 0, end: 2, text: "ประโยคแรก", language: "th" },
+          { id: 1, start: 4, end: 6, text: "ประโยคที่สอง", language: "th" },
+        ],
+      },
+      audioPath: null,
+      basePrompt: "",
+      promptPresetId: null,
+      sessionGuide: "",
+      discovery: { minDuration: 15, maxDuration: 90, maxClips: 8 },
+      clips: [
+        {
+          id: "offline-clip",
+          title: "Corpus and prose",
+          rationale: "",
+          start: 0,
+          end: 10,
+          speechStart: 0,
+          speechEnd: 10,
+          approved: true,
+          createdAt: now,
+        },
+      ],
+      selectedClipId: "offline-clip",
+      subtitles: {
+        "offline-clip": [
+          // Arabic-only: a corpus line shows up in the review strip.
+          { id: "cue-a", start: 0, end: 2, arabic: "بِسْمِ اللَّهِ", thai: "" },
+          { id: "cue-b", start: 4, end: 6, arabic: "الْحَمْدُ لِلَّهِ", thai: "มวลการสรรเสริญ" },
+        ],
+      },
+      export: {
+        resolution: "1080x1920",
+        framing: "blur-fill",
+        useNvenc: true,
+        exportSrt: true,
+        filenameTemplate: "{LectureName}_Clip{01}_{Title}.mp4",
+        outputDir: null,
+      },
+      createdAt: now,
+      updatedAt: now,
+      lastActivityAt: now,
+    });
+
+    const requests: Record<string, unknown>[] = [];
+    await page.route("**/verify-arabic", async (route) => {
+      requests.push(route.request().postDataJSON() as Record<string, unknown>);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          verified_text: "",
+          correction_applied: false,
+          notes: "",
+          model: "",
+          lines: [
+            {
+              cue_id: "cue-a",
+              verified_text: "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ",
+              correction_applied: false,
+              notes: "Matches the Qur'an corpus (1:1).",
+              source: "quran",
+              reference: "1:1",
+              confidence: 1,
+            },
+            {
+              cue_id: "cue-b",
+              verified_text: "الْحَمْدُ لِلَّهِ",
+              correction_applied: false,
+              notes: "A text model is required to proofread this line.",
+              source: "needs_model",
+            },
+          ],
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Offline check lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Check 2 Arabic" }).click();
+
+    // One offline run: the corpus line counts, the prose line asks for a model.
+    await expect(page.getByText("Checked 1 of 2 lines offline")).toBeVisible();
+    expect(requests).toHaveLength(1);
+    expect((requests[0] as { provider?: unknown }).provider).toBeNull();
+
+    // The verified corpus line keeps its text and gains its citation.
+    await expect(page.getByText(/1 Arabic passage/)).toBeVisible();
+    await page.getByRole("button", { name: "Review", exact: true }).click();
+    await expect(page.getByRole("dialog").getByText("Qur'an 1:1")).toBeVisible();
+  });
 });

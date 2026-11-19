@@ -21,6 +21,7 @@ import contextlib
 import gc
 import logging
 import math
+import re
 import subprocess
 import sys
 import threading
@@ -650,6 +651,14 @@ CLOUD_STT_MAX_UPLOAD_BYTES = 24 * 1024 * 1024
 #: request comfortably inside the 300 s timeout on slow providers.
 CLOUD_STT_MAX_CHUNK_SECONDS = 10 * 60
 
+#: A provider that answers plain ``json`` (no ``segments``) still has to yield a
+#: usable timeline. Text longer than this is split into sentence-ish
+#: pseudo-segments with proportional timestamps instead of one chunk-long cue.
+CLOUD_STT_PLAIN_SPLIT_MIN_CHARS = 500
+#: Cap for one pseudo-segment when the text carries no sentence punctuation.
+CLOUD_STT_PLAIN_CHUNK_CHARS = 400
+_PLAIN_SENTENCE_BREAK = re.compile(r"(?<=[.!?…。！？])\s+|\s*\n+\s*")
+
 #: The Vercel AI Gateway is OpenAI-compatible for chat but serves speech-to-text
 #: on its own protocol endpoint: ``POST /v4/ai/transcription-model`` with the
 #: audio base64-encoded in a JSON body. ``/v1/audio/transcriptions`` is a hard
@@ -1102,6 +1111,29 @@ async def transcribe_cloud(
     )
 
 
+def _split_plain_cloud_text(text: str) -> list[str]:
+    """Split a segment-less provider reply into sentence-ish chunks.
+
+    Sentence-ending punctuation (and hard newlines) are the boundaries; a run
+    with no punctuation at all is cut near a space so no chunk becomes a
+    multi-minute cue again.
+    """
+    pieces = [
+        piece.strip() for piece in _PLAIN_SENTENCE_BREAK.split(text) if piece.strip()
+    ]
+    chunks: list[str] = []
+    for piece in pieces:
+        while len(piece) > CLOUD_STT_PLAIN_CHUNK_CHARS:
+            cut = piece.rfind(" ", 0, CLOUD_STT_PLAIN_CHUNK_CHARS)
+            if cut <= 0:
+                cut = CLOUD_STT_PLAIN_CHUNK_CHARS
+            chunks.append(piece[:cut].strip())
+            piece = piece[cut:].strip()
+        if piece:
+            chunks.append(piece)
+    return chunks
+
+
 def _segments_from_cloud_payload(
     payload: dict,
     *,
@@ -1112,7 +1144,9 @@ def _segments_from_cloud_payload(
 
     ``offset`` shifts a chunk's relative timestamps onto the lecture timeline;
     ``duration_hint`` is the chunk's known length, used when a provider answers
-    with plain ``json`` (no duration, no segments). Ids are renumbered by the
+    with plain ``json`` (no duration, no segments). A plain-``json`` reply whose
+    text is long is split into sentence-ish pseudo-segments with proportional
+    timestamps, so Step 2 still sees clip boundaries. Ids are renumbered by the
     caller after all chunks are merged.
     """
     reported_duration = float(payload.get("duration", 0.0) or 0.0)
@@ -1137,15 +1171,43 @@ def _segments_from_cloud_payload(
     else:
         text = (payload.get("text") or "").strip()
         if text:
-            segments.append(
-                Segment(
-                    id=0,
-                    start=offset,
-                    end=offset + duration,
-                    text=text,
-                    language=payload.get("language"),
-                )
+            chunks = (
+                _split_plain_cloud_text(text)
+                if len(text) > CLOUD_STT_PLAIN_SPLIT_MIN_CHARS and duration > 0
+                else [text]
             )
+            if len(chunks) > 1:
+                logger.warning(
+                    "Cloud STT returned plain text without segments; splitting "
+                    "proportionally into %d pseudo-segments",
+                    len(chunks),
+                )
+                # Characters stand in for speaking time across this chunk's
+                # [offset, offset + duration] window.
+                total_chars = max(1, sum(len(chunk) for chunk in chunks))
+                cursor = offset
+                for index, chunk in enumerate(chunks):
+                    share = duration * len(chunk) / total_chars
+                    segments.append(
+                        Segment(
+                            id=index,
+                            start=round(cursor, 3),
+                            end=round(cursor + share, 3),
+                            text=chunk,
+                            language=payload.get("language"),
+                        )
+                    )
+                    cursor += share
+            else:
+                segments.append(
+                    Segment(
+                        id=0,
+                        start=offset,
+                        end=offset + duration,
+                        text=text,
+                        language=payload.get("language"),
+                    )
+                )
     return segments, duration
 
 

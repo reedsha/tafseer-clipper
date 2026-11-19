@@ -30,6 +30,9 @@ import { useSettingsStore, type EditorDefaults } from "./settingsStore";
 
 const MAX_RECENT_SESSIONS = 30;
 
+/** Discarded clips kept per project as negative examples for a re-roll. */
+const MAX_TRASHED_CLIPS = 20;
+
 export interface CreateProjectInput {
   name?: string;
   sourcePath?: string | null;
@@ -219,6 +222,43 @@ function rebaseCuesForMovedClip(
   if (!prev || !next) return subtitles;
   const delta = prev.start - next.start;
   return rebaseCuesForClip(subtitles, prev.id, delta, next.end - next.start);
+}
+
+/**
+ * Pure: keep one clip's cues inside `[0, duration]`.
+ *
+ * Shortening a clip in Step 2 used to leave cues past the new end: they could
+ * never be shown, the tail was silently skipped, and the only visible remedy
+ * was "Build subtitles", which discards every hand edit. Cues that start after
+ * the new end are dropped; the ones that straddle it are clamped so their text
+ * still appears once. Returns the same object when nothing needed clamping.
+ */
+export function clampCuesToDuration(
+  subtitles: Record<string, SubtitleCue[]>,
+  clipId: string,
+  duration: number,
+): Record<string, SubtitleCue[]> {
+  const cues = subtitles[clipId];
+  if (!cues?.length) return subtitles;
+  const limit = Math.max(0, duration);
+  const next: SubtitleCue[] = [];
+  let changed = false;
+  for (const cue of cues) {
+    if (cue.start >= limit) {
+      changed = true;
+      continue;
+    }
+    const start = Math.min(cue.start, Math.max(0, limit - MIN_CUE_WINDOW));
+    const end = Math.min(limit, Math.max(cue.end, start + MIN_CUE_WINDOW));
+    if (start === cue.start && end === cue.end) {
+      next.push(cue);
+      continue;
+    }
+    changed = true;
+    next.push({ ...cue, start, end });
+  }
+  if (!changed) return subtitles;
+  return { ...subtitles, [clipId]: next };
 }
 
 /**
@@ -425,14 +465,28 @@ export const useProjectStore = create<ProjectState>()(
             clip.id === id ? { ...clip, ...patch } : clip,
           );
           let subtitles = state.project.subtitles;
+          const nextClip = clips.find((clip) => clip.id === id);
           if (
             prev &&
             typeof patch.start === "number" &&
             Number.isFinite(patch.start) &&
             Math.abs(prev.start - patch.start) >= CUE_REBASE_EPSILON
           ) {
-            const next = clips.find((clip) => clip.id === id);
-            subtitles = rebaseCuesForMovedClip(subtitles, prev, next);
+            subtitles = rebaseCuesForMovedClip(subtitles, prev, nextClip);
+          }
+          // Shortening the cut-out leaves cues hanging past the end: they are
+          // orphaned, never rendered, and the only visible remedy used to be a
+          // full rebuild. Drop/clamp them here instead.
+          if (
+            prev &&
+            nextClip &&
+            prev.end - prev.start > nextClip.end - nextClip.start + CUE_REBASE_EPSILON
+          ) {
+            subtitles = clampCuesToDuration(
+              subtitles,
+              id,
+              nextClip.end - nextClip.start,
+            );
           }
           return {
             project: touch(state.project, { clips, subtitles }),
@@ -456,13 +510,20 @@ export const useProjectStore = create<ProjectState>()(
       removeClip: (id) =>
         set((state) => {
           if (!state.project) return {};
+          const removed = state.project.clips.find((clip) => clip.id === id);
           const clips = state.project.clips.filter((clip) => clip.id !== id);
           const subtitles = { ...state.project.subtitles };
           delete subtitles[id];
+          // A discarded clip is the strongest negative example a re-roll can
+          // get, so it is kept (bounded) instead of vanishing without trace.
+          const trashedClips = removed
+            ? [...(state.project.trashedClips ?? []), removed].slice(-MAX_TRASHED_CLIPS)
+            : state.project.trashedClips;
           return {
             project: touch(state.project, {
               clips,
               subtitles,
+              ...(trashedClips ? { trashedClips } : {}),
               selectedClipId:
                 state.project.selectedClipId === id
                   ? (clips[0]?.id ?? null)

@@ -27,7 +27,7 @@ RECITATION_LEGEND: dict[str, str] = {
 MIN_CONFIDENT = 0.6
 
 #: System One requests carry a bounded number of questions each.
-RECITATION_BATCH_SIZE = 64
+RECITATION_BATCH_SIZE = 24
 SENTENCE_BATCH_SIZE = 24
 
 
@@ -272,7 +272,7 @@ def clip_scoring_request(
     for candidate in usable:
         blocks.append(
             f"#{candidate.id} [{candidate.start:.1f}-{candidate.end:.1f}] "
-            f"({candidate.end - candidate.start:.0f}s)\n{candidate.text.strip()}"
+            f"({candidate.end - candidate.start:.0f}s)\n{candidate.text.strip()[:300]}"
         )
     state = (
         "Candidate clip windows from one Thai Tafseer lecture. Score each window "

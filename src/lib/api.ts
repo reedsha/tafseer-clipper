@@ -556,9 +556,11 @@ export interface VerifyArabicResponse {
   correction_applied: boolean;
   notes: string;
   model: string;
-  /** `quran` (corpus exact), `triage` (fast check passed), `proofread`. */
+  /** `quran` (corpus exact), `triage` (fast check passed), `proofread`, `needs_model`. */
   source?: string;
   reference?: string | null;
+  /** Corpus-match score, when the sidecar reports one. */
+  confidence?: number | null;
 }
 
 export interface VerifyArabicLineResult {

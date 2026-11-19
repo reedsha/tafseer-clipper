@@ -70,8 +70,10 @@ test.describe("Step 2 search orchestration", () => {
     await seedProjectFile(page, NO_CLIPS_PROJECT);
 
     let discoveryCalls = 0;
+    const discoveryBodies: Record<string, unknown>[] = [];
     await page.route("**/discover-clips", async (route) => {
       discoveryCalls += 1;
+      discoveryBodies.push(route.request().postDataJSON() as Record<string, unknown>);
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -87,10 +89,27 @@ test.describe("Step 2 search orchestration", () => {
       .click();
     await expect(page.getByRole("heading", { name: "Find clips" })).toBeVisible();
     await expect(page.getByText("No clips proposed yet")).toBeVisible();
+
+    // The search setup exposes the per-lecture topic focus and the target count,
+    // and both travel with the request.
+    const topic = page.getByLabel("Topic focus for this lecture");
+    await expect(topic).toBeVisible();
+    const toFind = page.getByLabel("To find");
+    await expect(toFind).toHaveValue("8");
+    await topic.fill("Focus on patience and gratitude");
+    await toFind.fill("5");
+    await toFind.press("Tab");
+
     await page.waitForTimeout(500);
     expect(discoveryCalls, "resume must not start a search").toBe(0);
 
     await page.getByRole("button", { name: "Find clips", exact: true }).last().click();
     await expect.poll(() => discoveryCalls).toBe(1);
+    expect(discoveryBodies[0]).toMatchObject({
+      session_guide: "Focus on patience and gratitude",
+      max_clips: 5,
+    });
+    // An empty result reads as "nothing more found" and keeps the deck as is.
+    await expect(page.getByText("No new clips found")).toBeVisible();
   });
 });

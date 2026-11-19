@@ -77,7 +77,7 @@ import { deliverTaskResult, useJobStore, useTaskJob } from "@/store/jobStore";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
-import { wrapSubtitleText } from "@/lib/subtitleWrap";
+import { splitAtWordBoundary, wrapSubtitleText } from "@/lib/subtitleWrap";
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
@@ -366,6 +366,16 @@ export function Step3Subtitles() {
     const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
     const cue = latest.find((item) => item.id === cueId);
     if (!cue) return;
+    // Restoring without a saved original would set both languages to "" and
+    // erase the line for good. Refuse instead of destroying the editor's text.
+    const original = cue.originalText?.trim() ?? "";
+    if (!original) {
+      toast.error("Cannot restore this line", {
+        description:
+          "The original Thai text was not saved for this line. Build the subtitles for this clip again to recover it.",
+      });
+      return;
+    }
     setRebuildHint(false);
     setSubtitles(
       selectedClipId,
@@ -374,7 +384,7 @@ export function Step3Subtitles() {
           ? {
               ...item,
               arabic: "",
-              thai: cue.originalText?.trim() || "",
+              thai: original,
               source: undefined,
               reference: undefined,
               confidence: undefined,
@@ -386,7 +396,7 @@ export function Step3Subtitles() {
       ),
     );
     toast(L("Original Thai line restored"), {
-      description: cue.originalText?.slice(0, 80) || "The Arabic replacement was removed.",
+      description: original.slice(0, 80),
     });
   };
 
@@ -688,9 +698,22 @@ export function Step3Subtitles() {
 
       const ratio = offset / edited.length;
       const other = field === "arabic" ? cue.thai : cue.arabic;
-      const otherOffset = Math.round(other.length * ratio);
+      // The counterpart is cut at a word boundary, never at a character ratio:
+      // a proportional slice severs Thai word clusters and pulls Arabic Harakat
+      // away from their letters. A pair with no safe break (one long Arabic
+      // word) is refused instead of being mutilated.
+      const otherOffset = other.trim()
+        ? splitAtWordBoundary(other, ratio, field === "arabic" ? "thai" : "arabic")
+        : 0;
       const otherFirst = other.slice(0, otherOffset).trim();
       const otherSecond = other.slice(otherOffset).trim();
+      if (other.trim() && (!otherFirst || !otherSecond)) {
+        toast.error("Can't split this pair of lines here", {
+          description:
+            "The other language has no word break near the cursor. Move the cursor and try again.",
+        });
+        return;
+      }
 
       const duration = cue.end - cue.start;
       if (duration < 0.2) {
@@ -869,7 +892,11 @@ export function Step3Subtitles() {
   /* ---------------------------- verification --------------------------- */
 
   const verifyOne = useCallback(
-    async (cue: SubtitleCue, announce = true, track = true): Promise<"corrected" | "verified"> => {
+    async (
+      cue: SubtitleCue,
+      announce = true,
+      track = true,
+    ): Promise<"corrected" | "verified" | "needs-model"> => {
       const arabicText = cue.arabic.trim();
       if (!arabicText) {
         toast.error("Nothing to verify", {
@@ -884,38 +911,56 @@ export function Step3Subtitles() {
         settings.verificationProvider.mode !== "inherit" &&
         settings.verificationProvider.model.trim() !== "";
       const verifyProvider = buildProviderFor(settings, "verify");
-      if (!verifyProvider.model?.trim()) {
+      // A missing text model no longer blocks the check: the sidecar gates exact
+      // Qur'an verses offline and reports which lines still need a model.
+      const hasModel = Boolean(verifyProvider.model?.trim());
+      const openCheckerSetup = () =>
+        useUiStore.getState().openConfig(verificationOverrideConfigured ? 3 : 2);
+      const missingModelToast = () =>
         toast.error("The Arabic checker isn't connected yet", {
           description: verificationOverrideConfigured
             ? "Choose a model in the Subtitles configuration."
             : "Choose a model in the Find Clips configuration.",
-          action: {
-            label: "Set up",
-            onClick: () =>
-              useUiStore.getState().openConfig(verificationOverrideConfigured ? 3 : 2),
-          },
+          action: { label: "Set up", onClick: openCheckerSetup },
         });
-        throw new Error("not-configured");
-      }
 
       // A batch owns one activity for the whole run; single-line checks own
       // theirs so the log never fills with one entry per line.
       const activityId = track
-        ? useAiActivityStore.getState().start(aiRouteFor(settings, "arabic-check"))
+        ? useAiActivityStore.getState().start({
+            ...aiRouteFor(settings, "arabic-check"),
+            // Offline: the corpus answers, so the log must not imply a model call.
+            ...(hasModel ? {} : { detail: "Qur'an corpus only" }),
+          })
         : null;
       let result: Awaited<ReturnType<typeof verifyArabic>>;
       try {
         result = await verifyArabic({
           arabic_text: arabicText,
           context_thai: cue.thai.replace(/\n/g, " "),
-          provider: buildProviderFor(settings, "verify"),
+          provider: hasModel ? verifyProvider : null,
         });
       } catch (error) {
         if (activityId) useAiActivityStore.getState().finish(activityId, "failed");
+        if (!hasModel) {
+          missingModelToast();
+          throw new Error("not-configured");
+        }
         throw error;
       }
       if (activityId) {
         useAiActivityStore.getState().finish(activityId, "done", result.model || undefined);
+      }
+
+      if (result.source === "needs_model") {
+        if (announce) {
+          toast.warning("This line needs a text model", {
+            description:
+              "Exact Qur'an verses are checked offline. Proofreading anything else needs a fast text model.",
+            action: { label: "Set up", onClick: openCheckerSetup },
+          });
+        }
+        return "needs-model";
       }
 
       if (selectedClipId && projectId) {
@@ -924,7 +969,17 @@ export function Step3Subtitles() {
         deliverTaskResult(projectId, {
           kind: "verify",
           clipId: selectedClipId,
-          lines: [{ cueId: cue.id, arabic: result.verified_text || cue.arabic }],
+          lines: [
+            {
+              cueId: cue.id,
+              arabic: result.verified_text || cue.arabic,
+              // Provenance travels with the text: a corpus match must badge the
+              // line as verified even when the spelling did not change.
+              source: result.source,
+              reference: result.reference ?? undefined,
+              confidence: result.confidence ?? undefined,
+            },
+          ],
         });
       }
 
@@ -938,12 +993,16 @@ export function Step3Subtitles() {
       }
       if (announce) {
         toast.success("Arabic verified", {
-          description: result.notes || "The spelling and Harakat match the source.",
+          description:
+            result.notes ||
+            (result.source === "quran"
+              ? "Matches the Qur'an corpus."
+              : "The spelling and Harakat match the source."),
         });
       }
       return "verified";
     },
-    [selectedClipId, setSubtitles],
+    [selectedClipId],
   );
 
   const handleVerify = useCallback(
@@ -979,19 +1038,11 @@ export function Step3Subtitles() {
       settings.verificationProvider.mode !== "inherit" &&
       settings.verificationProvider.model.trim() !== "";
     const verifyProvider = buildProviderFor(settings, "verify");
-    if (!verifyProvider.model?.trim()) {
-      toast.error("The Arabic checker isn't connected yet", {
-        description: verificationOverrideConfigured
-          ? "Choose a model in the Subtitles configuration."
-          : "Choose a model in the Find Clips configuration.",
-        action: {
-          label: "Set up",
-          onClick: () =>
-            useUiStore.getState().openConfig(verificationOverrideConfigured ? 3 : 2),
-        },
-      });
-      return;
-    }
+    // No text model is not a dead end: the sidecar gates exact Qur'an verses
+    // offline and reports the lines that still need one, instead of refusing.
+    const hasModel = Boolean(verifyProvider.model?.trim());
+    const openCheckerSetup = () =>
+      useUiStore.getState().openConfig(verificationOverrideConfigured ? 3 : 2);
     const targets = (useProjectStore.getState().project?.subtitles[selectedClipId] ?? []).filter(
       (cue) => cue.arabic.trim().length > 0,
     );
@@ -1003,9 +1054,20 @@ export function Step3Subtitles() {
     // One request per clip keeps the round-trips at 1–3 instead of one per line
     // (docs/DECISION_MODELS_PLAN.md §5); 64 is the sidecar's batch ceiling.
     const BATCH = 64;
+    type VerifiedLine = {
+      cueId: string;
+      arabic: string;
+      source?: string;
+      reference?: string;
+      confidence?: number;
+    };
     let corrected = 0;
     let failed = 0;
     let checked = 0;
+    /** Lines the corpus or the fast check settled with no text model. */
+    let offlineSettled = 0;
+    let corpus = 0;
+    let needsModel = 0;
 
     useJobStore.getState().startTask({
       kind: "verify",
@@ -1015,9 +1077,13 @@ export function Step3Subtitles() {
         const activityId = useAiActivityStore.getState().start(
           decisionRoute
             ? { task: "arabic-check", ...decisionRoute }
-            : aiRouteFor(settings, "arabic-check"),
+            : {
+                ...aiRouteFor(settings, "arabic-check"),
+                // Offline: no model is called, so the log must not look like one was.
+                ...(hasModel ? {} : { detail: "Qur'an corpus only" }),
+              },
         );
-        const allLines: Array<{ cueId: string; arabic: string }> = [];
+        const allLines: VerifiedLine[] = [];
         hooks.setProgress(0, targets.length);
         try {
           for (let offset = 0; offset < targets.length; offset += BATCH) {
@@ -1031,7 +1097,7 @@ export function Step3Subtitles() {
                     context_thai: cue.thai.replace(/\n/g, " "),
                     cue_id: cue.id,
                   })),
-                  provider: buildProviderFor(settings, "verify"),
+                  provider: hasModel ? verifyProvider : null,
                   decision_provider: decisionProvider,
                 },
                 { signal },
@@ -1041,14 +1107,30 @@ export function Step3Subtitles() {
                   .filter((line) => line.cue_id)
                   .map((line) => [line.cue_id as string, line]),
               );
-              const chunkLines: Array<{ cueId: string; arabic: string }> = [];
+              const chunkLines: VerifiedLine[] = [];
               for (const cue of chunk) {
                 const line = byCue.get(cue.id);
                 if (!line) continue;
+                // A corpus-gated line is a real verification; a line the
+                // sidecar could only pass back unchanged needs a model.
+                if (line.source === "needs_model") {
+                  needsModel += 1;
+                  continue;
+                }
+                // Corpus-gated and fast-check-passed lines are settled offline.
+                offlineSettled += 1;
+                if (line.source === "quran") corpus += 1;
                 if (line.correction_applied) corrected += 1;
                 if (line.verified_text) {
-                  chunkLines.push({ cueId: cue.id, arabic: line.verified_text });
-                  allLines.push({ cueId: cue.id, arabic: line.verified_text });
+                  const entry: VerifiedLine = {
+                    cueId: cue.id,
+                    arabic: line.verified_text,
+                    source: line.source,
+                    reference: line.reference ?? undefined,
+                    confidence: line.confidence ?? undefined,
+                  };
+                  chunkLines.push(entry);
+                  allLines.push(entry);
                 }
               }
               if (chunkLines.length) {
@@ -1080,6 +1162,25 @@ export function Step3Subtitles() {
         if (failed > 0) {
           toast.error(`Checked ${checked} of ${targets.length} lines`, {
             description: `${failed} line${failed === 1 ? "" : "s"} could not be checked.`,
+          });
+          return;
+        }
+        if (!hasModel) {
+          // Offline run: report exactly what the corpus could settle and what
+          // still needs a proofreader, instead of pretending everything passed.
+          if (needsModel === 0) {
+            toast.success(L("Arabic checked"), {
+              description: `${offlineSettled} line${
+                offlineSettled === 1 ? "" : "s"
+              } checked offline — ${corpus} exact Qur'an match${corpus === 1 ? "" : "es"}.`,
+            });
+            return;
+          }
+          toast.warning(`Checked ${offlineSettled} of ${targets.length} lines offline`, {
+            description: `${needsModel} line${
+              needsModel === 1 ? "" : "s"
+            } need a text model for proofreading. Exact Qur'an verses are always checked offline.`,
+            action: { label: "Set up", onClick: openCheckerSetup },
           });
           return;
         }

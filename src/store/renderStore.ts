@@ -15,7 +15,7 @@ import { defaultOutputDirectory } from "@/lib/filenameTemplate";
 import { formatClock } from "@/lib/format";
 import type { SubtitleCue } from "@/lib/projectTypes";
 import { assStyleToSpec, resolveAssStyles } from "@/lib/subtitleStyles";
-import { wrapSubtitleText } from "@/lib/subtitleWrap";
+import { wrapArabicText, wrapSubtitleText } from "@/lib/subtitleWrap";
 import { useProjectStore } from "./projectStore";
 import { useSettingsStore } from "./settingsStore";
 
@@ -72,6 +72,7 @@ const STREAM_INTERRUPTED_CLIP_DETAIL =
 function toRenderCues(
   cues: SubtitleCue[],
   maxCharsPerLine: number,
+  arabicMaxCharsPerLine: number,
 ): { cues: RenderCue[]; skipped: number } {
   const valid: RenderCue[] = [];
   let skipped = 0;
@@ -85,7 +86,9 @@ function toRenderCues(
     valid.push({
       start: Math.max(0, start),
       end,
-      arabic: cue.arabic ?? "",
+      // The `.ass` writer uses `WrapStyle: 2` (breaks only on `\N`), so both
+      // languages must arrive pre-wrapped or a long verse runs off the frame.
+      arabic: wrapArabicText(cue.arabic ?? "", arabicMaxCharsPerLine),
       // Guarantee wrapped output at the boundary: even if a line was typed
       // past the wrap width and the editor never committed it (blur/split),
       // the burned `.ass` and the preview still agree. Idempotent.
@@ -161,10 +164,20 @@ export const useRenderStore = create<RenderState>()((set) => ({
 
     let skippedCues = 0;
     const maxCharsPerLine = settings.editor.maxCharsPerLine;
+    // Arabic is set at its own size, so its wrap width is the Thai width scaled
+    // by the size ratio — the same derivation Step 3 uses for the preview.
+    const arabicMaxCharsPerLine = Math.max(
+      16,
+      Math.round(
+        maxCharsPerLine *
+          (settings.thai.fontSize / Math.max(1, settings.arabic.fontSize)),
+      ),
+    );
     const renderClips = approvedClips.map((clip) => {
       const { cues, skipped } = toRenderCues(
         current.subtitles[clip.id] ?? [],
         maxCharsPerLine,
+        arabicMaxCharsPerLine,
       );
       skippedCues += skipped;
       return {

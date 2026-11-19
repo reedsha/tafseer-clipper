@@ -123,6 +123,22 @@ test.describe("app shell", () => {
       page.getByRole("textbox", { name: "Transcription vocabulary hint" }),
     ).toBeVisible();
 
+    // The engine is chosen on this screen instead of only behind the stage
+    // gear, so a first-run editor never has to hunt for it…
+    const engine = page.getByRole("group", { name: "Speech-to-text engine" });
+    await expect(engine).toBeVisible();
+    await expect(engine.getByRole("button", { name: "This computer" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    // …and the clip brief opens without leaving the step.
+    await page.getByRole("button", { name: "Clip brief & system prompt" }).click();
+    await expect(page.getByRole("heading", { name: "Initial prompt — clip finding" })).toBeVisible();
+    await page.getByRole("button", { name: "Close initial prompt" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Initial prompt — clip finding" }),
+    ).toBeHidden();
+
     // The hint names GPU/CPU capability only — never a product line, and the
     // CPU fallback is always stated. Either the GPU is ready or the CPU path
     // is spelled out, depending on the machine running the suite.

@@ -197,4 +197,87 @@ test.describe("Step 2 waveform edge controls", () => {
     await page.getByRole("button", { name: "Trim clip at the end" }).click();
     await expect(trimTime(page, "Cut out", "0:35.0")).toBeVisible();
   });
+
+  test("trimming the cut-out drops the subtitle lines it can no longer show", async ({ page }) => {
+    const now = Date.now();
+    const clipId = "e2e00000-0000-4000-8000-0000000000c4";
+    await seedProjectFile(page, {
+      schemaVersion: 1,
+      id: "e2e00000-0000-4000-8000-000000000004",
+      name: "Trim-sync",
+      sourcePath: null,
+      sourceFileName: null,
+      duration: 60,
+      step: 2,
+      transcriptId: "e2e-trim-sync-transcript",
+      transcript: {
+        language: "th",
+        segments: [{ id: 1, start: 11, end: 39, text: "ความอดทน", language: "th" }],
+        peaks: Array.from({ length: 1200 }, () => 0.5),
+      },
+      audioPath: silentWavDataUrl(),
+      basePrompt: "",
+      promptPresetId: null,
+      sessionGuide: "",
+      discovery: { minDuration: 15, maxDuration: 90, maxClips: 8 },
+      clips: [
+        {
+          id: clipId,
+          title: "Trim sync",
+          rationale: "",
+          start: 10,
+          end: 40,
+          speechStart: 10.3,
+          speechEnd: 39.7,
+          approved: true,
+          createdAt: now,
+        },
+      ],
+      selectedClipId: clipId,
+      // Clip-relative lines: the last one sits past a 25 s cut-out.
+      subtitles: {
+        [clipId]: [
+          { id: "cue-1", start: 0, end: 2, arabic: "", thai: "บรรทัดแรก", reviewed: true },
+          { id: "cue-2", start: 2, end: 4, arabic: "", thai: "บรรทัดที่สอง", reviewed: true },
+          { id: "cue-3", start: 30, end: 32, arabic: "", thai: "บรรทัดสุดท้าย", reviewed: true },
+        ],
+      },
+      export: {
+        resolution: "1080x1920",
+        framing: "blur-fill",
+        useNvenc: true,
+        exportSrt: true,
+        filenameTemplate: "{LectureName}_Clip{01}_{Title}.mp4",
+        outputDir: null,
+      },
+      createdAt: now,
+      updatedAt: now,
+      lastActivityAt: now,
+    });
+
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Trim-sync/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Find clips" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Trim clip at the end" })).toBeVisible();
+
+    // 40 s → 35 s leaves the 30–32 s line outside the clip.
+    await page.getByRole("button", { name: "Trim clip at the end" }).click();
+    await expect(trimTime(page, "Cut out", "0:35.0")).toBeVisible();
+
+    await page
+      .getByRole("navigation", { name: "Wizard steps" })
+      .getByRole("button", { name: /3\. Subtitles/ })
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+    // The orphaned line is gone; the two inside the clip are untouched, so no
+    // rebuild (which would discard hand edits) is needed.
+    const rows = page.locator("[data-cue-row]");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.filter({ hasText: "บรรทัดแรก" })).toHaveCount(1);
+    await expect(rows.filter({ hasText: "บรรทัดสุดท้าย" })).toHaveCount(0);
+  });
 });

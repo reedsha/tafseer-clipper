@@ -26,6 +26,10 @@ logger = logging.getLogger("tafseer.recitation")
 
 SpanTranscriber = Callable[[Path], Awaitable[transcriber.TranscriptionResult]]
 
+#: Extra audio kept on each side of a recitation span.  A frame-exact cut clips
+#: the opening/closing syllables and their diacritics during re-transcription.
+RECITATION_PAD_SECONDS = 0.3
+
 _ARABIC_CHAR = re.compile(r"[\u0600-\u06FF]")
 _THAI_CHAR = re.compile(r"[\u0E00-\u0E7F]")
 _MIN_ARABIC_CHARS = 4
@@ -151,8 +155,8 @@ async def recover_arabic(
             ]
             if not removed:
                 continue
-            slice_start = max(0.0, start - 0.12)
-            slice_end = end + 0.12
+            slice_start = max(0.0, start - RECITATION_PAD_SECONDS)
+            slice_end = end + RECITATION_PAD_SECONDS
             target = wav_path.with_name(f"{wav_path.stem}-ar-{len(slices)}.wav")
             slices.append(target)
             try:

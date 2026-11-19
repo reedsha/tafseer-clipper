@@ -76,6 +76,13 @@ type RefindMode = "reroll" | "replace";
 /** Playback-rate ladder for the J/K/L shuttle (1× = normal speed). */
 const SHUTTLE_RATES = [0.25, 0.5, 1, 1.5, 2, 3, 4] as const;
 
+/**
+ * Smallest speech window an edge nudge may leave behind. The real render floor
+ * is `MIN_RENDERABLE_CLIP_SECONDS` on the padded cut; this only keeps the raw
+ * speech pair ordered while the operator drags an edge quickly.
+ */
+const MIN_SPEECH_WINDOW = 0.05;
+
 /* -------------------------------------------------------------------------- */
 /* Pure helpers                                                                */
 /* -------------------------------------------------------------------------- */
@@ -90,18 +97,31 @@ function excerptFor(project: ProjectData, clip: ProjectClip): string {
   return text.slice(0, 600);
 }
 
-function exemplarsFor(
-  project: ProjectData,
-  keep: boolean,
-): ClipExemplar[] {
+function exemplar(clip: ProjectClip, project: ProjectData): ClipExemplar {
+  return {
+    start: clip.start,
+    end: clip.end,
+    title: clip.title,
+    text: excerptFor(project, clip),
+  };
+}
+
+/**
+ * Positive examples: only clips the editor approved.
+ *
+ * Negative examples: only clips the editor explicitly discarded. Labelling
+ * every unreviewed proposal as "rejected" poisoned the re-roll feedback — the
+ * AI was told to avoid moments the editor had never judged, while the clip they
+ * actually threw away was gone from the project entirely.
+ */
+function approvedExemplarsFor(project: ProjectData): ClipExemplar[] {
   return project.clips
-    .filter((clip) => clip.approved === keep)
-    .map((clip) => ({
-      start: clip.start,
-      end: clip.end,
-      title: clip.title,
-      text: excerptFor(project, clip),
-    }));
+    .filter((clip) => clip.approved)
+    .map((clip) => exemplar(clip, project));
+}
+
+function rejectedExemplarsFor(project: ProjectData): ClipExemplar[] {
+  return (project.trashedClips ?? []).map((clip) => exemplar(clip, project));
 }
 
 function proposalToClip(
@@ -275,6 +295,9 @@ export function Step2Discovery() {
   const [maxDraft, setMaxDraft] = useState(
     String(project?.discovery.maxDuration ?? DEFAULT_DISCOVERY_SETTINGS.maxDuration),
   );
+  const [maxClipsDraft, setMaxClipsDraft] = useState(
+    String(project?.discovery.maxClips ?? DEFAULT_DISCOVERY_SETTINGS.maxClips),
+  );
   const [bufferDraft, setBufferDraft] = useState(editor.cutBufferSeconds);
   const [buttonStepDraft, setButtonStepDraft] = useState(String(editor.edgeButtonStepSeconds));
   const [keyStepDraft, setKeyStepDraft] = useState(String(editor.edgeKeyStepSeconds));
@@ -316,9 +339,16 @@ export function Step2Discovery() {
   useEffect(() => {
     setMinDraft(String(project?.discovery.minDuration ?? DEFAULT_DISCOVERY_SETTINGS.minDuration));
     setMaxDraft(String(project?.discovery.maxDuration ?? DEFAULT_DISCOVERY_SETTINGS.maxDuration));
+    setMaxClipsDraft(String(project?.discovery.maxClips ?? DEFAULT_DISCOVERY_SETTINGS.maxClips));
     setRefindMode("reroll");
     setPendingReplaceAll(false);
   }, [project?.id]);
+
+  // A preset or an imported project can change the target count; mirror it
+  // without touching a draft the editor is still typing in.
+  useEffect(() => {
+    setMaxClipsDraft(String(project?.discovery.maxClips ?? DEFAULT_DISCOVERY_SETTINGS.maxClips));
+  }, [project?.discovery.maxClips]);
 
   useEffect(() => {
     if (!project) return;
@@ -431,8 +461,8 @@ export function Step2Discovery() {
               decision_provider: decisionSlot,
               // L("Start over") is a clean search: no old clip is kept or used as
               // feedback, and their subtitle tracks are cleared on apply.
-              approved_exemplars: replaceAll ? [] : exemplarsFor(current, true),
-              rejected_exemplars: replaceAll ? [] : exemplarsFor(current, false),
+              approved_exemplars: replaceAll ? [] : approvedExemplarsFor(current),
+              rejected_exemplars: replaceAll ? [] : rejectedExemplarsFor(current),
             },
             { signal },
           );
@@ -471,6 +501,16 @@ export function Step2Discovery() {
         if (note.trim()) setRefinement("");
         const count = payload.proposals.length;
         const excluded = payload.excludedRangesApplied ?? 0;
+        if (count === 0) {
+          // A re-roll that finds nothing leaves the deck untouched, so this is
+          // a "nothing more" outcome rather than a silent success.
+          toast(L("No new clips found"), {
+            description: replaceAll
+              ? "The clean search returned nothing, so your current clips are unchanged. Try a different topic focus or length range."
+              : "Your current clips are unchanged. Try adjusting the topic focus or the clip length range, then search again.",
+          });
+          return;
+        }
         toast.success(
           mode === "replace"
             ? "Started over with new clips"
@@ -485,11 +525,6 @@ export function Step2Discovery() {
             }`,
           },
         );
-        if (count === 0) {
-          toast(L("No new clips"), {
-            description: "Add a note about what to look for and search again.",
-          });
-        }
       },
       onError: (message) => {
         toast.error("Clip discovery failed", { description: message });
@@ -512,8 +547,18 @@ export function Step2Discovery() {
       current.clips.find((item) => item.id === current.selectedClipId) ?? current.clips[0];
     if (!clip) return;
     const settings = useSettingsStore.getState();
-    const nextSpeechStart = edge === "start" ? clip.speechStart + delta : clip.speechStart;
-    const nextSpeechEnd = edge === "end" ? clip.speechEnd + delta : clip.speechEnd;
+    // A fast drag or a repeated key press can ask for a start past the end (or
+    // the reverse). Clamp to a small positive speech window *before* the cut is
+    // derived, so an inverted pair can never reach the store as a negative
+    // duration; the renderable floor below still guards the final cut.
+    const nextSpeechStart =
+      edge === "start"
+        ? Math.min(clip.speechStart + delta, clip.speechEnd - MIN_SPEECH_WINDOW)
+        : clip.speechStart;
+    const nextSpeechEnd =
+      edge === "end"
+        ? Math.max(clip.speechEnd + delta, clip.speechStart + MIN_SPEECH_WINDOW)
+        : clip.speechEnd;
     const cut = applyCutBuffer(nextSpeechStart, nextSpeechEnd, {
       duration: current.duration,
       buffer: settings.editor.cutBufferSeconds,
@@ -702,6 +747,31 @@ export function Step2Discovery() {
     }
     setMinDraft(String(min));
     setMaxDraft(String(max));
+  }
+
+  /**
+   * Commit the target clip count. The count is a per-search instruction (it
+   * reaches the sidecar as `max_clips`), so an empty or absurd value snaps back
+   * to the stored number instead of silently searching for nothing.
+   */
+  function commitMaxClips() {
+    const current = useProjectStore.getState().project;
+    if (!current) return;
+    const raw = maxClipsDraft.trim() === "" ? Number.NaN : Number(maxClipsDraft);
+    if (!Number.isFinite(raw)) {
+      toast.error("Clips to find needs a number", {
+        description: `Use a value from ${DISCOVERY_LIMITS.maxClips.min} to ${DISCOVERY_LIMITS.maxClips.max}.`,
+      });
+      setMaxClipsDraft(String(current.discovery.maxClips));
+      return;
+    }
+    const maxClips = coerceToRange(raw, current.discovery.maxClips, DISCOVERY_LIMITS.maxClips);
+    setMaxClipsDraft(String(maxClips));
+    if (maxClips !== current.discovery.maxClips) {
+      useProjectStore.getState().updateProject({
+        discovery: { ...current.discovery, maxClips },
+      });
+    }
   }
 
   function commitEdgeStep(which: "button" | "key") {
@@ -940,6 +1010,24 @@ export function Step2Discovery() {
                   className="h-8 text-xs"
                 />
               </div>
+              <div className="w-20 shrink-0 space-y-1">
+                <Label htmlFor="clip-count" className="text-[10px] text-muted-foreground">
+                  {L("To find")}
+                </Label>
+                <Input
+                  id="clip-count"
+                  type="number"
+                  inputMode="numeric"
+                  min={DISCOVERY_LIMITS.maxClips.min}
+                  max={DISCOVERY_LIMITS.maxClips.max}
+                  step={DISCOVERY_LIMITS.maxClips.step}
+                  value={maxClipsDraft}
+                  onChange={(event) => setMaxClipsDraft(event.target.value)}
+                  onBlur={commitMaxClips}
+                  disabled={status === "running"}
+                  className="h-8 text-xs"
+                />
+              </div>
             </div>
 
             {clips.length > 0 ? (
@@ -954,6 +1042,26 @@ export function Step2Discovery() {
                 disabled={status === "running"}
               />
             ) : null}
+
+            <div className="space-y-1">
+              <Label htmlFor="session-guide" className="text-[11px] font-medium text-foreground/90">
+                {L("Topic focus for this lecture")}
+              </Label>
+              <Textarea
+                id="session-guide"
+                value={project.sessionGuide}
+                onChange={(event) =>
+                  useProjectStore.getState().setSessionGuide(event.target.value)
+                }
+                rows={2}
+                placeholder="Focus on the stories of the Prophets and practical rulings; skip the opening announcements."
+                className="resize-y text-xs leading-relaxed"
+                disabled={status === "running"}
+              />
+              <p className="text-[10px] leading-relaxed text-muted-foreground">
+                {L("Applies to every search in this session. Leave empty to use the initial prompt alone.")}
+              </p>
+            </div>
 
             <div className="space-y-1">
               <Label htmlFor="refinement-note" className="text-[11px] font-medium text-foreground/90">
