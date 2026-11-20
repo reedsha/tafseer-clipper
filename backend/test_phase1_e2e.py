@@ -360,6 +360,63 @@ def start_mock_openrouter() -> ThreadingHTTPServer:
     return server
 
 
+def check_ephemeral_port_handshake(env: dict[str, str]) -> None:
+    """The Tauri shell hands the sidecar ``--port 0`` and reads its stdout
+    handshake. Verify the announced port actually answers /health (a regression
+    here made every packaged build show "Engine not responding")."""
+    handshake_env = dict(env)
+    handshake_env["TAFSEER_PORT"] = "0"
+    handshake_env.pop("TAFSEER_PARENT_PID", None)
+    proc = subprocess.Popen(
+        [sys.executable, "main.py"],
+        cwd=str(BACKEND),
+        env=handshake_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    try:
+        marker = "TAFSEER_SIDECAR_READY:port="
+        port: int | None = None
+        deadline = time.time() + 30
+        while time.time() < deadline and port is None:
+            line = proc.stdout.readline() if proc.stdout else ""
+            if not line:
+                break
+            index = line.find(marker)
+            if index < 0:
+                continue
+            digits = ""
+            for char in line[index + len(marker) :].strip():
+                if not char.isdigit():
+                    break
+                digits += char
+            if digits:
+                port = int(digits)
+        healthy = False
+        if port is not None:
+            for _ in range(50):
+                try:
+                    healthy = httpx.get(f"http://127.0.0.1:{port}/health", timeout=2).status_code == 200
+                    break
+                except httpx.HTTPError:
+                    time.sleep(0.2)
+        check(
+            "ephemeral port handshake: announced port answers /health",
+            healthy,
+            f"port={port}",
+        )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
 # --------------------------------------------------------------------------- #
 # Sidecar process
 # --------------------------------------------------------------------------- #
@@ -3528,6 +3585,7 @@ def main() -> int:
                 control_dir,
             )
         guarded("Unit checks", run_unit_checks, source, fonts_dir)
+        guarded("Ephemeral port handshake", check_ephemeral_port_handshake, env)
     finally:
         mock_server.shutdown()
         openrouter_server.shutdown()

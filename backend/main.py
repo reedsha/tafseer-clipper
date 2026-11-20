@@ -2822,16 +2822,28 @@ def main() -> None:
     host = config.host()
     requested = config.port()
     if requested == 0:
+        # Bind atomically and hand the listening socket to uvicorn.  Do NOT use
+        # uvicorn's `fd=` option here: on Windows its startup path calls
+        # socket.fromfd(fd, socket.AF_UNIX, ...) and AF_UNIX is unavailable,
+        # which kills the sidecar immediately after the handshake line.
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((host, 0))
         sock.listen(2048)
         port = sock.getsockname()[1]
-        uvicorn_kwargs = {"fd": sock.fileno()}
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host=host,
+                port=port,
+                log_level="info",
+                log_config=None,
+            )
+        )
     else:
         port = requested
         sock = None
-        uvicorn_kwargs = {"port": port}
+        server = None
 
     # Unbuffered handshake so the Tauri shell can capture the bound port.
     sys.stdout.write(f"TAFSEER_SIDECAR_READY:port={port}\n")
@@ -2852,13 +2864,16 @@ def main() -> None:
     # handlers installed by ``_setup_logging``: uvicorn's default dictConfig
     # gives them propagate=False handlers, so server/access lines would never
     # reach sidecar.log.
-    uvicorn.run(
-        app,
-        host=host,
-        log_level="info",
-        log_config=None,
-        **uvicorn_kwargs,
-    )
+    if server is not None:
+        server.run(sockets=[sock])
+    else:
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level="info",
+            log_config=None,
+        )
     if sock is not None:
         with contextlib.suppress(OSError):
             sock.close()
