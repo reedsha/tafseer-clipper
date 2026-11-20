@@ -1,6 +1,6 @@
 [package]
 name = "tafseer-clipper"
-version = "0.2.1-beta"
+version = "0.2.2-beta"
 description = "Tafseer Clipper — Tauri v2 desktop shell for the FastAPI sidecar"
 authors = ["muham"]
 edition = "2024"
