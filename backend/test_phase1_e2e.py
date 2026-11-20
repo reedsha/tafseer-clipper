@@ -975,7 +975,7 @@ def run_http_checks(
         )
         check(
             "Generated .ass: per-style fonts/sizes/colours from the request",
-            "Style: ArabicStyle,Tahoma,66,&H007AD3FF" in ass_text
+            "Style: ArabicStyle,Noto Naskh Arabic,66,&H007AD3FF" in ass_text
             and "Style: ThaiStyle,Leelawadee UI,46,&H00FFFFFF" in ass_text,
             next(
                 (
@@ -1235,8 +1235,8 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
     )
     check(
         "subtitle_gen: gold Arabic / white Thai default colours",
-        subtitle_gen.default_styles("1080x1920")[0].primary_color == "#FFD37A"
-        and subtitle_gen.default_styles("1080x1920")[1].primary_color == "#FFFFFF",
+        subtitle_gen.default_styles("1080x1920")[0].primary_color == "#dcb46e"
+        and subtitle_gen.default_styles("1080x1920")[1].primary_color == "#f4f4f1",
     )
     srt = subtitle_gen.build_srt(cues)
     check(

@@ -101,7 +101,7 @@ export function WaveformBar({
         setReady(true);
         setError(null);
         wavesurfer.setMuted(true);
-        wavesurfer.setTime(clamp(playheadRef.current, 0, durationSeconds));
+        wavesurfer.setTime(clamp(playheadRef.current - windowStartRef.current, 0, durationSeconds));
       }),
       wavesurfer.on("error", (loadError) => {
         // Ignore errors from detached/destroyed instances (handles the dev
@@ -111,9 +111,8 @@ export function WaveformBar({
         setError(loadError.message || "The audio extract could not be decoded.");
       }),
       wavesurfer.on("interaction", (seconds) => {
-        // wavesurfer reports absolute lecture time even when zoomed/scrolled,
-        // so the parent receives the same clock the rest of Step 2 uses.
-        onSeekRef.current(seconds);
+        // Map the window-local seconds back to absolute lecture time.
+        onSeekRef.current(seconds + windowStartRef.current);
       }),
     ];
 
@@ -126,6 +125,9 @@ export function WaveformBar({
     };
   }, []);
 
+  // Windowed waveform: only the active clip (plus a small margin) is rendered,
+  // so the canvas never grows to hundreds of thousands of pixels on long lectures.
+  const windowStartRef = useRef(0);
   useEffect(() => {
     const wavesurfer = wavesurferRef.current;
     if (!wavesurfer) return;
@@ -138,19 +140,34 @@ export function WaveformBar({
     }
     setReady(false);
     setError(null);
-    const channelData = peaks && peaks.length > 0 && duration > 0 ? [peaks] : undefined;
-    const knownDuration = channelData ? duration : undefined;
+    const margin = 5;
+    const windowStart = Math.max(0, clipStart - margin);
+    const windowEnd = Math.min(duration > 0 ? duration : clipEnd + margin, clipEnd + margin);
+    const windowDuration = Math.max(0.1, windowEnd - windowStart);
+    windowStartRef.current = windowStart;
+
+    let channelData: number[][] | undefined;
+    let knownDuration: number | undefined;
+    if (peaks && peaks.length > 0 && duration > 0) {
+      const startIndex = Math.max(0, Math.floor((windowStart / duration) * peaks.length));
+      const endIndex = Math.min(peaks.length, Math.ceil((windowEnd / duration) * peaks.length));
+      const sliced = peaks.slice(startIndex, endIndex);
+      if (sliced.length > 0) {
+        channelData = [sliced];
+        knownDuration = windowDuration;
+      }
+    } else {
+      knownDuration = undefined;
+    }
     const token = ++loadTokenRef.current;
     void wavesurfer.load(audioUrl, channelData, knownDuration).catch((loadError: unknown) => {
-      // A newer load()/empty() or a detached instance supersedes this attempt,
-      // so "suspended by a newer load call" and similar races are ignored.
       if (loadTokenRef.current !== token || wavesurferRef.current !== wavesurfer) return;
       setReady(false);
       setError(
         loadError instanceof Error ? loadError.message : "The audio extract could not be loaded.",
       );
     });
-  }, [audioUrl, peaks, duration]);
+  }, [audioUrl, peaks, duration, clipStart, clipEnd]);
 
   // Keep the viewport locked to [clipStart, clipEnd]. Re-running on every edge
   // change makes the waveform redraw longer as the clip grows and shorter as
@@ -160,12 +177,10 @@ export function WaveformBar({
     if (!wavesurfer || !ready) return;
     if (!wavesurfer.getDuration()) return;
 
-    const width = wavesurfer.getWidth() || containerRef.current?.clientWidth || 640;
-    const visibleSpan = Math.max(0.1, clipEnd - clipStart);
-    wavesurfer.zoom(Math.max(1, width / visibleSpan));
-
+    // The waveform now only contains the windowed peaks, so no zoom is needed;
+    // just keep the playhead in view.
     const frame = window.requestAnimationFrame(() => {
-      wavesurfer.setScrollTime(Math.max(0, clipStart));
+      wavesurfer.setScrollTime(0);
     });
     return () => window.cancelAnimationFrame(frame);
   }, [ready, clipStart, clipEnd]);
@@ -174,7 +189,7 @@ export function WaveformBar({
     const wavesurfer = wavesurferRef.current;
     if (!wavesurfer || !ready) return;
     if (!wavesurfer.getDuration()) return;
-    wavesurfer.setTime(clamp(playhead, 0, duration));
+    wavesurfer.setTime(clamp(playhead - windowStartRef.current, 0, wavesurfer.getDuration()));
   }, [playhead, ready, duration]);
 
   const unavailable = !audioUrl;

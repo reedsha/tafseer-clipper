@@ -151,15 +151,45 @@ function buildLetters(
       });
     }
 
-    const count = source.length;
-    for (let index = 0; index < count; index += 1) {
-      letters.push({
-        char: source[index],
-        start: start + ((end - start) * index) / count,
-        end: start + ((end - start) * (index + 1)) / count,
-        sentenceId: segment.sentence_id ?? null,
-        segmentId: segment.id,
-      });
+    // Segment into grapheme clusters so combining marks share their base
+    // character's timestamp window instead of receiving acoustic duration.
+    let graphemes: string[] = [];
+    try {
+      const Segmenter = (Intl as unknown as {
+        Segmenter?: new (
+          locales?: string,
+          options?: { granularity: "grapheme" },
+        ) => { segment(input: string): Iterable<{ segment: string }> };
+      }).Segmenter;
+      if (Segmenter) {
+        graphemes = [...new Segmenter(undefined, { granularity: "grapheme" }).segment(source)].map(
+          (part) => part.segment,
+        );
+      }
+    } catch {
+      graphemes = [];
+    }
+    if (graphemes.length === 0) {
+      graphemes = Array.from(source);
+    }
+    const graphemeCount = graphemes.length;
+    let codeIndex = 0;
+    for (let g = 0; g < graphemeCount; g += 1) {
+      const cluster = graphemes[g];
+      const clusterStart = start + ((end - start) * g) / graphemeCount;
+      const clusterEnd = start + ((end - start) * (g + 1)) / graphemeCount;
+      // The first code unit is the base; combining marks share its window.
+      const chars = Array.from(cluster);
+      for (let c = 0; c < chars.length; c += 1) {
+        letters.push({
+          char: chars[c],
+          start: clusterStart,
+          end: clusterEnd,
+          sentenceId: segment.sentence_id ?? null,
+          segmentId: segment.id,
+        });
+      }
+      codeIndex += chars.length;
     }
     cursor = end;
   }

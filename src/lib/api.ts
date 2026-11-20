@@ -42,7 +42,16 @@ function resolveSidecarUrl(): string {
   return fromShell ?? DEFAULT_SIDECAR_URL;
 }
 
-export const SIDECAR_URL: string = resolveSidecarUrl();
+export function getSidecarUrl(): string {
+  return resolveSidecarUrl();
+}
+
+// Backward-compatible accessor: evaluating `SIDECAR_URL` as a string yields the
+// current resolved URL, so callers that treat it as a string keep working.
+export const SIDECAR_URL = {
+  toString: () => getSidecarUrl(),
+  valueOf: () => getSidecarUrl(),
+} as unknown as string;
 
 /* -------------------------------------------------------------------------- */
 /* Errors                                                                      */
@@ -145,7 +154,7 @@ async function request<T>(
 ): Promise<T> {
   const timeout = withTimeout(timeoutMs, signal);
   try {
-    const response = await fetch(`${SIDECAR_URL}${path}`, {
+    const response = await fetch(`${getSidecarUrl()}${path}`, {
       ...init,
       signal: timeout.signal,
     });
@@ -834,7 +843,7 @@ export async function streamRenderBatch(
 ): Promise<RenderStreamResult> {
   let response: Response;
   try {
-    response = await fetch(`${SIDECAR_URL}/render-batch`, {
+    response = await fetch(`${getSidecarUrl()}/render-batch`, {
       ...jsonBody(body),
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
       signal,

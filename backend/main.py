@@ -925,6 +925,46 @@ def _prune_work_dir() -> None:
     except OSError as exc:  # pragma: no cover - read-only work dir
         logger.warning("Could not prune the audio cache: %s", exc)
 
+    # 5 GB hard ceiling quota: evict oldest audio WAVs until below 4 GB.
+    try:
+        total_bytes = 0
+        wav_files: list[tuple[float, Path]] = []
+        audio_dir = config.work_dir() / "audio"
+        if audio_dir.is_dir():
+            for child in audio_dir.iterdir():
+                if child.is_file():
+                    try:
+                        st = child.stat()
+                        total_bytes += st.st_size
+                        wav_files.append((st.st_mtime, child))
+                    except OSError:
+                        continue
+        # Also count jobs dir.
+        jobs_dir = config.work_dir() / "jobs"
+        if jobs_dir.is_dir():
+            for child in jobs_dir.rglob("*"):
+                if child.is_file():
+                    try:
+                        total_bytes += child.stat().st_size
+                    except OSError:
+                        continue
+        limit_bytes = 5 * 1024 * 1024 * 1024
+        target_bytes = 4 * 1024 * 1024 * 1024
+        if total_bytes > limit_bytes:
+            wav_files.sort()  # oldest first
+            for mtime, path in wav_files:
+                if total_bytes <= target_bytes:
+                    break
+                try:
+                    size = path.stat().st_size
+                    path.unlink(missing_ok=True)
+                    total_bytes -= size
+                    removed_wavs += 1
+                except OSError:
+                    continue
+    except Exception:  # pragma: no cover
+        logger.exception("Quota pruning failed; continuing")
+
     _disk_cache = None
     if removed_jobs or removed_wavs:
         logger.info(
@@ -962,9 +1002,22 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
         await run_in_threadpool(_prune_work_dir)
     except Exception:  # noqa: BLE001 - cache pruning must never block startup
         logger.exception("Cache prune failed; continuing startup")
+
+    async def _periodic_prune_task() -> None:
+        while True:
+            await asyncio.sleep(3600)
+            try:
+                await run_in_threadpool(_prune_work_dir)
+            except Exception:  # noqa: BLE001
+                logger.exception("Periodic cache prune failed")
+
+    prune_task = asyncio.create_task(_periodic_prune_task())
     try:
         yield
     finally:
+        prune_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await prune_task
         await run_in_threadpool(_shutdown_cleanup)
 
 
@@ -1668,7 +1721,7 @@ async def list_models(body: ListModelRequest) -> ListModelResponse:
 _T = TypeVar("_T")
 
 #: How often the disconnect watcher polls an in-flight long job.
-DISCONNECT_POLL_SECONDS = 1.0
+DISCONNECT_POLL_SECONDS = 0.5
 
 
 async def _run_until_disconnected(
@@ -1863,16 +1916,39 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                             )
                         if body.cloud is None:
                             raise RuntimeError("Cloud STT config disappeared.")
-                        return await transcriber.transcribe_cloud(
-                            path,
-                            base_url=body.cloud.base_url,
-                            api_key=body.cloud.api_key,
-                            model=body.arabic_model or body.cloud.model,
-                            language="ar",
-                            prompt=None,
-                            glossary=None,
-                            cancel_event=cancel_event,
-                        )
+                        model = body.arabic_model or body.cloud.model
+                        try:
+                            return await transcriber.transcribe_cloud(
+                                path,
+                                base_url=body.cloud.base_url,
+                                api_key=body.cloud.api_key,
+                                model=model,
+                                language="ar",
+                                prompt=None,
+                                glossary=None,
+                                cancel_event=cancel_event,
+                            )
+                        except transcriber.TranscriptionError as exc:
+                            if body.arabic_model and body.arabic_model != body.cloud.model and (
+                                "HTTP 400" in str(exc) or "HTTP 404" in str(exc) or "400" in str(exc) or "404" in str(exc)
+                            ):
+                                logger.warning(
+                                    "Arabic STT model '%s' unavailable (%s); retrying with '%s'.",
+                                    body.arabic_model,
+                                    exc,
+                                    body.cloud.model,
+                                )
+                                return await transcriber.transcribe_cloud(
+                                    path,
+                                    base_url=body.cloud.base_url,
+                                    api_key=body.cloud.api_key,
+                                    model=body.cloud.model,
+                                    language="ar",
+                                    prompt=None,
+                                    glossary=None,
+                                    cancel_event=cancel_event,
+                                )
+                            raise
 
                     logger.info(
                         "Arabic audit found %d candidate recitation span(s).", len(spans)
@@ -2644,6 +2720,10 @@ def _stream_batch(
         )
 
     final_status = "completed" if failures == 0 else ("error" if failures == total else "completed")
+    try:
+        _prune_work_dir()
+    except Exception:  # noqa: BLE001
+        logger.exception("Post-render cache prune failed")
     yield _sse(
         "done",
         {
@@ -2736,14 +2816,33 @@ def _start_parent_watchdog() -> None:
 
 
 def main() -> None:
+    import socket
     import uvicorn
+
+    host = config.host()
+    requested = config.port()
+    if requested == 0:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, 0))
+        sock.listen(2048)
+        port = sock.getsockname()[1]
+        uvicorn_kwargs = {"fd": sock.fileno()}
+    else:
+        port = requested
+        sock = None
+        uvicorn_kwargs = {"port": port}
+
+    # Unbuffered handshake so the Tauri shell can capture the bound port.
+    sys.stdout.write(f"TAFSEER_SIDECAR_READY:port={port}\n")
+    sys.stdout.flush()
 
     logger.info(
         "%s %s starting on http://%s:%s (ffmpeg=%s, fonts=%s, work=%s)",
         config.APP_NAME,
         config.APP_VERSION,
-        config.host(),
-        config.port(),
+        host,
+        port,
         config.ffmpeg_path() or "NOT FOUND",
         config.fonts_dir(),
         config.work_dir(),
@@ -2755,11 +2854,14 @@ def main() -> None:
     # reach sidecar.log.
     uvicorn.run(
         app,
-        host=config.host(),
-        port=config.port(),
+        host=host,
         log_level="info",
         log_config=None,
+        **uvicorn_kwargs,
     )
+    if sock is not None:
+        with contextlib.suppress(OSError):
+            sock.close()
 
 
 if __name__ == "__main__":

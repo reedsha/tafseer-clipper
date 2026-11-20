@@ -104,11 +104,17 @@ function applyDiscovery(
   const selectedClipId = merged.some((clip) => clip.id === project.selectedClipId)
     ? project.selectedClipId
     : (merged[0]?.id ?? null);
+  const validClipIds = new Set(merged.map((clip) => clip.id));
+  const cleanedSubtitles: Record<string, SubtitleCue[]> = {};
+  for (const [clipId, cues] of Object.entries(project.subtitles)) {
+    if (validClipIds.has(clipId)) {
+      cleanedSubtitles[clipId] = cues;
+    }
+  }
   return {
     ...project,
     clips: merged,
-    // Old clip ids are gone on a clean restart, so their cue tracks must go too.
-    subtitles: payload.replaceAll ? {} : project.subtitles,
+    subtitles: cleanedSubtitles,
     selectedClipId,
   };
 }

@@ -166,20 +166,47 @@ def match_text(text: str, *, min_score: float | None = None) -> QuranMatch | Non
     # Short queries need a near-exact match; long ones tolerate STT errors.
     threshold = min_score
     if threshold is None:
-        threshold = 0.78 if len(query_set) <= 3 else 0.58
+        threshold = 0.85 if len(query_words) <= 3 else 0.78
 
     best: tuple[float, _Verse] | None = None
     for position in candidates:
         verse = _VERSES[position]
-        intersection = len(query_set & verse.words)
-        if intersection == 0:
+        verse_words = verse.normalized.split()
+        if not verse_words:
             continue
-        overlap = intersection / max(len(query_set), len(verse.words))
-        # A quick lower bound before the more expensive string ratio.
-        if overlap < threshold * 0.75:
-            continue
-        ratio = SequenceMatcher(None, query, verse.normalized).ratio()
-        score = max(overlap, ratio)
+
+        # Sub-verse alignment: when the query is shorter than the verse, slide a
+        # token window across the verse and score against the best sub-window
+        # rather than diluting against the whole verse length.
+        if len(query_words) < len(verse_words):
+            window_size = min(len(query_words) + 1, len(verse_words))
+            max_intersection = 0
+            best_window_text: str | None = None
+            for start_idx in range(len(verse_words) - window_size + 1):
+                window_words = verse_words[start_idx : start_idx + window_size]
+                window_set = set(window_words)
+                intersection = len(query_set & window_set)
+                if intersection > max_intersection:
+                    max_intersection = intersection
+                    best_window_text = " ".join(window_words)
+            if max_intersection == 0 or best_window_text is None:
+                continue
+            overlap = max_intersection / max(len(query_words), window_size)
+            # Overlap is a fast prune filter only; never the final score.
+            if overlap < 0.50:
+                continue
+            ratio = SequenceMatcher(None, query, best_window_text).ratio()
+            score = ratio
+        else:
+            intersection = len(query_set & verse.words)
+            if intersection == 0:
+                continue
+            overlap = intersection / max(len(query_set), len(verse.words))
+            if overlap < 0.50:
+                continue
+            ratio = SequenceMatcher(None, query, verse.normalized).ratio()
+            score = ratio
+
         if best is None or score > best[0]:
             best = (score, verse)
 

@@ -337,6 +337,19 @@ function downloadText(text: string, fileName: string): void {
 export async function saveProjectFile(project: ProjectData): Promise<"saved" | "cancelled"> {
   const text = serializeProject(project);
   const fileName = suggestProjectFileName(project);
+
+  if (isDesktopRuntime()) {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    const selected = await save({
+      defaultPath: fileName,
+      filters: [{ name: "Tafseer Project (*.tafseer)", extensions: ["tafseer"] }],
+    });
+    if (!selected) return "cancelled";
+    await writeTextFile(selected, text);
+    return "saved";
+  }
+
   const picker = (window as WindowWithFileSystemAccess).showSaveFilePicker;
 
   if (typeof picker === "function") {
@@ -381,6 +394,21 @@ function pickFileWithInput(): Promise<File | null> {
 
 /** Open a `.tafseer` file from disk. Returns `null` when the picker is dismissed. */
 export async function openProjectFile(): Promise<ProjectData | null> {
+  if (isDesktopRuntime()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const { readTextFile } = await import("@tauri-apps/plugin-fs");
+    const selected = await open({
+      filters: [{ name: "Tafseer Project (*.tafseer)", extensions: ["tafseer"] }],
+      multiple: false,
+    });
+    if (!selected || Array.isArray(selected)) {
+      if (!selected) return null;
+    }
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (!path) return null;
+    return parseProjectFile(await readTextFile(path));
+  }
+
   const picker = (window as WindowWithFileSystemAccess).showOpenFilePicker;
 
   if (typeof picker === "function") {
@@ -414,13 +442,39 @@ function autosaveKey(projectId: string): string {
 }
 
 export function writeAutosave(project: ProjectData): boolean {
+  // In the desktop runtime the full `.tafseer` state lives on disk (see
+  // writeAutosaveFile); localStorage only keeps the lightweight session index.
+  if (isDesktopRuntime()) return true;
   try {
     localStorage.setItem(
       autosaveKey(project.id),
       serializeProject({ ...project, updatedAt: Date.now() }),
     );
     return true;
-  } catch {
+  } catch (error) {
+    // Browser fallback: evict oldest full-project payloads on quota exhaustion.
+    if (error instanceof DOMException && error.name === "QuotaExceededError") {
+      try {
+        const keys: string[] = [];
+        for (let i = 0; i < localStorage.length; i += 1) {
+          const key = localStorage.key(i);
+          if (key?.startsWith(AUTOSAVE_PREFIX)) keys.push(key);
+        }
+        // Keep at most 3 full projects: drop the oldest by key order heuristic.
+        keys.sort();
+        while (keys.length > 3) {
+          const oldest = keys.shift();
+          if (oldest) localStorage.removeItem(oldest);
+        }
+        localStorage.setItem(
+          autosaveKey(project.id),
+          serializeProject({ ...project, updatedAt: Date.now() }),
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    }
     return false;
   }
 }
@@ -530,17 +584,50 @@ export async function writeAutosaveFile(
   projectFolder: string,
 ): Promise<string> {
   const fs = await import("@tauri-apps/plugin-fs");
-  const { join } = await import("@tauri-apps/api/path");
-  const folder = await resolveAutosaveFolder(projectFolder);
-  await fs.mkdir(folder, { recursive: true });
-  const filePath = await join(folder, diskAutosaveFileName(project));
-  // Auto-save is written often, so skip the pretty-printing used for manual saves.
-  await fs.writeTextFile(
-    filePath,
-    serializeProject({ ...project, updatedAt: Date.now() }, false),
-  );
-  rememberAutosavePath(project.id, filePath);
-  return filePath;
+  const { join, appLocalDataDir } = await import("@tauri-apps/api/path");
+  const trimmed = projectFolder.trim();
+
+  // Try to grant scope for a user-selected folder on any drive (TAU-01).
+  let primaryFolder = trimmed;
+  let usedFallback = false;
+  if (trimmed) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("grant_project_folder_scope", { folderPath: trimmed });
+    } catch {
+      primaryFolder = "";
+    }
+  }
+
+  const fallbackFolder = await join(await appLocalDataDir(), DISK_AUTOSAVE_FOLDER);
+
+  const writeOnce = async (folder: string): Promise<string> => {
+    await fs.mkdir(folder, { recursive: true });
+    const filePath = await join(folder, diskAutosaveFileName(project));
+    await fs.writeTextFile(
+      filePath,
+      serializeProject({ ...project, updatedAt: Date.now() }, false),
+    );
+    rememberAutosavePath(project.id, filePath);
+    return filePath;
+  };
+
+  if (primaryFolder) {
+    try {
+      return await writeOnce(primaryFolder);
+    } catch {
+      usedFallback = true;
+      // Fall through to the local backup folder.
+    }
+  } else if (trimmed) {
+    usedFallback = true;
+  }
+
+  const savedPath = await writeOnce(fallbackFolder);
+  if (usedFallback) {
+    throw new Error("Custom folder not writable; saved to local backup");
+  }
+  return savedPath;
 }
 
 /**

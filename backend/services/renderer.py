@@ -155,14 +155,14 @@ def clear_capability_cache() -> None:
 def escape_filter_path(path: str | Path) -> str:
     """Escape a Windows path for use inside an FFmpeg filtergraph value.
 
-    Forward slashes are accepted everywhere, ``:`` must be escaped because it
-    separates filter options, and ``'`` / ``\\`` / ``[]``,``;`` are neutralised.
+    Forward slashes are accepted everywhere; ``:`` separates filter options so
+    it must be escaped even inside single quotes.  Brackets/commas/semicolons
+    are left untouched: inside single quotes FFmpeg keeps a leading backslash
+    literally, which corrupts Windows paths.
     """
-    text = str(Path(path)).replace("\\", "/")
+    text = str(Path(path).resolve()).replace("\\", "/")
     text = text.replace(":", "\\:")
     text = text.replace("'", "\\'")
-    for char in ("[", "]", ",", ";"):
-        text = text.replace(char, "\\" + char)
     return text
 
 

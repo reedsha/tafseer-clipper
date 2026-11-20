@@ -8,7 +8,7 @@
  */
 
 import { getAccelerationPackState } from "@/lib/acceleration";
-import { getHealth, SIDECAR_URL, type HealthResponse } from "@/lib/api";
+import { getHealth, getSidecarUrl, type HealthResponse } from "@/lib/api";
 import { getAppVersion } from "@/lib/appVersion";
 import { isTauriRuntime } from "@/lib/media";
 import { getUpdaterStatus } from "@/lib/updater";
@@ -89,7 +89,7 @@ export async function buildDiagnostics(input: DiagnosticsInput): Promise<string>
       language: typeof navigator === "undefined" ? "unknown" : navigator.language,
     },
     sidecar: {
-      url: SIDECAR_URL,
+      url: getSidecarUrl(),
       status: input.sidecarStatus,
       error: sidecarError,
       health,

@@ -1,0 +1,34 @@
+name: Sync Cargo.lock
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Regenerate Cargo.lock on release PRs
+    runs-on: windows-latest
+    if: startsWith(github.head_ref, 'release-please--')
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: Regenerate lockfile
+        shell: pwsh
+        run: |
+          cargo check --manifest-path src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "cargo check failed" }
+      - name: Commit lockfile if changed
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add src-tauri/Cargo.lock
+          if (git diff --cached --quiet) { Write-Host "No lockfile changes"; exit 0 }
+          git commit -m "chore: sync Cargo.lock with Cargo.toml"
+          git push

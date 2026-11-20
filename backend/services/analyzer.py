@@ -607,10 +607,10 @@ async def _discover_with_prompts(
     Re-roll feedback; they are rendered once (bounded) and appended to every
     window prompt so the writing model learns from earlier passes.
     """
-    window_budget = min(MAX_DISCOVERY_WINDOWS, max(1, max_clips))
-    windows = split_transcript_windows(segments, max_windows=window_budget)
-    window_total = len(windows)
-    per_window, remainder = divmod(max_clips, window_total)
+    windows = split_transcript_windows(segments, max_windows=MAX_DISCOVERY_WINDOWS)
+    window_total = len(windows) or 1
+    # Each window over-samples candidates; global pooling + ranking trims to max_clips.
+    per_window_candidates = max(2, math.ceil(max_clips * 1.5 / window_total))
     exemplar_block = format_exemplars(approved_exemplars, rejected_exemplars)
 
     proposals: list[Any] = []
@@ -620,7 +620,7 @@ async def _discover_with_prompts(
         # Natural cancellation boundary: one LLM pass per window; a
         # disconnected client stops before the next provider call.
         raise_if_cancelled(cancel_event)
-        budget = per_window + (1 if index < remainder else 0)
+        budget = per_window_candidates
         if budget < 1:
             continue
         messages = build_discover_messages(

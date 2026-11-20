@@ -87,8 +87,11 @@ def _replacement_for_span(
     text = re.sub(r"\s+", " ", arabic_text).strip()
     if len(_ARABIC_CHAR.findall(text)) < _MIN_ARABIC_CHARS or _arabic_ratio(text) < _MIN_ARABIC_RATIO:
         return None
-    start = min(segment.start for segment in removed)
-    end = max(segment.end for segment in removed)
+    start = float(span.get("start") or 0.0)
+    end = float(span.get("end") or 0.0)
+    if end <= start and removed:
+        start = min(segment.start for segment in removed)
+        end = max(segment.end for segment in removed)
     kind = str(span.get("kind") or "quote")
     confidence = float(span.get("confidence") or 0.0)
     reference = str(span.get("reference") or "").strip()
@@ -97,11 +100,19 @@ def _replacement_for_span(
 
     match = quran.match_text(text)
     if match is not None:
-        text = match.arabic
-        reference = match.reference
-        translation = match.thai
-        confidence = max(confidence, match.score)
-        source = "quran"
+        # Only overwrite the spoken transcription with the canonical verse when
+        # the match is exact or high-confidence verbatim. Otherwise keep the
+        # verbatim Whisper transcription and merely annotate the reference.
+        if quran.normalize_arabic(match.arabic) == quran.normalize_arabic(text) or match.score >= 0.88:
+            text = match.arabic
+            reference = match.reference
+            translation = match.thai
+            confidence = max(confidence, match.score)
+            source = "quran"
+        else:
+            reference = match.reference
+            confidence = max(confidence, match.score)
+            source = "recitation"
 
     return transcriber.Segment(
         id=-1,
@@ -136,6 +147,7 @@ async def recover_arabic(
         return segments
     ordered = sorted(segments, key=lambda segment: segment.start)
     replacements: list[transcriber.Segment] = []
+    fragments: list[transcriber.Segment] = []
     removed_ids: set[int] = set()
     slices: list[Path] = []
 
@@ -147,14 +159,56 @@ async def recover_arabic(
             end = float(span.get("end") or 0.0)
             if end - start < 0.25:
                 continue
-            removed = [
-                segment
-                for segment in ordered
-                if segment.id not in removed_ids
-                and start - 0.05 <= (segment.start + segment.end) / 2 <= end + 0.05
-            ]
+            # Temporal interval overlap with boundary splitting.
+            removed: list[transcriber.Segment] = []
+            split_segments: list[transcriber.Segment] = []
+            for segment in ordered:
+                if segment.id in removed_ids:
+                    continue
+                overlap = max(0.0, min(segment.end, end) - max(segment.start, start))
+                if overlap <= 0.15:
+                    continue
+                # Split straddling boundary segments to preserve surrounding speech.
+                if segment.start < start - 0.2 and segment.end > start:
+                    # Preserve leading Thai speech [segment.start, start].
+                    leading = transcriber.Segment(
+                        id=segment.id,
+                        start=segment.start,
+                        end=start,
+                        text=segment.text,
+                        language=segment.language,
+                        sentence_id=segment.sentence_id,
+                        source=segment.source,
+                        reference=segment.reference,
+                        confidence=segment.confidence,
+                        original_text=segment.original_text,
+                        translation=segment.translation,
+                    )
+                    split_segments.append(leading)
+                    removed.append(segment)
+                elif segment.end > end + 0.2 and segment.start < end:
+                    trailing = transcriber.Segment(
+                        id=segment.id,
+                        start=end,
+                        end=segment.end,
+                        text=segment.text,
+                        language=segment.language,
+                        sentence_id=segment.sentence_id,
+                        source=segment.source,
+                        reference=segment.reference,
+                        confidence=segment.confidence,
+                        original_text=segment.original_text,
+                        translation=segment.translation,
+                    )
+                    split_segments.append(trailing)
+                    removed.append(segment)
+                else:
+                    removed.append(segment)
             if not removed:
                 continue
+            # Re-insert split boundary fragments into the ordered list later by
+            # appending them to `ordered` replacement handling: store on span.
+            span["_split_fragments"] = split_segments
             slice_start = max(0.0, start - RECITATION_PAD_SECONDS)
             slice_end = end + RECITATION_PAD_SECONDS
             target = wav_path.with_name(f"{wav_path.stem}-ar-{len(slices)}.wav")
@@ -180,6 +234,7 @@ async def recover_arabic(
                 continue
             replacements.append(replacement)
             removed_ids.update(segment.id for segment in removed)
+            fragments.extend(span.get("_split_fragments") or [])
     finally:
         for path in slices:
             with contextlib.suppress(OSError):
@@ -191,6 +246,7 @@ async def recover_arabic(
     merged: list[transcriber.Segment] = [
         segment for segment in ordered if segment.id not in removed_ids
     ]
+    merged.extend(fragments)
     merged.extend(replacements)
     merged.sort(key=lambda segment: (segment.start, segment.end))
     for index, segment in enumerate(merged):

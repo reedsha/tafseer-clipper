@@ -9,13 +9,15 @@
 
 mod acceleration;
 
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{Emitter, Manager, WindowEvent};
+use tauri_plugin_fs::FsExt;
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
@@ -55,15 +57,6 @@ struct SidecarState {
 struct SidecarPaths {
     fonts_dir: PathBuf,
     work_dir: PathBuf,
-}
-
-/// Ask the OS for a free loopback port by binding `127.0.0.1:0`, reading the
-/// assigned port, and immediately releasing it for the sidecar to claim.
-fn pick_free_loopback_port() -> Option<u16> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
-    let port = listener.local_addr().ok()?.port();
-    drop(listener);
-    Some(port)
 }
 
 /// Resolve the base data directory, preferring the Windows `%LOCALAPPDATA%`
@@ -123,27 +116,25 @@ fn sidecar_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
     }
 }
 
-/// Spawn `backend.exe` with the loopback port, user-data directories and the
-/// optional GPU acceleration pack directory.
-/// Returns `None` (and never panics) when the binary is missing or fails to
-/// start, so the app can fall back to a manually launched backend.
+/// Spawn `backend.exe` with an ephemeral port negotiated over stdout.
+/// Returns the child handle and the negotiated port (if the handshake succeeded)
+/// so the caller can inject the sidecar URL. Never panics.
 fn spawn_sidecar(
     app: &tauri::AppHandle,
-    port: u16,
     paths: &SidecarPaths,
     cuda_dir: Option<&Path>,
-) -> Option<CommandChild> {
+) -> (Option<CommandChild>, Option<u16>) {
     let Some(executable) = sidecar_executable(app) else {
         eprintln!(
             "[tafseer] falling back to 127.0.0.1:{FALLBACK_SIDECAR_PORT}"
         );
-        return None;
+        return (None, None);
     };
     let command = app.shell().command(&executable);
 
     let mut command = command
         .env("TAFSEER_HOST", "127.0.0.1")
-        .env("TAFSEER_PORT", port.to_string())
+        .env("TAFSEER_PORT", "0")
         // The sidecar watches this PID and exits if the shell dies without
         // running its shutdown handler (crash / Task Manager "End task").
         .env("TAFSEER_PARENT_PID", std::process::id().to_string())
@@ -161,15 +152,58 @@ fn spawn_sidecar(
 
     match command.spawn() {
         Ok((mut events, child)) => {
-            // Drain stdout/stderr so the child never blocks on a full pipe.
+            // Read the stdout handshake (TAFSEER_SIDECAR_READY:port=XXXXX) with
+            // a 10s timeout before draining the rest of the pipes.
+            let (tx, rx) = mpsc::channel::<Option<u16>>();
+            let tx_clone = tx.clone();
             tauri::async_runtime::spawn(async move {
+                let mut port: Option<u16> = None;
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    if port.is_some() || Instant::now() >= deadline {
+                        break;
+                    }
+                    // Poll with a short timeout by awaiting recv with a timeout.
+                    let recv = tokio::time::timeout(Duration::from_millis(200), events.recv()).await;
+                    match recv {
+                        Ok(Some(CommandEvent::Stdout(line))) => {
+                            let text = String::from_utf8_lossy(&line);
+                            eprintln!("[backend] {}", text.trim_end());
+                            for raw_line in text.lines() {
+                                if let Some(rest) = raw_line
+                                    .trim()
+                                    .strip_prefix("TAFSEER_SIDECAR_READY:port=")
+                                {
+                                    if let Ok(p) = rest.trim().parse::<u16>() {
+                                        port = Some(p);
+                                    }
+                                }
+                            }
+                        }
+                        Ok(Some(CommandEvent::Stderr(line))) => {
+                            eprintln!("[backend] {}", String::from_utf8_lossy(&line).trim_end());
+                        }
+                        Ok(Some(CommandEvent::Error(error))) => {
+                            eprintln!("[backend] {error}");
+                        }
+                        Ok(Some(CommandEvent::Terminated(payload))) => {
+                            eprintln!("[backend] exited (code: {:?})", payload.code);
+                            break;
+                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                        Err(_) => {} // timeout, loop again
+                    }
+                }
+                let _ = tx_clone.send(port);
+                // Continue draining so the child never blocks on a full pipe.
                 while let Some(event) = events.recv().await {
                     match event {
                         CommandEvent::Stdout(line) => {
-                            eprintln!("[backend] {}", String::from_utf8_lossy(&line));
+                            eprintln!("[backend] {}", String::from_utf8_lossy(&line).trim_end());
                         }
                         CommandEvent::Stderr(line) => {
-                            eprintln!("[backend] {}", String::from_utf8_lossy(&line));
+                            eprintln!("[backend] {}", String::from_utf8_lossy(&line).trim_end());
                         }
                         CommandEvent::Error(error) => eprintln!("[backend] {error}"),
                         CommandEvent::Terminated(payload) => {
@@ -180,7 +214,8 @@ fn spawn_sidecar(
                     }
                 }
             });
-            Some(child)
+            let port = rx.recv_timeout(Duration::from_secs(11)).ok().flatten();
+            (Some(child), port)
         }
         Err(error) => {
             eprintln!(
@@ -188,7 +223,7 @@ fn spawn_sidecar(
                  falling back to 127.0.0.1:{FALLBACK_SIDECAR_PORT}",
                 executable.display()
             );
-            None
+            (None, None)
         }
     }
 }
@@ -236,6 +271,18 @@ fn request_quit(app: &tauri::AppHandle) {
         stop_sidecar(app);
         app.exit(0);
     }
+}
+
+/// Grant filesystem scope for a user-selected project folder on any drive.
+#[tauri::command]
+fn grant_project_folder_scope(app: tauri::AppHandle, folder_path: String) -> Result<(), String> {
+    let path = PathBuf::from(&folder_path);
+    if !path.exists() {
+        std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    }
+    let scope = app.fs_scope();
+    scope.allow_directory(&path, true).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Renderer → shell: how many tasks are running. Drives the close dialog and
@@ -290,6 +337,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             acceleration::acceleration_status,
             acceleration::download_acceleration_pack,
+            grant_project_folder_scope,
             set_running_jobs,
             quit_app,
             minimize_to_tray
@@ -299,11 +347,11 @@ pub fn run() {
             let _ = std::fs::create_dir_all(&paths.fonts_dir);
             let _ = std::fs::create_dir_all(&paths.work_dir);
 
-            let port = pick_free_loopback_port().unwrap_or(FALLBACK_SIDECAR_PORT);
             // An installed GPU acceleration pack is handed to the sidecar as
             // TAFSEER_CUDA_DIR; an invalid marker is ignored (CPU fallback).
             let cuda_dir = acceleration::installed_cuda_dir(app.handle());
-            let child = spawn_sidecar(app.handle(), port, &paths, cuda_dir.as_deref());
+            let (child, negotiated_port) = spawn_sidecar(app.handle(), &paths, cuda_dir.as_deref());
+            let port = negotiated_port.unwrap_or(FALLBACK_SIDECAR_PORT);
             let sidecar_url = if child.is_some() {
                 format!("http://127.0.0.1:{port}")
             } else {

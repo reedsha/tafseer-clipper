@@ -178,6 +178,12 @@ export function splitAtWordBoundary(
  * vowel marks (or split a word in half) and corrupt the verse. A word longer
  * than the limit is left whole rather than mutilated.
  */
+const ARABIC_COMBINING_REGEX = /[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]/g;
+
+export function arabicVisualLength(text: string): number {
+  return text.replace(ARABIC_COMBINING_REGEX, "").length;
+}
+
 export function wrapArabicText(text: string, maxChars: number): string {
   if (maxChars <= 0 || !text.trim()) return text;
   return text
@@ -187,16 +193,21 @@ export function wrapArabicText(text: string, maxChars: number): string {
       if (words.length === 0) return "";
       const out: string[] = [];
       let current = "";
+      let currentVisualLength = 0;
       for (const word of words) {
+        const wordVisual = arabicVisualLength(word);
         if (!current) {
           current = word;
+          currentVisualLength = wordVisual;
           continue;
         }
-        if (current.length + 1 + word.length <= maxChars) {
+        if (currentVisualLength + 1 + wordVisual <= maxChars) {
           current += ` ${word}`;
+          currentVisualLength += 1 + wordVisual;
         } else {
           out.push(current);
           current = word;
+          currentVisualLength = wordVisual;
         }
       }
       if (current) out.push(current);

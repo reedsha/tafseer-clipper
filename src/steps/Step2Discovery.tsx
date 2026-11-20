@@ -466,11 +466,11 @@ export function Step2Discovery() {
             },
             { signal },
           );
-          // With a fast-judgment slot the first pass is the ranking model, so the
-          // report's writing model would mislabel the run.
+          // Always report the generative model that wrote the proposals; the fast
+          // judgment slot is an assist, not the primary engine.
           useAiActivityStore
             .getState()
-            .finish(activityId, "done", decisionRoute ? undefined : result.model || undefined);
+            .finish(activityId, "done", result.model || undefined);
           const latestSettings = useSettingsStore.getState();
           const proposals = result.clips
             .map((proposal, index) =>

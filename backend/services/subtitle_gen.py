@@ -150,9 +150,9 @@ def default_styles(resolution: str) -> tuple[StyleConfig, StyleConfig]:
     if portrait:
         arabic = StyleConfig(
             name="ArabicStyle",
-            font="Tahoma",
-            size=66,
-            primary_color="#FFD37A",  # warm gold, content colour only
+            font="Noto Naskh Arabic",
+            size=64,
+            primary_color="#dcb46e",
             margin_v=252,
             margin_l=54,
             margin_r=54,
@@ -162,32 +162,42 @@ def default_styles(resolution: str) -> tuple[StyleConfig, StyleConfig]:
         thai = StyleConfig(
             name="ThaiStyle",
             font="Leelawadee UI",
-            size=46,
-            primary_color="#FFFFFF",
-            margin_v=150,
+            size=44,
+            primary_color="#f4f4f1",
+            margin_v=160,
             margin_l=54,
             margin_r=54,
-            outline=2.0,
+            outline=3.0,
             shadow=1.0,
+            border_style=3,
+            back_color="#000000",
+            back_alpha="D8",
         )
     else:
         arabic = StyleConfig(
             name="ArabicStyle",
-            font="Tahoma",
+            font="Noto Naskh Arabic",
             size=54,
-            primary_color="#FFD37A",
+            primary_color="#dcb46e",
             margin_v=142,
             margin_l=80,
             margin_r=80,
+            outline=2.0,
+            shadow=1.0,
         )
         thai = StyleConfig(
             name="ThaiStyle",
             font="Leelawadee UI",
             size=38,
-            primary_color="#FFFFFF",
+            primary_color="#f4f4f1",
             margin_v=80,
             margin_l=80,
             margin_r=80,
+            outline=3.0,
+            shadow=1.0,
+            border_style=3,
+            back_color="#000000",
+            back_alpha="D8",
         )
     return arabic, thai
 

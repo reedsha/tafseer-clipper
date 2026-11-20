@@ -46,9 +46,11 @@ DecisionType = Literal["noul", "choice", "score"]
 #: using - the format is never inferred from a hostname.
 SYSTEMONE = "systemone"
 DECISIONS = "decisions"
+CHAT_COMPLETIONS = "chat_completions"
 WIRE_FORMAT_PATHS: dict[str, str] = {
     SYSTEMONE: "/v1/systemone",
     DECISIONS: "/v1/decisions",
+    CHAT_COMPLETIONS: "/v1/chat/completions",
 }
 #: Sentinel meaning "measure the shape once (Settings Test) and remember it".
 AUTO_FORMAT = "auto"
@@ -343,6 +345,36 @@ def _decisions_input(state: Any) -> Any:
     ):
         return [{"role": "user", "content": [{"type": "input_json", "data": state}]}]
     return json.dumps(state, ensure_ascii=False)
+
+
+def _chat_completions_system_prompt(questions: dict[str, Question]) -> str:
+    lines = [
+        "You are a decision model. Answer each named question with a JSON object.",
+        "Return ONLY a JSON object of the form {\"answers\": {<name>: <answer>}}.",
+        "Each answer must include the fields appropriate to its type:",
+        "- noul: {\"probability\": <0..1>, \"confidence\": <0..1>}",
+        "- choice: {\"choice\": <label>, \"probabilities\": {<label>: <0..1>}, \"confidence\": <0..1>}",
+        "- score: {\"score\": <level index 0..N-1>, \"confidence\": <0..1>}",
+    ]
+    for name, question in questions.items():
+        lines.append(f"Question '{name}' (type={question.type}): {question.instructions}")
+        criteria = question.criteria
+        if isinstance(criteria, dict):
+            for label, desc in criteria.items():
+                lines.append(f"  - {label}: {desc}")
+        elif isinstance(criteria, list):
+            for idx, text in enumerate(criteria):
+                lines.append(f"  - level {idx}: {text}")
+    return "\n".join(lines)
+
+
+def _chat_completions_user_content(state: Any, questions: dict[str, Question]) -> str:
+    if isinstance(state, str):
+        return state
+    try:
+        return json.dumps(state, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(state)
 
 
 def _as_number(value: Any, *, field_name: str) -> float:
@@ -683,7 +715,7 @@ async def detect_format(
     if cached:
         return cached
     reasons: list[str] = []
-    for candidate in (DECISIONS, SYSTEMONE):
+    for candidate in (DECISIONS, SYSTEMONE, CHAT_COMPLETIONS):
         try:
             await _ask(
                 provider,
@@ -762,6 +794,15 @@ async def _ask(
                 for name, question in questions.items()
             ],
         }
+    elif wire_format == CHAT_COMPLETIONS:
+        payload = {
+            "model": provider.model,
+            "messages": [
+                {"role": "system", "content": _chat_completions_system_prompt(questions)},
+                {"role": "user", "content": _chat_completions_user_content(state, questions)},
+            ],
+            "response_format": {"type": "json_object"},
+        }
     else:
         payload = {
             "model": provider.model,
@@ -816,6 +857,36 @@ async def _ask(
         raise DecisionError(f"The decision provider returned an error: {body['error']}")
     if wire_format == DECISIONS:
         return _parse_decisions_answers(body, questions)
+    if wire_format == CHAT_COMPLETIONS:
+        content = ""
+        if isinstance(body, dict):
+            choices = body.get("choices")
+            if isinstance(choices, list) and choices:
+                first = choices[0]
+                if isinstance(first, dict):
+                    message = first.get("message")
+                    if isinstance(message, dict):
+                        content = message.get("content") or ""
+        if not content and isinstance(body, dict):
+            # Some gateways return the JSON directly.
+            content = body.get("content") or ""
+        if isinstance(content, (dict, list)):
+            parsed = content
+        else:
+            try:
+                parsed = json.loads(str(content))
+            except (TypeError, ValueError) as exc:
+                raise DecisionError(
+                    f"The decision provider returned invalid JSON: {str(content)[:400]}"
+                ) from exc
+        if isinstance(parsed, dict) and "answers" in parsed:
+            payload = parsed
+        elif isinstance(parsed, dict):
+            payload = {"answers": parsed}
+        else:
+            raise DecisionError("The decision provider returned a non-object reply.")
+        # Reuse the systemone parser shape (answers keyed by name).
+        return _parse_answers(payload, questions)
     return _parse_answers(body, questions)
 
 
