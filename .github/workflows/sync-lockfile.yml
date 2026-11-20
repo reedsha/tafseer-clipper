@@ -18,6 +18,16 @@ jobs:
           ref: ${{ github.head_ref }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: Stage placeholder external binaries
+        shell: pwsh
+        run: |
+          # tauri-build validates every bundled resource during cargo check.
+          $triple = "x86_64-pc-windows-msvc"
+          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
+          New-Item -ItemType File -Force "src-tauri/binaries/ffmpeg-$triple.exe" | Out-Null
+          New-Item -ItemType File -Force "src-tauri/binaries/ffprobe-$triple.exe" | Out-Null
+          New-Item -ItemType Directory -Force build/sidecar/backend | Out-Null
+          Copy-Item C:\Windows\System32\where.exe build\sidecar\backend\backend.exe -Force
       - name: Regenerate lockfile
         shell: pwsh
         run: |
