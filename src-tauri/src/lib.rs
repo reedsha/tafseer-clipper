@@ -39,6 +39,14 @@ const SIDECAR_EXE: &str = "backend";
 /// answers.
 const FALLBACK_SIDECAR_PORT: u16 = 8008;
 
+/// How long the shell waits for the sidecar's stdout handshake.
+///
+/// A frozen onedir build has to unpack and import torch/whisper, and antivirus
+/// can scan it on first launch. The old 10 s limit expired while the sidecar was
+/// already listening on its own port, so the renderer was pointed at 8008 and
+/// reported "Engine not responding". The E2E handshake test allows 30 s; match it.
+const SIDECAR_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Process-wide handle to the spawned sidecar and the tray that keeps it alive
 /// while the window is hidden.
 struct SidecarState {
@@ -158,7 +166,7 @@ fn spawn_sidecar(
             let tx_clone = tx.clone();
             tauri::async_runtime::spawn(async move {
                 let mut port: Option<u16> = None;
-                let deadline = Instant::now() + Duration::from_secs(10);
+                let deadline = Instant::now() + SIDECAR_HANDSHAKE_TIMEOUT;
                 loop {
                     if port.is_some() || Instant::now() >= deadline {
                         break;
@@ -214,7 +222,10 @@ fn spawn_sidecar(
                     }
                 }
             });
-            let port = rx.recv_timeout(Duration::from_secs(11)).ok().flatten();
+            let port = rx
+                .recv_timeout(SIDECAR_HANDSHAKE_TIMEOUT + Duration::from_secs(1))
+                .ok()
+                .flatten();
             (Some(child), port)
         }
         Err(error) => {
@@ -351,6 +362,12 @@ pub fn run() {
             // TAFSEER_CUDA_DIR; an invalid marker is ignored (CPU fallback).
             let cuda_dir = acceleration::installed_cuda_dir(app.handle());
             let (child, negotiated_port) = spawn_sidecar(app.handle(), &paths, cuda_dir.as_deref());
+            if child.is_some() && negotiated_port.is_none() {
+                eprintln!(
+                    "[tafseer] the sidecar started but never announced its port; \
+                     falling back to 127.0.0.1:{FALLBACK_SIDECAR_PORT}"
+                );
+            }
             let port = negotiated_port.unwrap_or(FALLBACK_SIDECAR_PORT);
             let sidecar_url = if child.is_some() {
                 format!("http://127.0.0.1:{port}")
