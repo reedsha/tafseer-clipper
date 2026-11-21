@@ -69,8 +69,8 @@ export interface WhisperSettings {
   initialPrompt: string;
 }
 
-/** The three System One slots from docs/DECISION_MODELS_PLAN.md. */
-export type DecisionSlotId = "analysis" | "clip_scoring" | "verify_triage";
+/** The System One slots from docs/DECISION_MODELS_PLAN.md. */
+export type DecisionSlotId = "analysis" | "verify_triage";
 export type DecisionSlotMode = "local" | "cloud";
 /** Two wire formats exist; `auto` is measured once by Test, then remembered. */
 export type DecisionFormat = "auto" | "systemone" | "decisions";
@@ -330,7 +330,6 @@ const DEFAULT_GLOSSARY: GlossaryEntry[] = [
  */
 const DEFAULT_DECISION_SLOTS: DecisionSlots = {
   analysis: { enabled: true, mode: "local", model: "", format: "auto", endpointUrl: "" },
-  clip_scoring: { enabled: true, mode: "cloud", model: "", format: "auto", endpointUrl: "" },
   verify_triage: { enabled: true, mode: "cloud", model: "", format: "auto", endpointUrl: "" },
 };
 

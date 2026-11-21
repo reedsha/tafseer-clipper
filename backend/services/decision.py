@@ -233,6 +233,11 @@ class Answer:
     level: float | None = None
     probabilities: dict[str, float] = field(default_factory=dict)
     confidence: float = 0.0
+    #: True when the provider supplied a confidence, explicitly or through the
+    #: probability mass it reported.  An uncalibrated answer carries
+    #: ``confidence = 0.0``, which callers must not read as "unsure": there is
+    #: simply no signal, and gating on it would disable the slot entirely.
+    calibrated: bool = False
     legend: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -451,6 +456,8 @@ def _parse_answer(name: str, question: Question, entry: Any) -> Answer:
             raise DecisionError(
                 f"Choice answer '{name}' returned a label absent from its probabilities."
             )
+        if probabilities:
+            implied_confidence = max(probabilities.values())
     elif expected == "noul":
         raw_noul = entry.get("noul")
         if isinstance(raw_noul, bool):
@@ -492,7 +499,7 @@ def _parse_answer(name: str, question: Question, entry: Any) -> Answer:
                 f"[0, {levels - 1}]."
             )
         score = min(1.0, max(0.0, level / (levels - 1)))
-        implied_confidence = None
+        implied_confidence = max(probabilities.values()) if probabilities else None
 
     if "confidence" in entry:
         confidence = _as_unit_float(entry.get("confidence"), field_name=f"{name}.confidence")
@@ -502,6 +509,7 @@ def _parse_answer(name: str, question: Question, entry: Any) -> Answer:
         # Bare answer without calibration: confidence 0.0 so callers' escalation
         # gates fall back to the generative model (AGENTS.md §3).
         confidence = 0.0
+    calibrated = ("confidence" in entry) or (implied_confidence is not None)
 
     return Answer(
         name=name,
@@ -512,6 +520,7 @@ def _parse_answer(name: str, question: Question, entry: Any) -> Answer:
         level=level,
         probabilities=probabilities,
         confidence=confidence,
+        calibrated=calibrated,
         legend=legend,
     )
 
@@ -580,8 +589,8 @@ def _parse_decisions_answer(name: str, question: Question, entry: Any) -> Answer
             raise DecisionError(
                 f"Choice answer '{name}' returned a label absent from its probabilities."
             )
-        # Confidence comes only from an explicit "confidence" field; a bare
-        # choice without calibration falls through to confidence 0.0 below.
+        if probabilities:
+            implied_confidence = max(probabilities.values())
     elif question.type == "noul":
         probability = _as_unit_float(
             entry.get("probability"), field_name=f"{name}.probability"
@@ -608,7 +617,7 @@ def _parse_decisions_answer(name: str, question: Question, entry: Any) -> Answer
                 f"[0, {levels - 1}]."
             )
         score = min(1.0, max(0.0, level / (levels - 1)))
-        implied_confidence = None
+        implied_confidence = max(probabilities.values()) if probabilities else None
 
     if "confidence" in entry:
         confidence = _as_unit_float(
@@ -620,6 +629,7 @@ def _parse_decisions_answer(name: str, question: Question, entry: Any) -> Answer
         # Bare answer without calibration: confidence 0.0 so callers' escalation
         # gates fall back to the generative model (AGENTS.md §3).
         confidence = 0.0
+    calibrated = ("confidence" in entry) or (implied_confidence is not None)
 
     return Answer(
         name=name,
@@ -630,6 +640,7 @@ def _parse_decisions_answer(name: str, question: Question, entry: Any) -> Answer
         level=level,
         probabilities=probabilities,
         confidence=confidence,
+        calibrated=calibrated,
         legend=legend,
     )
 
@@ -767,6 +778,22 @@ async def decide(
     )
 
 
+def _transport_message(
+    provider: DecisionProviderConfig, endpoint: str, exc: httpx.HTTPError
+) -> str:
+    """Plain, actionable transport failure text.
+
+    ``httpx.ReadTimeout`` carries an empty message, so ``{exc}`` used to leave
+    the user with a sentence that simply stopped after the colon.
+    """
+    if isinstance(exc, httpx.TimeoutException):
+        return (
+            f"The decision model did not answer within {provider.timeout:g} "
+            f"seconds at {endpoint}. Choose a faster model in Settings."
+        )
+    return f"The decision request failed ({type(exc).__name__}) at {endpoint}."
+
+
 async def _ask(
     provider: DecisionProviderConfig,
     state: str | dict[str, Any] | list[Any],
@@ -821,18 +848,25 @@ async def _ask(
                     response = await client.post(
                         endpoint, headers=headers, json=payload
                     )
-                except httpx.HTTPError as exc:
+                except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
                     if attempt == 0:
+                        # The provider never accepted the request, so a retry
+                        # cannot bill (or duplicate) a generation.
                         await asyncio.sleep(0.6)
                         continue
                     raise DecisionError(
-                        f"Could not reach the decision model at {endpoint}: {exc}"
+                        _transport_message(provider, endpoint, exc)
+                    ) from exc
+                except httpx.HTTPError as exc:
+                    # A read timeout is deliberately *not* retried: the provider
+                    # accepted the request and is still generating, so a retry
+                    # bills the same work twice and doubles the wait.
+                    raise DecisionError(
+                        _transport_message(provider, endpoint, exc)
                     ) from exc
                 break
     except httpx.HTTPError as exc:
-        raise DecisionError(
-            f"Could not reach the decision model at {endpoint}: {exc}"
-        ) from exc
+        raise DecisionError(_transport_message(provider, endpoint, exc)) from exc
 
     if response is None:
         raise DecisionError(f"Could not reach the decision model at {endpoint}.")

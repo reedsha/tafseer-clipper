@@ -480,8 +480,6 @@ export interface DiscoverRequest {
   max_duration?: number;
   language?: string;
   provider?: ProviderOverride | null;
-  /** Optional fast-judgment slot for candidate scoring (additive). */
-  decision_provider?: DecisionProviderOverride | null;
   /** Kept clips the next re-roll should imitate (additive). */
   approved_exemplars?: ClipExemplar[];
   /** Passed-on clips the next re-roll should avoid (additive). */

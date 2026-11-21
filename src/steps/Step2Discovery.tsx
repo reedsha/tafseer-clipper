@@ -33,26 +33,17 @@ import { cn } from "cn";
 import { AiActivityLine } from "@/components/AiActivityLine";
 import { TimeFlow } from "@/components/TimeFlow";
 import { InlineError } from "@/components/InlineError";
-import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { VideoPlayer, type VideoPlayerHandle } from "@/components/VideoPlayer";
 import { WaveformBar } from "@/components/WaveformBar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { discoverClips, type ClipExemplar, type ClipProposal } from "@/lib/api";
-import { aiRouteFor, decisionActivityFor } from "@/lib/aiActivity";
+import { aiRouteFor } from "@/lib/aiActivity";
 import {
   applyCutBuffer,
   MIN_RENDERABLE_CLIP_SECONDS,
@@ -60,9 +51,9 @@ import {
 } from "@/lib/clipMath";
 import { toMediaSrc } from "@/lib/media";
 import { clamp, formatClock } from "@/lib/format";
-import { DEFAULT_DISCOVERY_SETTINGS, type ProjectClip, type ProjectData } from "@/lib/projectTypes";
-import { buildDecisionProviderFor, buildProviderFor, describeProviderGap } from "@/lib/providers";
-import { coerceToRange, DISCOVERY_LIMITS, NUMERIC_LIMITS } from "@/lib/settingsLimits";
+import type { ProjectClip, ProjectData } from "@/lib/projectTypes";
+import { buildProviderFor, describeProviderGap } from "@/lib/providers";
+import { coerceToRange, NUMERIC_LIMITS } from "@/lib/settingsLimits";
 import { useAiActivityStore } from "@/store/aiActivityStore";
 import { useJobStore, useTaskJob } from "@/store/jobStore";
 import { useProjectStore } from "@/store/projectStore";
@@ -71,7 +62,6 @@ import { useUiStore } from "@/store/uiStore";
 
 type DiscoveryMode = "initial" | "reroll" | "replace";
 type CutEdge = "start" | "end";
-type RefindMode = "reroll" | "replace";
 
 /** Playback-rate ladder for the J/K/L shuttle (1× = normal speed). */
 const SHUTTLE_RATES = [0.25, 0.5, 1, 1.5, 2, 3, 4] as const;
@@ -147,6 +137,16 @@ function proposalToClip(
   };
 }
 
+/** Titles of the other clips whose exported range overlaps this one. */
+function collidingTitles(clip: ProjectClip, clips: ProjectClip[]): string[] {
+  return clips
+    .filter(
+      (other) =>
+        other.id !== clip.id && other.start < clip.end && other.end > clip.start,
+    )
+    .map((other) => other.title);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Local components                                                            */
 /* -------------------------------------------------------------------------- */
@@ -155,6 +155,7 @@ function ClipCard({
   clip,
   index,
   selected,
+  collisions,
   onSelect,
   onApprove,
   onRemove,
@@ -162,6 +163,8 @@ function ClipCard({
   clip: ProjectClip;
   index: number;
   selected: boolean;
+  /** Titles of the other clips this one collides with; empty when it is clear. */
+  collisions: string[];
   onSelect: () => void;
   onApprove: () => void;
   onRemove: () => void;
@@ -179,7 +182,7 @@ function ClipCard({
         aria-current={selected ? "true" : undefined}
         aria-label={`${clip.title}, ${formatClock(clip.start)} to ${formatClock(clip.end)}, ${
           clip.approved ? "approved" : "not approved"
-        }`}
+        }${collisions.length > 0 ? `, overlaps ${collisions.join(", ")}` : ""}`}
         className="flex-col items-stretch h-auto w-full justify-start gap-0 whitespace-normal rounded-none px-3 pb-1.5 pt-2.5 text-left font-normal hover:bg-transparent focus-visible:ring-[3px] focus-visible:ring-ring/40"
       >
         <div className="flex w-full items-start gap-2">
@@ -210,6 +213,12 @@ function ClipCard({
           </p>
         ) : null}
       </Button>
+
+      {collisions.length > 0 ? (
+        <p className="px-3 pb-1 pl-10 text-[11px] leading-relaxed text-status-warning">
+          Overlaps: {collisions.join(", ")}
+        </p>
+      ) : null}
 
       <div className="flex items-center justify-between gap-1 px-2.5 pb-2 pt-0.5">
         <Button
@@ -287,17 +296,6 @@ export function Step2Discovery() {
         : "idle";
   const error = discoveryJob?.status === "error" ? discoveryJob.error : null;
   const [refinement, setRefinement] = useState("");
-  const [refindMode, setRefindMode] = useState<RefindMode>("reroll");
-  const [pendingReplaceAll, setPendingReplaceAll] = useState(false);
-  const [minDraft, setMinDraft] = useState(
-    String(project?.discovery.minDuration ?? DEFAULT_DISCOVERY_SETTINGS.minDuration),
-  );
-  const [maxDraft, setMaxDraft] = useState(
-    String(project?.discovery.maxDuration ?? DEFAULT_DISCOVERY_SETTINGS.maxDuration),
-  );
-  const [maxClipsDraft, setMaxClipsDraft] = useState(
-    String(project?.discovery.maxClips ?? DEFAULT_DISCOVERY_SETTINGS.maxClips),
-  );
   const [bufferDraft, setBufferDraft] = useState(editor.cutBufferSeconds);
   const [buttonStepDraft, setButtonStepDraft] = useState(String(editor.edgeButtonStepSeconds));
   const [keyStepDraft, setKeyStepDraft] = useState(String(editor.edgeKeyStepSeconds));
@@ -335,20 +333,6 @@ export function Step2Discovery() {
     setButtonStepDraft(String(editor.edgeButtonStepSeconds));
     setKeyStepDraft(String(editor.edgeKeyStepSeconds));
   }, [editor.edgeButtonStepSeconds, editor.edgeKeyStepSeconds]);
-
-  useEffect(() => {
-    setMinDraft(String(project?.discovery.minDuration ?? DEFAULT_DISCOVERY_SETTINGS.minDuration));
-    setMaxDraft(String(project?.discovery.maxDuration ?? DEFAULT_DISCOVERY_SETTINGS.maxDuration));
-    setMaxClipsDraft(String(project?.discovery.maxClips ?? DEFAULT_DISCOVERY_SETTINGS.maxClips));
-    setRefindMode("reroll");
-    setPendingReplaceAll(false);
-  }, [project?.id]);
-
-  // A preset or an imported project can change the target count; mirror it
-  // without touching a draft the editor is still typing in.
-  useEffect(() => {
-    setMaxClipsDraft(String(project?.discovery.maxClips ?? DEFAULT_DISCOVERY_SETTINGS.maxClips));
-  }, [project?.discovery.maxClips]);
 
   useEffect(() => {
     if (!project) return;
@@ -414,11 +398,9 @@ export function Step2Discovery() {
     const settings = useSettingsStore.getState();
     // The provider belongs to the action it unblocks: transcription no longer
     // checks this, so clicking Start is where a missing connection is reported.
-    // A clip-scoring decision slot can still serve a run without a writing
-    // model (the backend falls back to neutral titles), so don't block then.
+    // Clip finding is a writing-model job, so a missing model blocks the run.
     const providerGap = describeProviderGap(settings);
-    const decisionSlot = buildDecisionProviderFor(settings, "clip_scoring");
-    if (providerGap && !decisionSlot) {
+    if (providerGap) {
       toast.error("Clip finding isn't set up yet", {
         description: `Add ${providerGap} in the Find Clips configuration or AI connection settings, then try again.`,
       });
@@ -427,7 +409,6 @@ export function Step2Discovery() {
       return;
     }
     const replaceAll = mode === "replace";
-    const decisionRoute = decisionActivityFor(settings, "clip_scoring");
     const approvedRanges = current.clips
       .filter((clip) => clip.approved)
       .map((clip) => ({ start: clip.start, end: clip.end }));
@@ -440,17 +421,14 @@ export function Step2Discovery() {
       projectId,
       label: replaceAll ? L("Starting over with new clips") : L("Finding clips"),
       run: async (signal) => {
-        const activityId = useAiActivityStore.getState().start(
-          decisionRoute
-            ? { task: "clip-finding", ...decisionRoute }
-            : aiRouteFor(settings, "clip-finding"),
-        );
+        const activityId = useAiActivityStore
+          .getState()
+          .start(aiRouteFor(settings, "clip-finding"));
         try {
           const result = await discoverClips(
             {
               transcript_id: transcriptId,
               base_prompt: current.basePrompt,
-              session_guide: current.sessionGuide,
               refinement_note: note.trim(),
               excluded_ranges: replaceAll ? [] : approvedRanges,
               max_clips: current.discovery.maxClips,
@@ -458,16 +436,14 @@ export function Step2Discovery() {
               max_duration: current.discovery.maxDuration,
               language: settings.editor.language || "th",
               provider: buildProviderFor(settings, "discovery"),
-              decision_provider: decisionSlot,
-              // L("Start over") is a clean search: no old clip is kept or used as
-              // feedback, and their subtitle tracks are cleared on apply.
+              // A re-roll keeps approved clips out of the next search and feeds
+              // the kept/passed clips back as feedback.
               approved_exemplars: replaceAll ? [] : approvedExemplarsFor(current),
               rejected_exemplars: replaceAll ? [] : rejectedExemplarsFor(current),
             },
             { signal },
           );
-          // Always report the generative model that wrote the proposals; the fast
-          // judgment slot is an assist, not the primary engine.
+          // Report the writing model that produced the proposals.
           useAiActivityStore
             .getState()
             .finish(activityId, "done", result.model || undefined);
@@ -506,8 +482,8 @@ export function Step2Discovery() {
           // a "nothing more" outcome rather than a silent success.
           toast(L("No new clips found"), {
             description: replaceAll
-              ? "The clean search returned nothing, so your current clips are unchanged. Try a different topic focus or length range."
-              : "Your current clips are unchanged. Try adjusting the topic focus or the clip length range, then search again.",
+              ? "The search returned nothing, so your current clips are unchanged. Try different instructions, then search again."
+              : "Your current clips are unchanged. Try different instructions, then search again.",
           });
           return;
         }
@@ -707,71 +683,12 @@ export function Step2Discovery() {
   }
 
   function handleRetry() {
-    void runDiscovery(clips.length > 0 ? refindMode : "initial", refinement);
+    void runDiscovery(clips.length > 0 ? "reroll" : "initial", refinement);
   }
 
   function startSearch() {
     if (status === "running") return;
-    if (refindMode === "replace" && clips.length > 0) {
-      setPendingReplaceAll(true);
-      return;
-    }
-    void runDiscovery(clips.length > 0 ? refindMode : "initial", refinement);
-  }
-
-  function commitDuration() {
-    const current = useProjectStore.getState().project;
-    if (!current) return;
-    const rawMin = minDraft.trim() === "" ? Number.NaN : Number(minDraft);
-    const rawMax = maxDraft.trim() === "" ? Number.NaN : Number(maxDraft);
-    const min = Math.min(
-      DISCOVERY_LIMITS.minDuration.max,
-      Math.max(DISCOVERY_LIMITS.minDuration.min, Math.round(rawMin)),
-    );
-    const max = Math.min(
-      DISCOVERY_LIMITS.maxDuration.max,
-      Math.max(DISCOVERY_LIMITS.maxDuration.min, Math.round(rawMax)),
-    );
-    if (!Number.isFinite(rawMin) || !Number.isFinite(rawMax) || max <= min) {
-      toast.error("Clip length needs a valid range", {
-        description: "The maximum must be greater than the minimum.",
-      });
-      setMinDraft(String(current.discovery.minDuration));
-      setMaxDraft(String(current.discovery.maxDuration));
-      return;
-    }
-    if (min !== current.discovery.minDuration || max !== current.discovery.maxDuration) {
-      useProjectStore.getState().updateProject({
-        discovery: { ...current.discovery, minDuration: min, maxDuration: max },
-      });
-    }
-    setMinDraft(String(min));
-    setMaxDraft(String(max));
-  }
-
-  /**
-   * Commit the target clip count. The count is a per-search instruction (it
-   * reaches the sidecar as `max_clips`), so an empty or absurd value snaps back
-   * to the stored number instead of silently searching for nothing.
-   */
-  function commitMaxClips() {
-    const current = useProjectStore.getState().project;
-    if (!current) return;
-    const raw = maxClipsDraft.trim() === "" ? Number.NaN : Number(maxClipsDraft);
-    if (!Number.isFinite(raw)) {
-      toast.error("Clips to find needs a number", {
-        description: `Use a value from ${DISCOVERY_LIMITS.maxClips.min} to ${DISCOVERY_LIMITS.maxClips.max}.`,
-      });
-      setMaxClipsDraft(String(current.discovery.maxClips));
-      return;
-    }
-    const maxClips = coerceToRange(raw, current.discovery.maxClips, DISCOVERY_LIMITS.maxClips);
-    setMaxClipsDraft(String(maxClips));
-    if (maxClips !== current.discovery.maxClips) {
-      useProjectStore.getState().updateProject({
-        discovery: { ...current.discovery, maxClips },
-      });
-    }
+    void runDiscovery(clips.length > 0 ? "reroll" : "initial", refinement);
   }
 
   function commitEdgeStep(which: "button" | "key") {
@@ -956,6 +873,7 @@ export function Step2Discovery() {
                     clip={clip}
                     index={index}
                     selected={clip.id === selected?.id}
+                    collisions={collidingTitles(clip, clips)}
                     onSelect={() => selectClip(clip.id)}
                     onApprove={() => handleApprove(clip)}
                     onRemove={() => handleRemove(clip)}
@@ -966,103 +884,6 @@ export function Step2Discovery() {
           </div>
 
           <div className="shrink-0 space-y-2 border-t border-border bg-card/20 px-3 py-3">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                {L("Search setup")}
-              </h2>
-              <span className="text-[10px] text-muted-foreground">{L("Set up, then Start")}</span>
-            </div>
-
-            <div className="flex items-end gap-2">
-              <div className="min-w-0 flex-1 space-y-1">
-                <Label htmlFor="clip-min-seconds" className="text-[10px] text-muted-foreground">
-                  {L("Shortest (s)")}
-                </Label>
-                <Input
-                  id="clip-min-seconds"
-                  type="number"
-                  inputMode="numeric"
-                  min={DISCOVERY_LIMITS.minDuration.min}
-                  max={DISCOVERY_LIMITS.minDuration.max}
-                  step={DISCOVERY_LIMITS.minDuration.step}
-                  value={minDraft}
-                  onChange={(event) => setMinDraft(event.target.value)}
-                  onBlur={commitDuration}
-                  disabled={status === "running"}
-                  className="h-8 text-xs"
-                />
-              </div>
-              <div className="min-w-0 flex-1 space-y-1">
-                <Label htmlFor="clip-max-seconds" className="text-[10px] text-muted-foreground">
-                  {L("Longest (s)")}
-                </Label>
-                <Input
-                  id="clip-max-seconds"
-                  type="number"
-                  inputMode="numeric"
-                  min={DISCOVERY_LIMITS.maxDuration.min}
-                  max={DISCOVERY_LIMITS.maxDuration.max}
-                  step={DISCOVERY_LIMITS.maxDuration.step}
-                  value={maxDraft}
-                  onChange={(event) => setMaxDraft(event.target.value)}
-                  onBlur={commitDuration}
-                  disabled={status === "running"}
-                  className="h-8 text-xs"
-                />
-              </div>
-              <div className="w-20 shrink-0 space-y-1">
-                <Label htmlFor="clip-count" className="text-[10px] text-muted-foreground">
-                  {L("To find")}
-                </Label>
-                <Input
-                  id="clip-count"
-                  type="number"
-                  inputMode="numeric"
-                  min={DISCOVERY_LIMITS.maxClips.min}
-                  max={DISCOVERY_LIMITS.maxClips.max}
-                  step={DISCOVERY_LIMITS.maxClips.step}
-                  value={maxClipsDraft}
-                  onChange={(event) => setMaxClipsDraft(event.target.value)}
-                  onBlur={commitMaxClips}
-                  disabled={status === "running"}
-                  className="h-8 text-xs"
-                />
-              </div>
-            </div>
-
-            {clips.length > 0 ? (
-              <SegmentedToggle<RefindMode>
-                label={L("Re-find mode")}
-                value={refindMode}
-                options={[
-                  { value: "reroll", label: L("Find more") },
-                  { value: "replace", label: L("Start over") },
-                ]}
-                onChange={setRefindMode}
-                disabled={status === "running"}
-              />
-            ) : null}
-
-            <div className="space-y-1">
-              <Label htmlFor="session-guide" className="text-[11px] font-medium text-foreground/90">
-                {L("Topic focus for this lecture")}
-              </Label>
-              <Textarea
-                id="session-guide"
-                value={project.sessionGuide}
-                onChange={(event) =>
-                  useProjectStore.getState().setSessionGuide(event.target.value)
-                }
-                rows={2}
-                placeholder="Focus on the stories of the Prophets and practical rulings; skip the opening announcements."
-                className="resize-y text-xs leading-relaxed"
-                disabled={status === "running"}
-              />
-              <p className="text-[10px] leading-relaxed text-muted-foreground">
-                {L("Applies to every search in this session. Leave empty to use the initial prompt alone.")}
-              </p>
-            </div>
-
             <div className="space-y-1">
               <Label htmlFor="refinement-note" className="text-[11px] font-medium text-foreground/90">
                 {L("Additional instructions for this search")}
@@ -1088,21 +909,17 @@ export function Step2Discovery() {
                 ? L("Looking for more moments…")
                 : clips.length === 0
                   ? L("Find clips")
-                  : refindMode === "replace"
-                    ? L("Start over with new clips")
-                    : L("Find more clips")}
+                  : L("Find more clips")}
             </Button>
             <div className="flex items-center justify-between gap-2">
               <p className="text-[10px] leading-relaxed text-muted-foreground">
                 {clips.length === 0
                   ? L("Approve clips to keep them out of the next search.")
-                  : refindMode === "replace"
-                    ? `All ${clips.length} clips and their subtitles will be replaced.`
-                    : approvedCount > 0
-                      ? `${approvedCount} approved clip${
-                          approvedCount === 1 ? "" : "s"
-                        } will be kept; unapproved ones are dropped.`
-                      : "Unapproved clips are dropped from the next search."}
+                  : approvedCount > 0
+                    ? `${approvedCount} approved clip${
+                        approvedCount === 1 ? "" : "s"
+                      } will be kept; unapproved ones are dropped.`
+                    : "Unapproved clips are dropped from the next search."}
               </p>
               {status === "running" ? (
                 <Button
@@ -1366,36 +1183,6 @@ export function Step2Discovery() {
         </div>
       </footer>
 
-      <Dialog
-        open={pendingReplaceAll}
-        onOpenChange={(open) => {
-          if (!open) setPendingReplaceAll(false);
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Start over with a fresh search?</DialogTitle>
-            <DialogDescription>
-              All {clips.length} clips — including approved ones — and their subtitle tracks will be
-              removed. The new search uses the clip length and instructions you set here.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => setPendingReplaceAll(false)}>
-              Cancel
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => {
-                setPendingReplaceAll(false);
-                void runDiscovery("replace", refinement);
-              }}
-            >
-              {L("Start over")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

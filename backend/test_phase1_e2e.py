@@ -1179,6 +1179,48 @@ def run_http_checks(
             f"{missing.status_code}",
         )
 
+        # Clip finding has no decision slot any more, so the writing model is
+        # mandatory: a missing one is a settings error (400), not a gateway 502.
+        # Driven in-process because the HTTP client above talks to a subprocess.
+        import main as sidecar_main  # noqa: PLC0415 - the sidecar module is heavy
+
+        class _Transcript:
+            transcript_id = "b4" * 16
+            duration = 10.0
+            segments: list = []
+
+        def _no_writing_model(*_args, **_kwargs):
+            raise analyzer.LLMError(
+                "No reasoning model is configured. Set the model in Settings."
+            )
+
+        real_get_transcript = sidecar_main._get_transcript
+        real_merge_provider = analyzer.merge_provider
+        sidecar_main._get_transcript = lambda _transcript_id: _Transcript()
+        analyzer.merge_provider = _no_writing_model
+        try:
+            async def _post_without_model() -> httpx.Response:
+                transport = httpx.ASGITransport(
+                    app=sidecar_main.app, raise_app_exceptions=False
+                )
+                async with httpx.AsyncClient(
+                    transport=transport, base_url="http://sidecar"
+                ) as async_client:
+                    return await async_client.post(
+                        "/discover-clips", json={"transcript_id": "b4" * 16}
+                    )
+
+            no_model = asyncio.run(_post_without_model())
+        finally:
+            sidecar_main._get_transcript = real_get_transcript
+            analyzer.merge_provider = real_merge_provider
+        check(
+            "POST /discover-clips: no writing model -> 400, not a gateway 502",
+            no_model.status_code == 400
+            and "No reasoning model" in (no_model.json().get("detail") or ""),
+            f"{no_model.status_code} {no_model.text[:120]}",
+        )
+
         # ---- 6. /extract-and-transcribe error contract --------------------- #
         bad_path = client.post(
             "/extract-and-transcribe", json={"file_path": str(ARTIFACTS / "nope.mp4")}
@@ -1672,9 +1714,13 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         )
     )
     check(
-        "analyzer.discover_clips: exclusions, overlaps and out-of-range filtered",
-        len(clips) == 1 and clips[0]["start"] == 5.0 and clips[0]["end"] == 9.0,
-        json.dumps(clips, ensure_ascii=False)[:140],
+        "analyzer.discover_clips: exclusions and out-of-range filtered, overlaps kept",
+        len(clips) == 2
+        and clips[0]["start"] == 5.0
+        and clips[0]["end"] == 9.0
+        and clips[1]["start"] == 7.0
+        and clips[1]["end"] == 10.0,
+        json.dumps(clips, ensure_ascii=False)[:160],
     )
     last_prompt = json.dumps(MockLLMHandler.calls[-1], ensure_ascii=False)
     check(
@@ -1760,6 +1806,113 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         f"cloud_options={'options' in cloud_payload}",
     )
 
+    # ---- Phase A.2: strict JSON calls stay bounded and reason-free -------- #
+    check(
+        "analyzer.chat: cloud JSON calls are bounded and ask reasoning models to answer directly",
+        cloud_payload.get("max_tokens") == analyzer.DEFAULT_MAX_TOKENS
+        and cloud_payload.get("reasoning") == analyzer.REASONING_OFF
+        and "reasoning" not in ollama_payload,
+        f"max_tokens={cloud_payload.get('max_tokens')} "
+        f"reasoning={cloud_payload.get('reasoning')}",
+    )
+
+    relaxed_calls: list[dict] = []
+
+    def _reject_reasoning(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        relaxed_calls.append(body)
+        if "reasoning" in body:
+            return httpx.Response(
+                400,
+                json={"error": {"message": "Unrecognized request argument: reasoning"}},
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    relaxed_reply = asyncio.run(
+        analyzer.chat(
+            analyzer.ProviderConfig(
+                base_url="https://api.openai.com/v1",
+                api_key="sk-test",
+                model="mock-chat",
+                timeout=5.0,
+            ),
+            [{"role": "user", "content": "hi"}],
+            transport=httpx.MockTransport(_reject_reasoning),
+        )
+    )
+    check(
+        "analyzer.chat: a provider that rejects the reasoning switch is retried without it",
+        relaxed_reply == "{}"
+        and len(relaxed_calls) == 2
+        and "reasoning" in relaxed_calls[0]
+        and "reasoning" not in relaxed_calls[1]
+        and relaxed_calls[1].get("response_format") == {"type": "json_object"},
+        f"calls={len(relaxed_calls)}",
+    )
+
+    timeout_calls: list[int] = []
+
+    def _read_timeout(request: httpx.Request) -> httpx.Response:
+        timeout_calls.append(1)
+        raise httpx.ReadTimeout("timed out")
+
+    timeout_error = ""
+    try:
+        asyncio.run(
+            analyzer.chat(
+                analyzer.ProviderConfig(
+                    base_url="https://api.openai.com/v1",
+                    api_key="sk-test",
+                    model="mock-chat",
+                    timeout=5.0,
+                ),
+                [{"role": "user", "content": "hi"}],
+                transport=httpx.MockTransport(_read_timeout),
+            )
+        )
+    except analyzer.LLMError as exc:
+        timeout_error = str(exc)
+    check(
+        "analyzer.chat: a read timeout is not retried (a slow model never bills twice)",
+        len(timeout_calls) == 1 and "did not answer within 5 seconds" in timeout_error,
+        f"calls={len(timeout_calls)} error={timeout_error}",
+    )
+
+    def _empty_length(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": "", "reasoning": "hidden thinking"},
+                        "finish_reason": "length",
+                    }
+                ]
+            },
+        )
+
+    empty_error = ""
+    try:
+        asyncio.run(
+            analyzer.chat(
+                analyzer.ProviderConfig(
+                    base_url="https://api.openai.com/v1",
+                    api_key="sk-test",
+                    model="mock-chat",
+                    timeout=5.0,
+                ),
+                [{"role": "user", "content": "hi"}],
+                transport=httpx.MockTransport(_empty_length),
+            )
+        )
+    except analyzer.LLMError as exc:
+        empty_error = str(exc)
+    check(
+        "analyzer.chat: a reasoning-only reply is a plain, actionable error",
+        "internal reasoning" in empty_error and "Choose a model" in empty_error,
+        empty_error,
+    )
+
     # ---- Phase A.5: dense candidate starts + pause anchors ------------------ #
     long_segments: list[dict] = []
     clock = 0.0
@@ -1807,134 +1960,12 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         f"pause_at={pause_start}s starts={len(paused_window)}",
     )
 
-    # ---- candidate scoring: one decision call per window, never a double ---- #
-    # The loop step and the slice must agree; a step smaller than the slice makes
-    # consecutive batches overlap, scoring (and paying for) the same window twice.
-    scoring_batches: list[list[str]] = []
-
-    async def _record_batch(_provider, _state, questions, **_kwargs):
-        scoring_batches.append(
-            sorted(name[len("score_") :] for name in questions if name.startswith("score_"))
-        )
-        return {}
-
-    scoring_candidates = [
-        {"id": f"s{index}", "start": index * 10.0, "end": index * 10.0 + 8.0, "text": "x"}
-        for index in range(20)
-    ]
-    real_decide = analyzer.decide
-    analyzer.decide = _record_batch
-    try:
-        scored_windows = asyncio.run(
-            analyzer.score_clip_candidates(
-                scoring_candidates,
-                provider=decision.DecisionProviderConfig(
-                    base_url="http://127.0.0.1:11434/v1",
-                    api_key=None,
-                    model="mock-decision",
-                    timeout=5.0,
-                    wire_format=decision.SYSTEMONE,
-                ),
-                brief="",
-                min_duration=5.0,
-                max_duration=60.0,
-            )
-        )
-    finally:
-        analyzer.decide = real_decide
-    scored_ids = [item.id for item in scored_windows]
-    check(
-        "analyzer: every candidate window is scored exactly once",
-        sorted(scored_ids) == sorted(f"s{index}" for index in range(20)),
-        f"batches={[len(batch) for batch in scoring_batches]} scored={len(scored_ids)}",
-    )
-
-    # ---- Phase A.2: decision-only discovery (no writing model) -------------- #
-    import main as sidecar_main  # noqa: PLC0415 - the sidecar module is heavy
-
-    fake_record = sidecar_main.TranscriptRecord(
-        transcript_id="a2" * 16,
-        source_path=str(source),
-        duration=60.0,
-        language="th",
-        segments=[
-            transcriber.Segment(
-                id=index,
-                start=index * 5.0,
-                end=index * 5.0 + 4.0,
-                text=f"เนื้อหาบทเรียนตัฟซีรตอนที่ {index}",
-                language="th",
-            )
-            for index in range(12)
-        ],
-        created_at=0.0,
-    )
-
-    async def fake_clip_scoring(_provider, _state, questions, **_kwargs):
-        replies: dict[str, decision.Answer] = {}
-        for name in questions:
-            if name.startswith("score_"):
-                replies[name] = decision.Answer(
-                    name=name,
-                    type="score",
-                    score=2.4,
-                    probabilities={"2": 0.6, "3": 0.4},
-                    confidence=0.9,
-                )
-            else:
-                replies[name] = decision.Answer(
-                    name=name,
-                    type="noul",
-                    noul=True,
-                    probabilities={"true": 0.9, "false": 0.1},
-                    confidence=0.9,
-                )
-        return replies
-
-    real_get_transcript = sidecar_main._get_transcript
-    real_analyzer_decide = analyzer.decide
-    sidecar_main._get_transcript = lambda _transcript_id: fake_record
-    analyzer.decide = fake_clip_scoring
-    try:
-        async def decision_only_discovery() -> httpx.Response:
-            transport = httpx.ASGITransport(
-                app=sidecar_main.app, raise_app_exceptions=False
-            )
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://sidecar"
-            ) as async_client:
-                return await async_client.post(
-                    "/discover-clips",
-                    json={
-                        "transcript_id": fake_record.transcript_id,
-                        "decision_provider": {
-                            "base_url": "http://127.0.0.1:9/v1",
-                            "model": "mock-decision",
-                            "endpoint_style": "systemone",
-                        },
-                        "min_duration": 15.0,
-                        "max_duration": 40.0,
-                        "max_clips": 3,
-                    },
-                )
-
-        decision_only = asyncio.run(decision_only_discovery())
-    finally:
-        analyzer.decide = real_analyzer_decide
-        sidecar_main._get_transcript = real_get_transcript
-    decision_only_body = decision_only.json() if decision_only.status_code == 200 else {}
-    check(
-        "POST /discover-clips: a decision-only model returns 200, not a 500",
-        decision_only.status_code == 200
-        and bool(decision_only_body.get("clips"))
-        and decision_only_body.get("model") == "mock-decision",
-        f"{decision_only.status_code} {str(decision_only_body)[:120]}",
-    )
-
     # ---- Phase A.3: offline sentence grouping inside the endpoint ------------ #
     # The HTTP fixture has no speech (the tiny Whisper model returns zero
     # segments), so the endpoint path is driven in-process with a fake
     # transcriber: no analysis/decision model, grouping must still run.
+    import main as sidecar_main  # noqa: PLC0415 - the sidecar module is heavy
+
     offline_wav = work / "offline_grouping.wav"
     with wave.open(str(offline_wav), "wb") as writer:
         writer.setnchannels(1)
@@ -2454,6 +2485,55 @@ def run_decision_checks(work: Path, source: Path) -> None:
         f"confidence={bare['kind'].confidence}",
     )
 
+    # A probability distribution is real calibration; a bare label is none.
+    # ``Answer.calibrated`` is what lets escalators tell the two apart instead
+    # of reading a provider's silence as "unsure".
+    choice_question = decision.Question(
+        type="choice",
+        instructions="What is this segment?",
+        criteria={"quran": "recitation", "none": "explanation"},
+    )
+    calibrated_choice = decision._parse_answer(
+        "kind",
+        choice_question,
+        {"choice": "quran", "probabilities": {"quran": 0.9, "none": 0.1}},
+    )
+    bare_choice = decision._parse_answer("kind", choice_question, {"choice": "quran"})
+    check(
+        "decision: a probability distribution implies confidence; a bare answer reports none",
+        calibrated_choice.calibrated
+        and abs(calibrated_choice.confidence - 0.9) < 1e-9
+        and not bare_choice.calibrated
+        and bare_choice.confidence == 0.0,
+        f"calibrated={calibrated_choice.calibrated}/{calibrated_choice.confidence:.3f} "
+        f"bare={bare_choice.calibrated}/{bare_choice.confidence:.3f}",
+    )
+
+    decision_timeout_calls: list[int] = []
+
+    def _decision_read_timeout(_request: httpx.Request) -> httpx.Response:
+        decision_timeout_calls.append(1)
+        raise httpx.ReadTimeout("timed out")
+
+    decision_timeout_error = ""
+    try:
+        asyncio.run(
+            decision.decide(
+                provider,
+                "state",
+                questions,
+                transport=httpx.MockTransport(_decision_read_timeout),
+            )
+        )
+    except decision.DecisionError as exc:
+        decision_timeout_error = str(exc)
+    check(
+        "decision.decide: a read timeout is not retried and names the cause",
+        len(decision_timeout_calls) == 1
+        and "did not answer within" in decision_timeout_error,
+        f"calls={len(decision_timeout_calls)} error={decision_timeout_error}",
+    )
+
     bad_questions: list[tuple[str, decision.Question]] = [
         (
             "choice with string criteria",
@@ -2852,36 +2932,28 @@ def run_decision_checks(work: Path, source: Path) -> None:
         excluded_ranges=[{"start": 2.0, "end": 4.0}],
     )
     check("sanitize R7: an excluded-range overlap is dropped", r7 == [], str(r7))
-    r8_rank = sanitize(
+    r8_overlap = sanitize(
         [
             {"start": 0.0, "end": 10.0, "score": 0.2, "title": "early"},
             {"start": 5.0, "end": 15.0, "score": 0.9, "title": "better"},
         ]
     )
     check(
-        "sanitize R8: overlap is resolved by score rank, not 'keep earliest'",
-        len(r8_rank) == 1 and r8_rank[0]["title"] == "better",
-        json.dumps(r8_rank, ensure_ascii=False)[:140],
+        "sanitize R8: overlapping proposals are both kept so the editor can choose",
+        [clip["title"] for clip in r8_overlap] == ["early", "better"],
+        json.dumps(r8_overlap, ensure_ascii=False)[:160],
     )
-    r8_long = sanitize(
+    r8_cap = sanitize(
         [
-            {"start": 0.0, "end": 10.0, "score": 0.5, "title": "short"},
-            {"start": 5.0, "end": 18.0, "score": 0.5, "title": "longer"},
-        ]
-    )
-    r8_tie = sanitize(
-        [
-            {"start": 0.0, "end": 10.0, "score": 0.5, "title": "earlier"},
-            {"start": 2.0, "end": 12.0, "score": 0.5, "title": "later"},
-        ]
+            {"start": 0.0, "end": 10.0, "score": 0.2, "title": "early"},
+            {"start": 5.0, "end": 15.0, "score": 0.9, "title": "better"},
+        ],
+        max_clips=1,
     )
     check(
-        "sanitize R8 ties: longer wins, then the earlier window",
-        len(r8_long) == 1
-        and r8_long[0]["title"] == "longer"
-        and len(r8_tie) == 1
-        and r8_tie[0]["title"] == "earlier",
-        f"long={r8_long} tie={r8_tie}",
+        "sanitize R8: the cap keeps the higher-scored proposal",
+        len(r8_cap) == 1 and r8_cap[0]["title"] == "better",
+        json.dumps(r8_cap, ensure_ascii=False)[:140],
     )
     r9 = sanitize(
         [
@@ -2900,7 +2972,7 @@ def run_decision_checks(work: Path, source: Path) -> None:
         "sanitize R10: internal ordering keys never leave the service",
         all(
             set(clip) == {"start", "end", "title", "rationale"}
-            for clip in r8_rank + r9
+            for clip in r8_overlap + r9
         ),
     )
 

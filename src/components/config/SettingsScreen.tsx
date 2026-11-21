@@ -415,13 +415,6 @@ const DECISION_SLOTS: {
       "Classifies each transcript segment, so the lecture is grouped before you reach Find Clips.",
   },
   {
-    id: "clip_scoring",
-    title: L("Clip ranking"),
-    hint: L("Step 2 · orders candidate moments before titles are written"),
-    description:
-      "Scores every candidate window against your brief, then the writing model names only the finalists.",
-  },
-  {
     id: "verify_triage",
     title: L("Arabic triage"),
     hint: L("Step 3 · skips lines that are already correct"),
@@ -439,7 +432,6 @@ function JudgmentsSection() {
   const ollama = useSettingsStore((state) => state.ollama);
   const [probes, setProbes] = useState<Record<DecisionSlotId, ProbeState>>({
     analysis: { status: "idle", detail: "" },
-    clip_scoring: { status: "idle", detail: "" },
     verify_triage: { status: "idle", detail: "" },
   });
 

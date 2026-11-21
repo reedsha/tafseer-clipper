@@ -1,5 +1,7 @@
 # Steps 1–3 Architectural & Functional Audit: Defects & Remediation Plan
 
+> **Historical note (2026-11):** the `clip_scoring` decision slot described here was retired. Step 2 is the writing model plus `sanitize_clips`; clip-scoring defects below are closed by removal.
+
 **Status:** Complete Audit & Atomic-Tier Fixing Plan  
 **Scope:** Step 1 (Ingest & Transcription), Step 2 (Finding Clips), Step 3 (Subtitles Studio & Arabic Verification)  
 **Target:** Desktop App (Tauri v2 + FastAPI Sidecar)  

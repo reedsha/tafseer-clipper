@@ -100,6 +100,65 @@ class ProviderOverride:
 #: reads the native ``options`` block from the request body.
 DEFAULT_OLLAMA_NUM_CTX = 8192
 
+#: Every current caller asks for strict JSON, so the reply never needs to be
+#: unbounded.  A reasoning model left uncapped can spend minutes thinking,
+#: blow past the request timeout and bill every token generated before the
+#: client aborts.
+DEFAULT_MAX_TOKENS = 4096
+
+#: Ask gateways that expose a reasoning switch to answer directly.  Clip
+#: finding, titles, grouping and proofreading are deterministic JSON jobs:
+#: hidden reasoning only adds latency and cost, and can consume the whole
+#: reply budget (``finish_reason == "length"`` with empty content).
+REASONING_OFF = {"effort": "none"}
+
+
+def _reply_budget(items: int, *, per_item: int = 160) -> int:
+    """Token cap for a JSON reply with one entry per item.
+
+    The floor keeps small calls from ever being cut short; the ceiling stops a
+    runaway model from generating for minutes.  ``per_item`` is generous for a
+    title + rationale or a handful of ids, so the cap never truncates a valid
+    reply at the documented request limits.
+    """
+    return max(DEFAULT_MAX_TOKENS, min(16_384, 512 + max(0, items) * per_item))
+
+
+def _relax_payload(payload: dict[str, Any], body: str) -> bool:
+    """Drop or translate optional keys a provider rejected with HTTP 400.
+
+    Returns ``True`` when the payload changed and the call is worth retrying.
+    A 400 is rejected before generation, so probing the supported shape costs
+    no tokens.
+    """
+    lowered = body.lower()
+    changed = False
+    if "max_completion_tokens" in lowered and "max_tokens" in payload:
+        payload["max_completion_tokens"] = payload.pop("max_tokens")
+        changed = True
+    if "reasoning" in lowered and "reasoning" in payload:
+        payload.pop("reasoning", None)
+        changed = True
+    if "response_format" in lowered and "response_format" in payload:
+        payload.pop("response_format", None)
+        changed = True
+    if not changed and "response_format" in payload:
+        # Some gateways reject JSON mode with a generic 400 that never names
+        # the field; keep today's plain-reply fallback for them.
+        payload.pop("response_format", None)
+        changed = True
+    return changed
+
+
+def _transport_error(provider: ProviderConfig, exc: httpx.HTTPError) -> LLMError:
+    """Turn a transport failure into a plain, actionable message."""
+    if isinstance(exc, httpx.TimeoutException):
+        return LLMError(
+            f"The AI service did not answer within {provider.timeout:g} seconds. "
+            "Try again, or choose a faster model in Settings."
+        )
+    return LLMError(f"The AI request failed ({type(exc).__name__}). Try again.")
+
 
 def is_ollama_endpoint(base_url: str, api_key: str | None) -> bool:
     """True only for a local/self-hosted Ollama server.
@@ -127,73 +186,109 @@ async def chat(
     *,
     temperature: float = 0.2,
     json_mode: bool = True,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    disable_reasoning: bool = True,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> str:
     headers = {"Content-Type": "application/json"}
     if provider.api_key:
         headers["Authorization"] = f"Bearer {provider.api_key}"
 
+    ollama = is_ollama_endpoint(provider.base_url, provider.api_key)
     payload: dict[str, Any] = {
         "model": provider.model,
         "messages": messages,
         "temperature": temperature,
+        "max_tokens": max_tokens,
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    if is_ollama_endpoint(provider.base_url, provider.api_key):
+    if ollama:
         payload["options"] = {"num_ctx": DEFAULT_OLLAMA_NUM_CTX}
+    elif disable_reasoning:
+        payload["reasoning"] = dict(REASONING_OFF)
 
-    try:
-        async with httpx.AsyncClient(
-            timeout=provider.timeout, transport=transport
-        ) as client:
-            response: httpx.Response | None = None
-            for attempt in range(2):
-                try:
-                    response = await client.post(
-                        provider.endpoint, headers=headers, json=payload
-                    )
-                except httpx.HTTPError as exc:
-                    if attempt == 0:
-                        # A single transient drop/read timeout is common on
-                        # gateways; retry once before failing the whole pass.
-                        await asyncio.sleep(0.6)
-                        continue
-                    raise LLMError(
-                        f"Could not reach the LLM at {provider.endpoint}: {exc}"
-                    ) from exc
-                break
-            if response is None:
-                raise LLMError(f"Could not reach the LLM at {provider.endpoint}.")
-            if response.status_code == 400 and json_mode:
-                # Ollama and some gateways reject response_format: retry plain.
-                payload.pop("response_format", None)
+    async with httpx.AsyncClient(
+        timeout=provider.timeout, transport=transport
+    ) as client:
+        response: httpx.Response | None = None
+        for attempt in range(2):
+            try:
                 response = await client.post(
                     provider.endpoint, headers=headers, json=payload
                 )
-    except httpx.HTTPError as exc:
-        raise LLMError(
-            f"Could not reach the LLM at {provider.endpoint}: {exc}"
-        ) from exc
+            except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+                if attempt == 0:
+                    # A transient connection drop is safe to retry; the
+                    # provider never started generating.
+                    await asyncio.sleep(0.6)
+                    continue
+                raise LLMError(
+                    "Could not connect to the AI service. Check the connection "
+                    "in Settings, then try again."
+                ) from exc
+            except httpx.HTTPError as exc:
+                # Read timeouts are deliberately *not* retried: the provider
+                # accepted the request and is still generating, so a retry
+                # bills the same window twice and doubles the wait.
+                raise _transport_error(provider, exc) from exc
+            break
+
+        if response is None:
+            raise LLMError("Could not reach the AI service. Try again.")
+
+        # Compatibility with gateways that reject optional keys: a 400 happens
+        # before generation, so probing the supported shape is free and only
+        # runs until the provider accepts the payload.
+        for _ in range(4):
+            if response.status_code != 400:
+                break
+            if not _relax_payload(payload, response.text):
+                break
+            try:
+                response = await client.post(
+                    provider.endpoint, headers=headers, json=payload
+                )
+            except httpx.HTTPError as exc:
+                raise _transport_error(provider, exc) from exc
 
     if response.status_code >= 400:
         raise LLMError(
-            f"LLM provider returned {response.status_code}: {response.text[:400]}"
+            f"The AI service returned {response.status_code}: {response.text[:400]}"
         )
 
     try:
         data = response.json()
-        content = data["choices"][0]["message"]["content"]
-    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        choice = data["choices"][0]
+        content = choice["message"].get("content")
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
         raise LLMError(
-            f"Unexpected LLM response shape: {response.text[:400]}"
+            f"The AI service returned an unexpected response: {response.text[:400]}"
         ) from exc
 
+    finish_reason = choice.get("finish_reason")
     if isinstance(content, list):  # some providers return content parts
         content = "".join(
             part.get("text", "") for part in content if isinstance(part, dict)
         )
-    return str(content)
+    elif isinstance(content, dict):
+        content = json.dumps(content, ensure_ascii=False)
+    content = "" if content is None else str(content)
+
+    if not content.strip():
+        if finish_reason == "length":
+            raise LLMError(
+                "The AI model spent its whole reply on internal reasoning and "
+                "returned no answer. Choose a model that answers directly in "
+                "Settings, then try again."
+            )
+        raise LLMError("The AI service returned an empty reply. Try again.")
+    if finish_reason == "length":
+        logger.warning(
+            "LLM reply hit the output limit (model=%s); callers may salvage it.",
+            provider.model,
+        )
+    return content
 
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
@@ -451,12 +546,6 @@ def _overlaps_excluded(
     return False
 
 
-def _overlap_between(first: dict[str, Any], second: dict[str, Any]) -> bool:
-    return float(first["start"]) < float(second["end"]) and float(
-        first["end"]
-    ) > float(second["start"])
-
-
 def sanitize_clips(
     raw_clips: list[Any],
     *,
@@ -483,8 +572,8 @@ def sanitize_clips(
            sentence-safe extension information exists here.
     R6     An oversized window (``> max_duration * 1.5``) is dropped.
     R7     A window overlapping an approved/excluded range is dropped.
-    R8     Overlapping proposals are resolved by score rank (higher score first,
-           then longer, then earlier) instead of "keep earliest".
+    R8     Overlapping proposals are **kept** and surfaced to the editor; the
+           ranking only decides which proposals survive the ``max_clips`` cap.
     R9     The result is ordered by start time and capped at ``max_clips``.
     R10    Internal ordering keys (``score``) never leave the service.
     =====  =====================================================================
@@ -545,7 +634,9 @@ def sanitize_clips(
             }
         )
 
-    # R8: score rank, then longer, then earlier, then original order.
+    # R8: overlaps are deliberately **not** resolved here. Two proposals that
+    # cover the same seconds both ship, so the editor can see the collision and
+    # choose; the ranking only decides who survives the max_clips cap.
     ranked = sorted(
         candidates,
         key=lambda clip: (
@@ -555,11 +646,7 @@ def sanitize_clips(
             clip["_order"],
         ),
     )
-    accepted: list[dict[str, Any]] = []
-    for clip in ranked:
-        if any(_overlap_between(clip, kept) for kept in accepted):
-            continue
-        accepted.append(clip)
+    accepted = ranked[:max_clips]
 
     # R9 + R10
     accepted.sort(key=lambda clip: clip["start"])
@@ -635,7 +722,12 @@ async def _discover_with_prompts(
             language=language,
             exemplar_block=exemplar_block,
         )
-        reply = await chat(provider, messages, temperature=0.3)
+        reply = await chat(
+            provider,
+            messages,
+            temperature=0.3,
+            max_tokens=_reply_budget(budget),
+        )
         try:
             payload = extract_json(reply)
             raw = payload.get("clips")
@@ -676,7 +768,7 @@ async def _discover_with_prompts(
 
 
 # --------------------------------------------------------------------------- #
-# Clip candidate generation + decision scoring (Phase 4)
+# Clip candidate generation + malformed-reply salvage (Phase 4)
 # --------------------------------------------------------------------------- #
 #: Complete objects only; enough to salvage a window whose outer JSON broke.
 _OBJECT_RE = re.compile(r"\{[^{}]*\}")
@@ -865,278 +957,6 @@ def generate_clip_candidates(
     return candidates[:max_candidates]
 
 
-CLIP_TITLE_SYSTEM = """\
-You name and explain finalist clips for a Thai Tafseer channel. The timestamps
-are already decided; never invent, move, or resize a window.
-
-Return STRICT JSON only:
-{"clips": [{"id": "<candidate id>", "title": "<Thai title, max 70 chars>", "rationale": "<one sentence in Thai>"}]}
-
-Rules:
-- Return exactly one entry per FINALIST id, using the id verbatim.
-- The title must describe the moment, not the editing process.
-- The rationale names why the passage works as a standalone clip.
-"""
-
-
-def build_title_messages(
-    finalists: list[dict[str, Any]],
-    *,
-    base_prompt: str,
-    session_guide: str,
-    refinement_note: str,
-    language: str,
-    approved_exemplars: list[dict[str, Any]] | None = None,
-    rejected_exemplars: list[dict[str, Any]] | None = None,
-) -> list[dict[str, str]]:
-    system = f"{base_prompt.strip() or DEFAULT_BASE_PROMPT}\n\n{CLIP_TITLE_SYSTEM}"
-    language_code = normalize_language(language)
-    if language_code:
-        system += f"- Write titles and rationales in the language '{language_code}'.\n"
-
-    def exemplars(items: list[dict[str, Any]] | None) -> str:
-        rows = []
-        for item in items or []:
-            title = str(item.get("title") or "").strip()
-            excerpt = str(item.get("text") or "").strip()
-            if not title and not excerpt:
-                continue
-            rows.append(f"- {title or '(untitled)'}: {excerpt[:280]}")
-        return "\n".join(rows) or "- (none)"
-
-    blocks = "\n\n".join(
-        f"#{candidate['id']} [{float(candidate['start']):.1f}-"
-        f"{float(candidate['end']):.1f}]\n{str(candidate['text']).strip()}"
-        for candidate in finalists
-    )
-    user = f"""\
-SESSION TOPIC GUIDE:
-{session_guide.strip() or "(none)"}
-
-REFINEMENT NOTE (this re-roll only):
-{refinement_note.strip() or "(none)"}
-
-CLIPS THE EDITOR KEPT (imitate their shape):
-{exemplars(approved_exemplars)}
-
-CLIPS THE EDITOR PASSED ON (avoid their shape):
-{exemplars(rejected_exemplars)}
-
-FINALIST WINDOWS (name these exact ids):
-{blocks}
-"""
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
-
-
-async def title_candidates(
-    finalists: list[dict[str, Any]],
-    *,
-    provider: ProviderConfig,
-    base_prompt: str,
-    session_guide: str,
-    refinement_note: str,
-    language: str,
-    approved_exemplars: list[dict[str, Any]] | None = None,
-    rejected_exemplars: list[dict[str, Any]] | None = None,
-) -> dict[str, dict[str, str]]:
-    """Ask the writing model for titles/rationales on already-chosen windows."""
-    if not finalists:
-        return {}
-    messages = build_title_messages(
-        finalists,
-        base_prompt=base_prompt,
-        session_guide=session_guide,
-        refinement_note=refinement_note,
-        language=language,
-        approved_exemplars=approved_exemplars,
-        rejected_exemplars=rejected_exemplars,
-    )
-    reply = await chat(provider, messages, temperature=0.3)
-    payload = extract_json(reply)
-    raw = payload.get("clips")
-    if not isinstance(raw, list):
-        raise LLMError("The LLM reply is missing a 'clips' array.")
-    allowed = {str(candidate["id"]) for candidate in finalists}
-    named: dict[str, dict[str, str]] = {}
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        candidate_id = str(item.get("id") or "").strip()
-        if candidate_id not in allowed:
-            continue
-        named[candidate_id] = {
-            "title": str(item.get("title") or "").strip()[:120],
-            "rationale": str(item.get("rationale") or "").strip()[:400],
-        }
-    return named
-
-
-def _exemplar_brief(
-    approved: list[dict[str, Any]] | None,
-    rejected: list[dict[str, Any]] | None,
-) -> str:
-    parts: list[str] = []
-    kept = [str(item.get("text") or "").strip() for item in approved or [] if item.get("text")]
-    passed = [
-        str(item.get("text") or "").strip() for item in rejected or [] if item.get("text")
-    ]
-    if kept:
-        parts.append("KEPT EXCERPTS:\n" + "\n".join(text[:240] for text in kept[:4]))
-    if passed:
-        parts.append("PASSED EXCERPTS:\n" + "\n".join(text[:240] for text in passed[:4]))
-    return "\n\n".join(parts)
-
-
-#: Candidate windows per decision call. Kept small so a fast-judgment prompt
-#: stays short; the loop step and the slice must use this one value, because a
-#: step smaller than the slice scores every other window twice.
-CANDIDATE_SCORE_BATCH = 8
-
-
-async def score_clip_candidates(
-    candidates: list[dict[str, Any]],
-    *,
-    provider: DecisionProviderConfig,
-    brief: str,
-    min_duration: float,
-    max_duration: float,
-    cancel_event: threading.Event | None = None,
-) -> list[tasks.CandidateScore]:
-    """Score candidate windows in small batches; a failure aborts the pass."""
-    scored: list[tasks.CandidateScore] = []
-    for offset in range(0, len(candidates), CANDIDATE_SCORE_BATCH):
-        raise_if_cancelled(cancel_event)
-        chunk = candidates[offset : offset + CANDIDATE_SCORE_BATCH]
-        payload = [
-            tasks.ClipCandidate(
-                id=str(candidate["id"]),
-                start=float(candidate["start"]),
-                end=float(candidate["end"]),
-                text=str(candidate["text"]),
-            )
-            for candidate in chunk
-        ]
-        state, questions = tasks.clip_scoring_request(
-            payload,
-            brief=brief,
-            min_duration=min_duration,
-            max_duration=max_duration,
-        )
-        answers = await decide(provider, state, questions, cancel_event=cancel_event)
-        scored.extend(
-            tasks.scores_from_answers([candidate.id for candidate in payload], answers)
-        )
-    return scored
-
-
-async def _discover_with_decisions(
-    *,
-    segments: list[dict[str, Any]],
-    duration: float,
-    base_prompt: str,
-    session_guide: str,
-    refinement_note: str,
-    excluded_ranges: list[dict[str, float]],
-    provider: ProviderConfig | None,
-    decision_provider: DecisionProviderConfig,
-    approved_exemplars: list[dict[str, Any]] | None,
-    rejected_exemplars: list[dict[str, Any]] | None,
-    min_duration: float,
-    max_duration: float,
-    max_clips: int,
-    language: str,
-    cancel_event: threading.Event | None,
-) -> list[dict[str, Any]]:
-    candidates = generate_clip_candidates(
-        segments,
-        duration=duration,
-        excluded_ranges=excluded_ranges,
-        min_duration=min_duration,
-        max_duration=max_duration,
-    )
-    if not candidates:
-        return []
-    brief_parts = [
-        base_prompt.strip(),
-        session_guide.strip(),
-        refinement_note.strip(),
-        _exemplar_brief(approved_exemplars, rejected_exemplars),
-    ]
-    brief = "\n\n".join(part for part in brief_parts if part)
-    scores = await score_clip_candidates(
-        candidates,
-        provider=decision_provider,
-        brief=brief,
-        min_duration=min_duration,
-        max_duration=max_duration,
-        cancel_event=cancel_event,
-    )
-    by_id = {score.id: score for score in scores}
-    ranked = sorted(
-        candidates,
-        key=lambda candidate: (
-            by_id.get(str(candidate["id"]), tasks.CandidateScore(
-                id=str(candidate["id"]), score=0.0, complete=False, confidence=0.0
-            )).rank_score,
-            float(candidate["end"]) - float(candidate["start"]),
-        ),
-        reverse=True,
-    )
-    limit = min(max_clips, len(ranked))
-    finalists = ranked[:limit]
-    clear = [
-        candidate
-        for candidate in finalists
-        if by_id.get(str(candidate["id"]), None) is not None
-        and by_id[str(candidate["id"])].rank_score >= 0.2
-    ]
-    if clear:
-        finalists = clear
-
-    titles: dict[str, dict[str, str]] = {}
-    if provider is not None:
-        try:
-            titles = await title_candidates(
-                finalists,
-                provider=provider,
-                base_prompt=base_prompt,
-                session_guide=session_guide,
-                refinement_note=refinement_note,
-                language=language,
-                approved_exemplars=approved_exemplars,
-                rejected_exemplars=rejected_exemplars,
-            )
-        except LLMError as exc:
-            logger.warning("Title pass failed; using neutral titles: %s", exc)
-
-    records: list[dict[str, Any]] = []
-    for candidate in finalists:
-        candidate_id = str(candidate["id"])
-        naming = titles.get(candidate_id, {})
-        fallback_title = str(candidate["text"]).strip()[:60] or f"Clip {len(records) + 1}"
-        score = by_id.get(candidate_id)
-        records.append(
-            {
-                "start": float(candidate["start"]),
-                "end": float(candidate["end"]),
-                "title": naming.get("title") or fallback_title,
-                "rationale": naming.get("rationale") or "",
-                "score": score.rank_score if score else 0.0,
-            }
-        )
-    return sanitize_clips(
-        records,
-        duration=duration,
-        excluded_ranges=excluded_ranges,
-        min_duration=min_duration,
-        max_duration=max_duration,
-        max_clips=max_clips,
-    )
-
-
 async def discover_clips(
     *,
     segments: list[dict[str, Any]],
@@ -1151,43 +971,18 @@ async def discover_clips(
     max_clips: int = 8,
     language: str = "th",
     cancel_event: threading.Event | None = None,
-    decision_provider: DecisionProviderConfig | None = None,
     approved_exemplars: list[dict[str, Any]] | None = None,
     rejected_exemplars: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Propose clips; with a decision slot, score first and write titles last.
+    """Propose clips across the whole transcript with the writing model.
 
-    ``decision_provider=None`` (or any decision/title failure) runs today's
-    whole-transcript prompt pipeline unchanged.
+    ``provider=None`` returns the deterministic candidate windows with neutral
+    titles, so the step degrades instead of hard-failing when no model is set.
     """
-    if decision_provider is not None:
-        try:
-            return await _discover_with_decisions(
-                segments=segments,
-                duration=duration,
-                base_prompt=base_prompt,
-                session_guide=session_guide,
-                refinement_note=refinement_note,
-                excluded_ranges=excluded_ranges,
-                provider=provider,
-                decision_provider=decision_provider,
-                approved_exemplars=approved_exemplars,
-                rejected_exemplars=rejected_exemplars,
-                min_duration=min_duration,
-                max_duration=max_duration,
-                max_clips=max_clips,
-                language=language,
-                cancel_event=cancel_event,
-            )
-        except LLMError as exc:
-            logger.warning(
-                "Decision clip scoring failed; falling back to the writing model: %s",
-                exc,
-            )
     if provider is None:
-        # Graceful degradation: with no writing model available, still return the
-        # deterministic candidate windows with neutral titles so clip finding
-        # never hard-fails just because the decision slot misbehaved.
+        # Graceful degradation: with no writing model available, still return
+        # the deterministic candidate windows with neutral titles so clip
+        # finding degrades instead of hard-failing.
         logger.warning(
             "No clip-finding model configured; returning unscored candidate windows."
         )
@@ -1478,7 +1273,12 @@ async def audit_arabic(
             },
         ]
         try:
-            reply = await chat(provider, messages, temperature=0.0)
+            reply = await chat(
+                provider,
+                messages,
+                temperature=0.0,
+                max_tokens=_reply_budget(len(window), per_item=32),
+            )
             payload = extract_json(reply)
         except LLMError as exc:
             logger.warning("Arabic audit window failed: %s", exc)
@@ -1551,7 +1351,12 @@ async def group_sentences(
             },
         ]
         try:
-            reply = await chat(provider, messages, temperature=0.0)
+            reply = await chat(
+                provider,
+                messages,
+                temperature=0.0,
+                max_tokens=_reply_budget(len(window), per_item=12),
+            )
             payload = extract_json(reply)
         except LLMError as exc:
             logger.warning("Sentence grouping window failed: %s", exc)

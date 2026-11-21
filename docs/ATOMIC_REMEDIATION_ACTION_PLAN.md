@@ -1,5 +1,7 @@
 # ATOMIC_REMEDIATION_ACTION_PLAN.md — Codebase Redesign & Full Action Plan
 
+> **Historical note (2026-11):** the `clip_scoring` decision slot was retired. Step 2 is the writing model plus `sanitize_clips`; this plan's clip-scoring remediation items are closed by removal, not by the redesign described below.
+
 > **Document Status:** Complete Architecture Redesign & Execution Action Plan  
 > **Source Audit:** [ATOMIC_AUDIT.md](file:///C:/dev/tafseer-clipper/ATOMIC_AUDIT.md)  
 > **Architecture Contract:** [AGENTS.md](file:///C:/dev/tafseer-clipper/AGENTS.md)  

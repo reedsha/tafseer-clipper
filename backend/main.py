@@ -416,8 +416,6 @@ class DiscoverRequest(BaseModel):
     max_duration: float = Field(default=90.0, gt=1.0, le=1800.0)
     language: str = Field(default="th", description="Language for titles/rationales.")
     provider: ProviderOverride | None = None
-    #: Optional clip-scoring decision model; absent = today's prompt pipeline.
-    decision_provider: DecisionProvider | None = None
     #: Additive re-roll feedback: approved/excluded clips already in the project.
     approved_exemplars: list[ClipExemplar] = Field(
         default_factory=list,
@@ -2072,15 +2070,14 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
 )
 async def discover_clips(body: DiscoverRequest, request: Request) -> DiscoverResponse:
     record = _get_transcript(body.transcript_id)
-    decision_provider = _decision_provider(body.decision_provider)
-    provider = None
-    if body.provider is not None:
-        provider = analyzer.merge_provider("reasoning", body.provider.to_service())
-    elif decision_provider is None:
-        # No clip-scoring slot either, so the writing model stays mandatory
-        # exactly as today. With only a decision slot, scoring runs and the
-        # titles fall back to neutral text instead of failing the request.
-        provider = analyzer.merge_provider("reasoning", None)
+    try:
+        provider = analyzer.merge_provider(
+            "reasoning", body.provider.to_service() if body.provider else None
+        )
+    except analyzer.LLMError as exc:
+        # Clip finding is a writing-model job: a missing model is a settings
+        # problem, so answer 400 instead of dressing it up as a gateway 502.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     excluded = [item.model_dump() for item in body.excluded_ranges]
     approved = [item.model_dump() for item in body.approved_exemplars]
     rejected = [item.model_dump() for item in body.rejected_exemplars]
@@ -2106,15 +2103,12 @@ async def discover_clips(body: DiscoverRequest, request: Request) -> DiscoverRes
             max_clips=body.max_clips,
             language=body.language,
             cancel_event=cancel_event,
-            decision_provider=decision_provider,
             approved_exemplars=approved,
             rejected_exemplars=rejected,
         )
 
     clips = await _run_until_disconnected(request, run)
-    model = provider.model if provider is not None else (
-        decision_provider.model if decision_provider is not None else ""
-    )
+    model = provider.model
 
     return DiscoverResponse(
         clips=[ClipProposal(**clip) for clip in clips],

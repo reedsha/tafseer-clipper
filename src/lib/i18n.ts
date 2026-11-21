@@ -542,7 +542,6 @@ const TH_BY_EN: Record<string, string> = {
     "ขั้นตอนที่ 2 · จัดลำดับช่วงที่เป็นไปได้ก่อนตั้งชื่อ",
   "Step 3 · skips lines that are already correct":
     "ขั้นตอนที่ 3 · ข้ามบรรทัดที่ถูกต้องอยู่แล้ว",
-  "Clip ranking": "การจัดลำดับคลิป",
   "Arabic triage": "การคัดกรองภาษาอาหรับ",
   "This computer": "เครื่องนี้",
   "Your AI account": "บัญชี AI ของคุณ",

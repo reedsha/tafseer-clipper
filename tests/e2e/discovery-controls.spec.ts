@@ -52,6 +52,38 @@ const NO_CLIPS_PROJECT = {
   lastActivityAt: Date.now(),
 };
 
+/** Two proposals whose exported ranges collide (10–40 and 30–60). */
+const OVERLAP_PROJECT = {
+  ...NO_CLIPS_PROJECT,
+  id: "e2e00000-0000-4000-8000-000000000003",
+  name: "Overlapping-clips",
+  clips: [
+    {
+      id: "e2e00000-0000-4000-8000-0000000000a1",
+      title: "The patience of Ayyub",
+      rationale: "A clear lesson on sabr.",
+      start: 10,
+      end: 40,
+      speechStart: 10.3,
+      speechEnd: 39.7,
+      approved: false,
+      createdAt: 1,
+    },
+    {
+      id: "e2e00000-0000-4000-8000-0000000000a2",
+      title: "Charity in secret",
+      rationale: "A practical ruling.",
+      start: 30,
+      end: 60,
+      speechStart: 30.3,
+      speechEnd: 59.7,
+      approved: false,
+      createdAt: 2,
+    },
+  ],
+  selectedClipId: "e2e00000-0000-4000-8000-0000000000a1",
+};
+
 /** A local analysis model avoids the provider pre-flight blocking the click. */
 const SETTINGS = {
   state: {
@@ -90,15 +122,14 @@ test.describe("Step 2 search orchestration", () => {
     await expect(page.getByRole("heading", { name: "Find clips" })).toBeVisible();
     await expect(page.getByText("No clips proposed yet")).toBeVisible();
 
-    // The search setup exposes the per-lecture topic focus and the target count,
-    // and both travel with the request.
-    const topic = page.getByLabel("Topic focus for this lecture");
-    await expect(topic).toBeVisible();
-    const toFind = page.getByLabel("To find");
-    await expect(toFind).toHaveValue("8");
-    await topic.fill("Focus on patience and gratitude");
-    await toFind.fill("5");
-    await toFind.press("Tab");
+    // The search panel now exposes only the per-search note. Duration bounds
+    // and the target count live on the project, not in the UI.
+    await expect(page.getByLabel("Topic focus for this lecture")).toHaveCount(0);
+    await expect(page.getByLabel("To find")).toHaveCount(0);
+    await expect(page.getByLabel("Shortest (s)")).toHaveCount(0);
+    await page
+      .getByLabel("Additional instructions for this search")
+      .fill("Focus on patience and gratitude");
 
     await page.waitForTimeout(500);
     expect(discoveryCalls, "resume must not start a search").toBe(0);
@@ -106,10 +137,34 @@ test.describe("Step 2 search orchestration", () => {
     await page.getByRole("button", { name: "Find clips", exact: true }).last().click();
     await expect.poll(() => discoveryCalls).toBe(1);
     expect(discoveryBodies[0]).toMatchObject({
-      session_guide: "Focus on patience and gratitude",
-      max_clips: 5,
+      refinement_note: "Focus on patience and gratitude",
+      max_clips: 8,
+      min_duration: 15,
+      max_duration: 90,
     });
+    expect(discoveryBodies[0]).not.toHaveProperty("session_guide");
     // An empty result reads as "nothing more found" and keeps the deck as is.
     await expect(page.getByText("No new clips found")).toBeVisible();
+  });
+
+  test("colliding clips are both kept and labelled with each other's titles", async ({
+    page,
+  }) => {
+    await page.addInitScript((settings) => {
+      if (window.location.protocol !== "http:") return;
+      window.localStorage.setItem("tafseer.settings.v1", JSON.stringify(settings));
+    }, SETTINGS);
+    await seedProjectFile(page, OVERLAP_PROJECT);
+
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Overlapping-clips/ })
+      .first()
+      .click();
+
+    // Neither clip is dropped: each names the other one.
+    await expect(page.getByText("Overlaps: Charity in secret")).toBeVisible();
+    await expect(page.getByText("Overlaps: The patience of Ayyub")).toBeVisible();
   });
 });

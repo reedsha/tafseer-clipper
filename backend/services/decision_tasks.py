@@ -249,108 +249,6 @@ def triage_from_answers(
 
 
 # --------------------------------------------------------------------------- #
-# Step 2 - clip scoring (score + noul)
-# --------------------------------------------------------------------------- #
-@dataclass(slots=True)
-class ClipCandidate:
-    id: str
-    start: float
-    end: float
-    text: str
-
-
-def clip_scoring_request(
-    candidates: list[ClipCandidate],
-    *,
-    brief: str,
-    min_duration: float,
-    max_duration: float,
-    max_questions: int = 48,
-) -> tuple[str, dict[str, Question]]:
-    usable = candidates[:max_questions]
-    blocks: list[str] = []
-    for candidate in usable:
-        blocks.append(
-            f"#{candidate.id} [{candidate.start:.1f}-{candidate.end:.1f}] "
-            f"({candidate.end - candidate.start:.0f}s)\n{candidate.text.strip()[:300]}"
-        )
-    state = (
-        "Candidate clip windows from one Thai Tafseer lecture. Score each window "
-        "against the editor's brief.\n\n"
-        f"BRIEF:\n{brief.strip() or '(the channel default)'}\n\n"
-        f"TARGET LENGTH: {min_duration:.0f}-{max_duration:.0f} seconds\n\n"
-        + "\n\n".join(blocks)
-    )
-    questions: dict[str, Question] = {}
-    for candidate in usable:
-        questions[f"score_{candidate.id}"] = Question(
-            type="score",
-            instructions=(
-                f"How well does candidate #{candidate.id} work as a standalone "
-                "social-media clip for this brief?"
-            ),
-            criteria=[
-                "Unusable: filler, admin talk, or a mid-verse cut.",
-                "Weak: on topic but needs heavy trimming or more context.",
-                "Good: a coherent moment that mostly stands on its own.",
-                "Excellent: a complete, self-contained moment that fits the brief.",
-            ],
-        )
-        questions[f"complete_{candidate.id}"] = Question(
-            type="noul",
-            instructions=(
-                f"Does candidate #{candidate.id} start and end on a complete thought?"
-            ),
-            criteria={
-                "true": (
-                    "The window opens at a sentence start and closes at a "
-                    "sentence end without cutting a verse or a hadith."
-                ),
-                "false": "It starts or ends mid-thought.",
-            },
-        )
-    return state, questions
-
-
-@dataclass(slots=True)
-class CandidateScore:
-    id: str
-    score: float
-    complete: bool
-    confidence: float
-
-    @property
-    def rank_score(self) -> float:
-        """Final ordering value; an incomplete window ranks below a complete one."""
-        return self.score if self.complete else self.score * 0.55
-
-
-def scores_from_answers(
-    candidate_ids: list[str],
-    answers: dict[str, Answer],
-) -> list[CandidateScore]:
-    scores: list[CandidateScore] = []
-    for candidate_id in candidate_ids:
-        score_answer = answers.get(f"score_{candidate_id}")
-        complete_answer = answers.get(f"complete_{candidate_id}")
-        score = score_answer.score if score_answer and score_answer.score is not None else 0.0
-        complete = bool(complete_answer.noul) if complete_answer else False
-        confidence = min(
-            score_answer.confidence if score_answer else 0.0,
-            complete_answer.confidence if complete_answer else 0.0,
-        )
-        scores.append(
-            CandidateScore(
-                id=candidate_id,
-                score=score,
-                complete=complete,
-                confidence=confidence,
-            )
-        )
-    return scores
-
-
-# --------------------------------------------------------------------------- #
 # Step 1 - sentence boundaries (noul)
 # --------------------------------------------------------------------------- #
 def sentence_break_request(
@@ -411,16 +309,12 @@ def sentence_breaks_from_answers(
 
 
 __all__ = [
-    "CandidateScore",
-    "ClipCandidate",
     "MIN_CONFIDENT",
     "RECITATION_LEGEND",
     "RecitationClassification",
     "TriageDecision",
-    "clip_scoring_request",
     "recitation_from_answers",
     "recitation_request",
-    "scores_from_answers",
     "sentence_break_request",
     "sentence_breaks_from_answers",
     "triage_from_answers",

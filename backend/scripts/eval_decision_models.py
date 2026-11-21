@@ -232,43 +232,9 @@ def build_fixtures() -> dict[str, Any]:
             }
         )
 
-    # (c) Clip scoring: seeded good/bad candidate windows --------------------
-    clip_rows: list[dict[str, Any]] = []
-    sentence_pool = THAI_EXPLANATION_SEEDS + [verse[3] for verse in verses[:10]]
-    for index in range(120):
-        variant = ("complete", "mid-sentence-start", "filler", "too-short")[index % 4]
-        if variant == "complete":
-            body = " ".join(
-                sentence_pool[index % len(sentence_pool) :][:3]
-                or sentence_pool[:3]
-            )
-            start, end, label = 10.0, 70.0, True
-        elif variant == "mid-sentence-start":
-            body = " ".join(sentence_pool[index % len(sentence_pool) :][:3])
-            start, end, label = 10.0, 70.0, False
-            body = "…" + body[3:]
-        elif variant == "filler":
-            body = "อ่า คือว่า เอ่อ วันนี้เรามาเริ่มกันเลยนะครับ"
-            start, end, label = 10.0, 60.0, False
-        else:
-            body = sentence_pool[index % len(sentence_pool)]
-            start, end, label = 10.0, 17.0, False
-        clip_rows.append(
-            {
-                "id": f"cand{index:03d}",
-                "start": start,
-                "end": end,
-                "text": body,
-                "label": label,
-                "variant": variant,
-                "language": "th",
-            }
-        )
-
     files = {
         "recitation.jsonl": recitation_rows,
         "verify_triage.jsonl": triage_rows,
-        "clip_scoring.jsonl": clip_rows,
     }
     counts: dict[str, int] = {}
     for name, rows in files.items():
@@ -296,15 +262,13 @@ def build_fixtures() -> dict[str, Any]:
                 "Corruptions are synthetic (diacritics dropped, one letter swapped) "
                 "and ground truth is exact by construction."
             ),
-            "clip_scoring": (
-                "Candidates are synthetic windows with seeded quality labels; this "
-                "measures rubric adherence, not real-lecture recall."
-            ),
         },
         "candidates": DEFAULT_CANDIDATES,
     }
     (EVAL_DIR / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+        newline="\n",
     )
     return manifest
 
@@ -424,45 +388,6 @@ async def _predict_triage(
     return predictions
 
 
-async def _predict_clips(
-    provider: decision.DecisionProviderConfig,
-    rows: list[dict[str, Any]],
-    transport: Any = None,
-) -> list[Prediction] | None:
-    predictions: list[Prediction] = []
-    batch_size = 12
-    for offset in range(0, len(rows), batch_size):
-        chunk = rows[offset : offset + batch_size]
-        candidates = [
-            decision_tasks.ClipCandidate(
-                id=str(row["id"]),
-                start=float(row["start"]),
-                end=float(row["end"]),
-                text=str(row["text"]),
-            )
-            for row in chunk
-        ]
-        state, questions = decision_tasks.clip_scoring_request(
-            candidates, brief="", min_duration=15.0, max_duration=90.0
-        )
-        try:
-            answers = await decision.decide(
-                provider, state, questions, transport=transport
-            )
-        except decision.DecisionError:
-            return None
-        scores = decision_tasks.scores_from_answers(
-            [candidate.id for candidate in candidates], answers
-        )
-        by_id = {score.id: score for score in scores}
-        for candidate in candidates:
-            score = by_id[candidate.id]
-            predictions.append(
-                Prediction(score.rank_score >= 0.5, score.confidence)
-            )
-    return predictions
-
-
 # --------------------------------------------------------------------------- #
 # Baselines (today's heuristics)
 # --------------------------------------------------------------------------- #
@@ -488,17 +413,9 @@ def _triage_baseline(row: dict[str, Any]) -> bool:
     )
 
 
-def _clip_baseline(row: dict[str, Any]) -> bool:
-    duration = float(row["end"]) - float(row["start"])
-    body = str(row["text"])
-    filler = any(token in body for token in ("อ่า", "เอ่อ", "คือว่า"))
-    return 15.0 <= duration <= 90.0 and not filler
-
-
 def baseline_metrics() -> dict[str, Any]:
     recitation_rows = _load_rows("recitation.jsonl")
     triage_rows = _load_rows("verify_triage.jsonl")
-    clip_rows = _load_rows("clip_scoring.jsonl")
     return {
         "recitation": _metric_block(
             [
@@ -510,12 +427,6 @@ def baseline_metrics() -> dict[str, Any]:
             [
                 (_triage_baseline(row), bool(row["label"]), 1.0)
                 for row in triage_rows
-            ]
-        ),
-        "clip_scoring": _metric_block(
-            [
-                (_clip_baseline(row), bool(row["label"]), 1.0)
-                for row in clip_rows
             ]
         ),
     }
@@ -588,7 +499,6 @@ async def evaluate_candidate(
     tasks = {
         "recitation": ("recitation.jsonl", _predict_recitation),
         "verify_triage": ("verify_triage.jsonl", _predict_triage),
-        "clip_scoring": ("clip_scoring.jsonl", _predict_clips),
     }
     for task, (file_name, predictor) in tasks.items():
         rows = _load_rows(file_name)
@@ -655,9 +565,6 @@ def write_report(evaluation: dict[str, Any]) -> dict[str, Any]:
     candidates = evaluation["candidates"]
     recommendations = [
         recommend("analysis", candidates, baselines["recitation"], task="recitation"),
-        recommend(
-            "clip_scoring", candidates, baselines["clip_scoring"], task="clip_scoring"
-        ),
         recommend(
             "verify_triage", candidates, baselines["verify_triage"], task="verify_triage"
         ),

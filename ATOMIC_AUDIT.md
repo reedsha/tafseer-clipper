@@ -1,5 +1,7 @@
 # ATOMIC_AUDIT.md — Exhaustive Codebase Audit: Bugs, Inconsistencies & Risks
 
+> **Historical note (2026-11):** the `clip_scoring` decision slot described in this audit was retired. Step 2 is the writing model plus `sanitize_clips`; references below to `_discover_with_decisions` and `score_clip_candidates` describe code that no longer exists.
+
 > **Audit Date:** November 2026  
 > **Repository:** `tafseer-clipper` (Desktop Video Workstation for Long-Form Tafseer Lectures)  
 > **Architecture:** Tauri v2 (Rust shell) + React 19 / TypeScript (Tailwind CSS, shadcn/ui, Radix, Zustand) + Python 3.12 FastAPI Sidecar (`backend.exe` onedir) + FFmpeg (`h264_nvenc` / `libx264`).  

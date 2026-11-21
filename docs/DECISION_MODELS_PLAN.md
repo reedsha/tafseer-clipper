@@ -2,7 +2,7 @@
 
 > **Granularity policy.** The base of this plan is **mid-tier**: work packages with scope, touch points, and acceptance criteria — enough to steer and review, not an edit-by-edit script. Selected parts are broken down to **atomic tier** (numbered steps, each with its own verification) where precision pays for itself: contract guards, unproven technology, and small fixes that are cheap to verify independently. Atomic sections are marked **[ATOMIC]**.
 
-> **Status:** implemented 2026-11 (Phases 0-5). The tier lives in `backend/services/decision.py`, `decision_tasks.py`, `verify.py`, `recitation.py` and `quran.py`; the renderer only sends per-slot settings on its existing requests. Measured baselines, the gate and the per-slot runtime thresholds are in `docs/DECISION_MODELS_PHASE0.md`.
+> **Status:** implemented 2026-11 (Phases 0-5). The tier lives in `backend/services/decision.py`, `decision_tasks.py`, `verify.py`, `recitation.py` and `quran.py`; the renderer only sends per-slot settings on its existing requests. Measured baselines, the gate and the per-slot runtime thresholds are in `docs/DECISION_MODELS_PHASE0.md`. The `clip_scoring` slot was retired in 2026-11; Step 2 is the writing model plus `sanitize_clips`.
 
 ---
 
@@ -33,7 +33,7 @@ Each slot is independently configurable in Settings (cloud/local toggle + a mode
 | Slot ID | Where used | Question type | Escalates to |
 |---|---|---|---|
 | `analysis` | Step 1 — recitation detection (`{quran, hadith, quote, none}` per segment) and sentence-boundary gaps | `choice`, `noul` | Today's windowed LLM audit / LLM grouping (`analyzer.audit_arabic`, `analyzer.group_sentences`) |
-| `clip_scoring` | Step 2 — candidate scoring and re-roll ranking | `score` rubric + `noul` | Reasoning LLM (today's discovery prompt) |
+| ~~`clip_scoring`~~ | Retired 2026-11 — Step 2 is the writing model plus `sanitize_clips` (see `docs/DECISION_MODELS_PHASE0.md`). | — | — |
 | `verify_triage` | Step 3 — "is a correction likely?" gate before proofreading | `noul`, batched per clip | Fast generative proofreader (`ARABIC_SYSTEM_PROMPT`) |
 
 **Explicit non-fit:** title/rationale writing, Uthmani correction, and transcription remain generative/STT work. No decision model touches them.
@@ -86,7 +86,7 @@ The client is the foundation; its contract is fixed before anything calls it.
 
 ### 1C. Settings tab (mid-tier)
 
-- `src/store/settingsStore.ts`: `decisionSlots: { analysis, clip_scoring, verify_triage: { mode, model } }`; base URL/key reused from the existing `cloud` / `ollama` connections (never duplicated). Persisted with the rest of settings.
+- `src/store/settingsStore.ts`: `decisionSlots: { analysis, verify_triage: { mode, model } }`; base URL/key reused from the existing `cloud` / `ollama` connections (never duplicated). Persisted with the rest of settings.
 - New section in `src/components/config/SettingsScreen.tsx`: one card per slot — `SegmentedToggle` "This computer" / "Your AI account", `ModelSelect` filtered to decision models, **Test** button (single trivial systemone probe), status line in UX-plan vocabulary (tier label first, codename in hint).
 - `src/lib/aiActivity.ts` labels for decision calls; toasts follow "event + next action" copy rules.
 *Acceptance:* per-slot choice round-trips to the sidecar on the next relevant call; Playwright covers the section; `pnpm lint` / `pnpm test` / `pnpm build` green.
@@ -126,8 +126,7 @@ The client is the foundation; its contract is fixed before anything calls it.
 **7.1 — Candidate generator (mid-tier).** Deterministic candidate windows in `backend/services/analyzer.py`: sentence boundaries + silence gaps + duration bounds (`project.discovery`). The LLM stops inventing timestamps from raw text.
 *Acceptance:* generator covers ≥ the spans today's LLM finds on fixture lectures (recall check against current outputs).
 
-**7.2 — Scoring + finalists (mid-tier).** `clip_scoring` slot scores candidates against the clip brief (`score` + `noul`); the reasoning LLM writes Thai titles/rationales for finalists only.
-*Acceptance:* token volume per `/discover-clips` down substantially; titles/rationales unchanged in kind; no-dec-model ⇒ today's prompt pipeline.
+**7.2 — Scoring + finalists (retired 2026-11).** ~~`clip_scoring` slot scores candidates against the clip brief (`score` + `noul`); the reasoning LLM writes Thai titles/rationales for finalists only.~~ Removed: with a local scoring model the ranking was flat on a real lecture and failed its own confidence gate on every run, so the writing model did the work anyway (`docs/DECISION_MODELS_PHASE0.md`). The writing model now proposes and names clips in one pass.
 
 **7.3 — Re-roll exemplars (mid-tier).** The user's approved/trash clips enter `state` as positive/negative exemplars (`excluded_ranges` retained). The Step 2 request grows additive fields carrying this feedback.
 *Acceptance:* re-rolls respect exclusions as today and measurably reuse feedback (spot-check set of re-rolls on fixture projects).
