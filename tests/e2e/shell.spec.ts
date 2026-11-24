@@ -178,7 +178,14 @@ test.describe("app shell", () => {
   }) => {
     await goToWorkspace(page);
 
-    const openDrawer = () => page.getByRole("button", { name: "Clip brief & system prompt" }).click();
+    // A success toast can stack over this trigger: sonner pauses its dismiss
+    // timer while hovered (the pointer rests on the toaster after saving), so
+    // move it away and let the toast fade before clicking.
+    const openDrawer = async () => {
+      await page.mouse.move(0, 0);
+      await expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
+      await page.getByRole("button", { name: "Clip brief & system prompt" }).click();
+    };
     await openDrawer();
     const drawer = page.getByRole("dialog");
     await expect(drawer.getByText("No saved presets yet — save one above.")).toBeVisible();
