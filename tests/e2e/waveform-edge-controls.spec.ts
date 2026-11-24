@@ -1,35 +1,24 @@
 /**
  * Step 2's waveform is now the clip itself: there is no shaded region, no
  * full-lecture toggle, and the only boundary changes come from the edge
- * buttons or the Shift (cut-in) / Alt (cut-out) arrow shortcuts.
+ * buttons or the Shift (cut-in) / Alt (cut-out) arrow shortcuts. Plain arrows
+ * move the preview playhead instead of trimming.
  *
  * The clip times are read from the compact "speech … · cut … → …" readout,
  * which uses the same absolute clock the renderer uses everywhere else in Step 2.
+ * The playhead is read from the waveform's `data-playhead` hook.
  */
 
 import { expect, test, type Page } from "@playwright/test";
 
 import { seedProjectFile, seedResumableProject } from "./fixtures";
 
-/** A tiny silent WAV so wavesurfer can reach `ready` without a real lecture. */
-function silentWavDataUrl(): string {
-  const sampleRate = 8000;
-  const samples = sampleRate; // one second of silence
-  const buffer = Buffer.alloc(44 + samples * 2);
-  buffer.write("RIFF", 0);
-  buffer.writeUInt32LE(36 + samples * 2, 4);
-  buffer.write("WAVE", 8);
-  buffer.write("fmt ", 12);
-  buffer.writeUInt32LE(16, 16);
-  buffer.writeUInt16LE(1, 20);
-  buffer.writeUInt16LE(1, 22);
-  buffer.writeUInt32LE(sampleRate, 24);
-  buffer.writeUInt32LE(sampleRate * 2, 28);
-  buffer.writeUInt16LE(2, 32);
-  buffer.writeUInt16LE(16, 34);
-  buffer.write("data", 36);
-  buffer.writeUInt32LE(samples * 2, 40);
-  return `data:audio/wav;base64,${buffer.toString("base64")}`;
+function playheadTime(page: Page, clock: string) {
+  return page.locator(`[data-playhead="${clock}"]`);
+}
+
+function windowSeconds(page: Page, seconds: string) {
+  return page.locator(`[data-window="${seconds}"]`);
 }
 
 function trimTime(page: Page, edge: "Cut in" | "Cut out", clock: string) {
@@ -55,6 +44,12 @@ test.describe("Step 2 waveform edge controls", () => {
       .first()
       .click();
     await expect(page.getByRole("heading", { name: "Find clips" })).toBeVisible();
+
+    // This session predates stored peaks. It must never fall back to drawing a
+    // misleading full-lecture waveform; it points at re-transcription instead.
+    await expect(
+      page.getByText(/this session has no stored waveform/),
+    ).toBeVisible();
 
     // The normal-editor affordances are gone, and the model selector is no
     // longer on the wizard screen — it belongs to the Find Clips config.
@@ -87,9 +82,12 @@ test.describe("Step 2 waveform edge controls", () => {
     await page.keyboard.press("Alt+ArrowRight");
     await expect(trimTime(page, "Cut out", "0:40.0")).toBeVisible();
 
-    // Plain arrows were removed: no modifier means no trim at all.
-    await page.keyboard.press("ArrowLeft");
+    // Plain ←/→ move the playhead by 1 s and never touch the cut bounds.
+    await expect(playheadTime(page, "10.000")).toBeVisible();
     await page.keyboard.press("ArrowRight");
+    await expect(playheadTime(page, "11.000")).toBeVisible();
+    await page.keyboard.press("ArrowLeft");
+    await expect(playheadTime(page, "10.000")).toBeVisible();
     await expect(trimTime(page, "Cut in", "0:10.0")).toBeVisible();
     await expect(trimTime(page, "Cut out", "0:40.0")).toBeVisible();
 
@@ -144,11 +142,9 @@ test.describe("Step 2 waveform edge controls", () => {
         segments: [{ id: 1, start: 11, end: 39, text: "ความอดทน", language: "th" }],
         peaks: Array.from({ length: 1200 }, () => 0.5),
       },
-      audioPath: silentWavDataUrl(),
       basePrompt: "",
       promptPresetId: null,
       sessionGuide: "",
-      discovery: { minDuration: 15, maxDuration: 90, maxClips: 8 },
       clips: [
         {
           id: "e2e00000-0000-4000-8000-0000000000c3",
@@ -185,17 +181,46 @@ test.describe("Step 2 waveform edge controls", () => {
       .click();
     await expect(page.getByRole("heading", { name: "Find clips" })).toBeVisible();
 
-    // The buttons only render once wavesurfer has loaded the clip's audio.
+    // The waveform renders from the stored peaks alone (this project has no
+    // 16 kHz audio extract), and the edge buttons sit below it. Its duration is
+    // the 30 s clip window, not the 60 s lecture.
     await expect(page.getByRole("button", { name: "Grow clip at the start" })).toBeVisible();
     await expect(trimTime(page, "Cut in", "0:10.0")).toBeVisible();
+    await expect(windowSeconds(page, "30.000")).toBeVisible();
 
     // One button press uses the button step (5 s), not the keyboard step.
+    // Growing the front edge parks the playhead on the new in-point.
     await page.getByRole("button", { name: "Grow clip at the start" }).click();
     await expect(trimTime(page, "Cut in", "0:05.0")).toBeVisible();
     await expect(trimTime(page, "Cut out", "0:40.0")).toBeVisible();
+    await expect(playheadTime(page, "5.000")).toBeVisible();
+    // Growing the front edge stretches the waveform window from 30 s to 35 s.
+    await expect(windowSeconds(page, "35.000")).toBeVisible();
 
+    // Trimming the front edge snaps the playhead forward to the new in-point
+    // and shrinks the window back to 30 s.
+    await page.getByRole("button", { name: "Trim clip at the start" }).click();
+    await expect(trimTime(page, "Cut in", "0:10.0")).toBeVisible();
+    await expect(playheadTime(page, "10.000")).toBeVisible();
+    await expect(windowSeconds(page, "30.000")).toBeVisible();
+
+    // Trimming the back edge leaves the playhead where it is and shrinks the
+    // window to the new 25 s cut.
     await page.getByRole("button", { name: "Trim clip at the end" }).click();
     await expect(trimTime(page, "Cut out", "0:35.0")).toBeVisible();
+    await expect(playheadTime(page, "10.000")).toBeVisible();
+    await expect(windowSeconds(page, "25.000")).toBeVisible();
+
+    // Move the playhead to the current out-point, then trim past it: the
+    // playhead is clamped to the new end so it never sits outside the clip.
+    for (let index = 0; index < 25; index += 1) {
+      await page.keyboard.press("ArrowRight");
+    }
+    await expect(playheadTime(page, "35.000")).toBeVisible();
+    await page.getByRole("button", { name: "Trim clip at the end" }).click();
+    await expect(trimTime(page, "Cut out", "0:30.0")).toBeVisible();
+    await expect(playheadTime(page, "30.000")).toBeVisible();
+    await expect(windowSeconds(page, "20.000")).toBeVisible();
   });
 
   test("trimming the cut-out drops the subtitle lines it can no longer show", async ({ page }) => {
@@ -215,11 +240,9 @@ test.describe("Step 2 waveform edge controls", () => {
         segments: [{ id: 1, start: 11, end: 39, text: "ความอดทน", language: "th" }],
         peaks: Array.from({ length: 1200 }, () => 0.5),
       },
-      audioPath: silentWavDataUrl(),
       basePrompt: "",
       promptPresetId: null,
       sessionGuide: "",
-      discovery: { minDuration: 15, maxDuration: 90, maxClips: 8 },
       clips: [
         {
           id: clipId,

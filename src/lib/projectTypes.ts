@@ -63,19 +63,6 @@ export interface ProjectClip {
   createdAt: number;
 }
 
-/** Per-project clip discovery bounds, usually seeded by a prompt preset. */
-export interface DiscoverySettings {
-  minDuration: number;
-  maxDuration: number;
-  maxClips: number;
-}
-
-export const DEFAULT_DISCOVERY_SETTINGS: DiscoverySettings = {
-  minDuration: 15,
-  maxDuration: 90,
-  maxClips: 8,
-};
-
 export interface SubtitleCue {
   id: string;
   start: number;
@@ -114,12 +101,14 @@ export interface ProjectData {
   step: WizardStep;
   transcriptId: string | null;
   transcript: TranscriptData | null;
-  /** 16 kHz mono WAV extracted by the sidecar; feeds the Step 2 waveform. */
+  /**
+   * 16 kHz mono WAV extracted by the sidecar. Kept for the project record;
+   * the Step 2 waveform renders from `transcript.peaks` instead.
+   */
   audioPath: string | null;
   basePrompt: string;
   promptPresetId: string | null;
   sessionGuide: string;
-  discovery: DiscoverySettings;
   clips: ProjectClip[];
   /**
    * Clips the editor explicitly discarded, most recent last (capped). They are

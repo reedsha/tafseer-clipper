@@ -326,15 +326,60 @@ DEFAULT_BASE_PROMPT = (
 
 CLIP_SYSTEM_RULES = """\
 Return STRICT JSON only, with this exact shape:
-{"clips": [{"start": <seconds>, "end": <seconds>, "title": "<Thai title, max 70 chars>", "rationale": "<one sentence in Thai>"}]}
+{"clips": [{"start": <seconds>, "end": <seconds>, "title": "<short title, max 70 chars>", "rationale": "<one sentence>"}]}
 
 Hard rules:
 - Times are absolute seconds from the start of the lecture, floats.
 - Every clip must start and end on a complete sentence; never cut mid-verse.
-- Clips must not overlap each other and must not overlap any excluded range.
-- Respect the requested duration bounds and clip count.
+- Let the passage decide its length: never pad, trim or split a thought to hit a target length.
+- Every clip must be at least 15 seconds long.
+- Quality over quantity: return only passages you would genuinely publish. An empty list is a valid answer for a window that has no standalone moment.
+- Clips must not overlap an excluded range.
 - Arabic Quranic quotes belong inside the clip; do not start a clip in the middle of a recitation.
 """
+
+CLIP_SELECTION_RULES = """\
+Return STRICT JSON only, with this exact shape:
+{"keep": [<candidate numbers, ascending>]}
+
+Hard rules:
+- Keep every candidate that clearly earns its place; drop every candidate that does not.
+- When two candidates cover the same moment or repeat the same point, keep only the stronger one.
+- There is no target count: do not pad the set to reach a number, and do not drop a strong moment to stay under one.
+- Respect the refinement note and the session topic guide.
+- Never output a number that is not in the candidate list.
+"""
+
+#: Deterministic safety guards. These are not editorial limits: the discovery
+#: model decides the real count and length of clips. The floor keeps
+#: sub-15-second fragments out of Step 2, and the flood ceiling stops a
+#: pathological reply from flooding the editor.
+SAFETY_MIN_CLIP_SECONDS = 15.0
+#: One clip slot per this many seconds of lecture. Mirrors the renderer's
+#: ``src/lib/clipGuards.ts``; that file carries the shared sample vectors
+#: (``FLOOD_CEILING_SAMPLES``) and ``test_phase1_e2e.py`` asserts the two
+#: implementations agree, so they cannot drift.
+FLOOD_CEILING_DIVISOR = 120.0
+FLOOD_CEILING_MIN = 6
+FLOOD_CEILING_MAX = 120
+#: Upper bound on the Pass-1 pool handed to the editorial pass, so one runaway
+#: window cannot blow up the synthesis prompt.
+SAFETY_MAX_CANDIDATES = 120
+
+
+def flood_ceiling(duration: float) -> int:
+    """Maximum number of clips one reply may deliver for this lecture.
+
+    ``clamp(ceil(duration / 120 s), 6, 120)``. Pathological-reply tripwire,
+    not an editorial limit: the model decides clip count and length; this only
+    bounds how many clips one reply may deliver.
+    """
+    if not math.isfinite(duration) or duration <= 0:
+        return FLOOD_CEILING_MIN
+    scaled = math.ceil(duration / FLOOD_CEILING_DIVISOR)
+    return max(FLOOD_CEILING_MIN, min(FLOOD_CEILING_MAX, scaled))
+#: The editorial reply is only a list of indices, so each keep costs few tokens.
+_SELECTION_TOKENS_PER_ITEM = 24
 
 
 #: Discovery window budget.  A 1-3 h Tafseer lecture transcribes to roughly
@@ -485,12 +530,15 @@ def build_discover_messages(
     session_guide: str,
     refinement_note: str,
     excluded_ranges: list[dict[str, float]],
-    min_duration: float,
-    max_duration: float,
-    max_clips: int,
     language: str,
     exemplar_block: str = "",
 ) -> list[dict[str, str]]:
+    """Pass 1: find every passage in this window that stands on its own.
+
+    There is deliberately no desired clip count or length here. The model reads
+    the transcript (the only "watching" this stage has) and lets each complete
+    thought define its own boundaries; the editorial pass decides the final set.
+    """
     system = f"{base_prompt.strip() or DEFAULT_BASE_PROMPT}\n\n{CLIP_SYSTEM_RULES}"
     language_code = normalize_language(language)
     if language_code:
@@ -514,11 +562,6 @@ REFINEMENT NOTE (this re-roll only):
 ALREADY APPROVED / EXCLUDED RANGES (never propose inside these):
 {excluded_text}
 
-CONSTRAINTS:
-- between {min_duration:.0f}s and {max_duration:.0f}s per clip
-- at most {max_clips} clips
-- propose only inside the unclaimed parts of the lecture
-
 TRANSCRIPT:
 {_format_transcript(segments)}
 """
@@ -526,6 +569,83 @@ TRANSCRIPT:
         # Re-roll feedback rides after the transcript so the window text and its
         # timestamps stay contiguously readable for the model.
         user += "\n" + exemplar_block.strip() + "\n"
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+#: Transcript context shown per candidate in the editorial pass.
+SYNTHESIS_EXCERPT_CHARS = 200
+
+
+def _candidate_excerpt(
+    segments: list[dict[str, Any]],
+    start: float,
+    end: float,
+    *,
+    max_chars: int = SYNTHESIS_EXCERPT_CHARS,
+) -> str:
+    """A bounded slice of what the candidate actually says, for the editor pass."""
+    parts: list[str] = []
+    length = 0
+    for segment in segments:
+        try:
+            seg_start = float(segment.get("start", 0.0))
+            seg_end = float(segment.get("end", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if seg_end <= start or seg_start >= end:
+            continue
+        text = str(segment.get("text", "")).strip()
+        if not text:
+            continue
+        parts.append(text)
+        length += len(text) + 1
+        if length >= max_chars:
+            break
+    return " ".join(parts)[:max_chars].strip()
+
+
+def build_synthesis_messages(
+    *,
+    candidates: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    base_prompt: str,
+    session_guide: str,
+    refinement_note: str,
+) -> list[dict[str, str]]:
+    """Pass 2: the editorial call that decides the final, publishable set.
+
+    It answers with candidate indices only, so it can never invent or shift a
+    timestamp; the sidecar maps the kept indices back to the exact Pass-1
+    records. Excerpts give it enough context to judge quality without replaying
+    the whole transcript.
+    """
+    system = f"{base_prompt.strip() or DEFAULT_BASE_PROMPT}\n\n{CLIP_SELECTION_RULES}"
+
+    rows: list[str] = []
+    for index, candidate in enumerate(candidates, start=1):
+        start = float(candidate.get("start", 0.0))
+        end = float(candidate.get("end", 0.0))
+        title = str(candidate.get("title") or "").strip()[:90]
+        rationale = str(candidate.get("rationale") or "").strip()[:200]
+        excerpt = _candidate_excerpt(segments, start, end)
+        rows.append(
+            f"[{index}] {start:.1f}s .. {end:.1f}s | {title} | {rationale}\n"
+            f"    excerpt: {excerpt or '(none)'}"
+        )
+
+    user = f"""\
+SESSION TOPIC GUIDE (video specific notes):
+{session_guide.strip() or "(none)"}
+
+REFINEMENT NOTE (this re-roll only):
+{refinement_note.strip() or "(none)"}
+
+CANDIDATES ({len(candidates)}):
+{chr(10).join(rows)}
+"""
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
@@ -546,18 +666,30 @@ def _overlaps_excluded(
     return False
 
 
+def _thin_evenly(items: list[Any], limit: int) -> list[Any]:
+    """Keep ``limit`` items spread across the whole list, never just its head."""
+    if limit <= 0 or not items:
+        return []
+    if len(items) <= limit:
+        return list(items)
+    step = len(items) / limit
+    return [items[min(len(items) - 1, int(position * step))] for position in range(limit)]
+
+
 def sanitize_clips(
     raw_clips: list[Any],
     *,
     duration: float,
     excluded_ranges: list[dict[str, float]],
-    min_duration: float,
-    max_duration: float,
-    max_clips: int,
+    min_duration: float = SAFETY_MIN_CLIP_SECONDS,
+    max_clips: int | None = None,
+    preserve_order: bool = False,
 ) -> list[dict[str, Any]]:
     """Clamp, filter and order proposals into deterministic clip records.
 
-    Pinned rules (Phase 4.4):
+    The model decides how many clips the lecture contains and how long each one
+    is. This function only applies deterministic *safety* guards, so a broken
+    reply cannot leak invalid JSON or flood Step 2.
 
     =====  =====================================================================
     Rule   Behaviour
@@ -568,18 +700,25 @@ def sanitize_clips(
     R3     With a known media duration, bounds are clamped into ``[0, duration]``
            (a duration overrun is clamped, never allowed past the end).
     R4     After clamping, an empty window (``end - start < 1s``) is dropped.
-    R5     A too-short window (``< min_duration * 0.5``) is dropped; no
-           sentence-safe extension information exists here.
-    R6     An oversized window (``> max_duration * 1.5``) is dropped.
+    R5     A window shorter than the safety floor (15 s) is dropped: a
+           fragment under 15 seconds is not a publishable moment.
+    R6     There is no maximum length: a long window is kept, because the
+           model decides how long a clip may be.
     R7     A window overlapping an approved/excluded range is dropped.
-    R8     Overlapping proposals are **kept** and surfaced to the editor; the
-           ranking only decides which proposals survive the ``max_clips`` cap.
-    R9     The result is ordered by start time and capped at ``max_clips``.
-    R10    Internal ordering keys (``score``) never leave the service.
+    R8     Overlapping proposals are **kept** and surfaced to the editor with
+           collision labels; the editorial pass decides what to keep.
+    R9     The result is start-ordered. Above ``max_clips`` (the
+           lecture-scaled flood ceiling by default), the caller's order is
+           preserved when ``preserve_order`` is set (the editorial ranking);
+           otherwise the pool is evenly thinned so the lecture tail is never
+           dropped.
+    R10    Internal ordering keys never leave the service.
     =====  =====================================================================
     """
     candidates: list[dict[str, Any]] = []
     finite_duration = math.isfinite(duration) and duration > 0
+    if max_clips is None:
+        max_clips = flood_ceiling(duration)
     for item in raw_clips:
         # R1
         if not isinstance(item, dict):
@@ -603,23 +742,14 @@ def sanitize_clips(
             start = 0.0
 
         length = end - start
-        # R4/R5/R6
+        # R4/R5
         if length < 1.0:
             continue
-        if length < min_duration * 0.5:
-            continue
-        if length > max_duration * 1.5:
+        if length < min_duration:
             continue
         # R7
         if _overlaps_excluded(start, end, excluded_ranges):
             continue
-
-        try:
-            score = float(item.get("score", 0.0))
-        except (TypeError, ValueError):
-            score = 0.0
-        if not math.isfinite(score):
-            score = 0.0
 
         title = str(item.get("title") or "").strip() or f"Clip {len(candidates) + 1}"
         rationale = str(item.get("rationale") or "").strip()
@@ -629,27 +759,16 @@ def sanitize_clips(
                 "end": round(end, 3),
                 "title": title[:120],
                 "rationale": rationale[:400],
-                "_score": max(0.0, min(1.0, score)),
-                "_order": len(candidates),
             }
         )
 
     # R8: overlaps are deliberately **not** resolved here. Two proposals that
     # cover the same seconds both ship, so the editor can see the collision and
-    # choose; the ranking only decides who survives the max_clips cap.
-    ranked = sorted(
-        candidates,
-        key=lambda clip: (
-            -clip["_score"],
-            -(clip["end"] - clip["start"]),
-            clip["start"],
-            clip["_order"],
-        ),
-    )
-    accepted = ranked[:max_clips]
+    # choose. The editorial pass is where duplicate moments collapse.
+    accepted = candidates[:max_clips] if preserve_order else _thin_evenly(candidates, max_clips)
 
     # R9 + R10
-    accepted.sort(key=lambda clip: clip["start"])
+    accepted = sorted(accepted, key=lambda clip: clip["start"])
     return [
         {
             "start": clip["start"],
@@ -657,8 +776,96 @@ def sanitize_clips(
             "title": clip["title"],
             "rationale": clip["rationale"],
         }
-        for clip in accepted[:max_clips]
+        for clip in accepted
     ]
+
+
+def _window_reply_capacity(window: list[dict[str, Any]]) -> int:
+    """A cost guard for one Pass-1 reply, not an editorial target.
+
+    The floor keeps the token budget from truncating a small window; the ceiling
+    stops a runaway reply. Nothing is said to the model about it.
+    """
+    chars = sum(len(str(segment.get("text", ""))) for segment in window)
+    return max(4, min(24, math.ceil(chars / 1200)))
+
+
+def _parse_keep_indices(reply: str, count: int) -> list[int] | None:
+    """Map an editorial reply to zero-based candidate indices, or ``None``.
+
+    ``None`` means "not usable" so the caller can degrade to keeping every
+    candidate instead of losing the window's discoveries.
+    """
+    try:
+        payload = extract_json(reply)
+    except LLMError:
+        return None
+    keep = payload.get("keep")
+    if not isinstance(keep, list):
+        return None
+    indexes: list[int] = []
+    seen: set[int] = set()
+    for value in keep:
+        if isinstance(value, bool):
+            continue
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= index <= count and index not in seen:
+            seen.add(index)
+            indexes.append(index - 1)
+    return indexes or None
+
+
+async def _select_with_prompts(
+    *,
+    candidates: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    base_prompt: str,
+    session_guide: str,
+    refinement_note: str,
+    provider: ProviderConfig,
+    cancel_event: threading.Event | None,
+) -> list[dict[str, Any]]:
+    """Pass 2: the model's editorial decision over the pooled candidates.
+
+    A failed or unusable reply keeps the whole candidate pool (degradation is
+    mandatory); it never turns a discovery run into an error.
+    """
+    raise_if_cancelled(cancel_event)
+    messages = build_synthesis_messages(
+        candidates=candidates,
+        segments=segments,
+        base_prompt=base_prompt,
+        session_guide=session_guide,
+        refinement_note=refinement_note,
+    )
+    try:
+        reply = await chat(
+            provider,
+            messages,
+            temperature=0.2,
+            max_tokens=_reply_budget(
+                len(candidates), per_item=_SELECTION_TOKENS_PER_ITEM
+            ),
+        )
+        keep = _parse_keep_indices(reply, len(candidates))
+    except LLMError as exc:
+        logger.warning(
+            "Editorial clip selection failed (%s); keeping all %d candidate(s).",
+            exc,
+            len(candidates),
+        )
+        return list(candidates)
+    if keep is None:
+        logger.warning(
+            "Editorial clip selection returned no usable 'keep' list; "
+            "keeping all %d candidate(s).",
+            len(candidates),
+        )
+        return list(candidates)
+    return [candidates[index] for index in keep]
 
 
 async def _discover_with_prompts(
@@ -670,34 +877,24 @@ async def _discover_with_prompts(
     refinement_note: str,
     excluded_ranges: list[dict[str, float]],
     provider: ProviderConfig,
-    min_duration: float = 15.0,
-    max_duration: float = 90.0,
-    max_clips: int = 8,
     language: str = "th",
     cancel_event: threading.Event | None = None,
     approved_exemplars: list[dict[str, Any]] | None = None,
     rejected_exemplars: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Propose clips across the *whole* lecture, not just its tail.
+    """Find clips across the *whole* lecture with the writing model.
 
     The transcript is split into provider-sized windows on segment boundaries
-    (``TRANSCRIPT_WINDOW_CHARS``) and the reasoning model is called once per
-    window, with at most ``MAX_DISCOVERY_WINDOWS`` passes.  ``max_clips`` is
-    divided proportionally across the windows (the remainder goes to the first
-    windows); every window keeps its own segment timestamps and the global
-    exclusion/dedupe/cap pipeline then runs once over the merged proposals, so
-    the response contract is unchanged.  A window whose proportional budget is
-    zero is skipped, but ``max_clips >= 1`` and the window count is capped by
-    ``max_clips``, so no window is dropped in practice.
+    (``TRANSCRIPT_WINDOW_CHARS``) and Pass 1 asks each window for every passage
+    that stands on its own - no count and no length target. The pooled
+    candidates then go through one editorial pass (Pass 2) that chooses the
+    final, non-redundant set. ``sanitize_clips`` applies safety guards only.
 
     ``approved_exemplars`` / ``rejected_exemplars`` are the editor's Keep &
     Re-roll feedback; they are rendered once (bounded) and appended to every
-    window prompt so the writing model learns from earlier passes.
+    Pass-1 window prompt so the writing model learns from earlier passes.
     """
     windows = split_transcript_windows(segments, max_windows=MAX_DISCOVERY_WINDOWS)
-    window_total = len(windows) or 1
-    # Each window over-samples candidates; global pooling + ranking trims to max_clips.
-    per_window_candidates = max(2, math.ceil(max_clips * 1.5 / window_total))
     exemplar_block = format_exemplars(approved_exemplars, rejected_exemplars)
 
     proposals: list[Any] = []
@@ -707,18 +904,13 @@ async def _discover_with_prompts(
         # Natural cancellation boundary: one LLM pass per window; a
         # disconnected client stops before the next provider call.
         raise_if_cancelled(cancel_event)
-        budget = per_window_candidates
-        if budget < 1:
-            continue
+        capacity = _window_reply_capacity(window)
         messages = build_discover_messages(
             segments=window,
             base_prompt=base_prompt,
             session_guide=session_guide,
             refinement_note=refinement_note,
             excluded_ranges=excluded_ranges,
-            min_duration=min_duration,
-            max_duration=max_duration,
-            max_clips=budget,
             language=language,
             exemplar_block=exemplar_block,
         )
@@ -726,7 +918,7 @@ async def _discover_with_prompts(
             provider,
             messages,
             temperature=0.3,
-            max_tokens=_reply_budget(budget),
+            max_tokens=_reply_budget(capacity),
         )
         try:
             payload = extract_json(reply)
@@ -757,13 +949,32 @@ async def _discover_with_prompts(
             "window. Try a different model, or run it again."
         )
 
-    return sanitize_clips(
+    # Pool + deterministic guards before the editorial call. The pool ceiling is
+    # a prompt-size guard only; the model decides the real final count.
+    pool = sanitize_clips(
         proposals,
         duration=duration,
         excluded_ranges=excluded_ranges,
-        min_duration=min_duration,
-        max_duration=max_duration,
-        max_clips=max_clips,
+        max_clips=SAFETY_MAX_CANDIDATES,
+    )
+    if not pool:
+        return []
+
+    selected = await _select_with_prompts(
+        candidates=pool,
+        segments=segments,
+        base_prompt=base_prompt,
+        session_guide=session_guide,
+        refinement_note=refinement_note,
+        provider=provider,
+        cancel_event=cancel_event,
+    )
+    return sanitize_clips(
+        selected,
+        duration=duration,
+        excluded_ranges=excluded_ranges,
+        max_clips=flood_ceiling(duration),
+        preserve_order=True,
     )
 
 
@@ -856,15 +1067,17 @@ def generate_clip_candidates(
     *,
     duration: float,
     excluded_ranges: list[dict[str, float]],
-    min_duration: float,
-    max_duration: float,
+    min_duration: float = SAFETY_MIN_CLIP_SECONDS,
+    max_duration: float | None = None,
     max_candidates: int = 144,
 ) -> list[dict[str, Any]]:
     """Deterministic candidate windows: sentence starts, sentence ends, bounds.
 
-    The reasoning LLM no longer invents timestamps from raw text; it only names
-    and explains windows that already respect the lecture's sentence and
-    duration bounds.
+    Used only for graceful degradation when no writing model is available. The
+    floor here is the safety guard, not an editorial target. ``max_duration``
+    is an optional sampling bound only (tests/eval); with no bound the second
+    window offer per start extends to the next pause - a complete thought -
+    never to the tail of the lecture.
 
     Starts are sampled about three times denser than a single pass budget, plus
     every pause, so a clip that begins mid-window is still offered. When that
@@ -913,7 +1126,9 @@ def generate_clip_candidates(
             start = max(0.0, min(start, duration))
             end = max(0.0, min(end, duration))
         length = end - start
-        if length < min_duration or length > max_duration:
+        if length < min_duration or (
+            max_duration is not None and length > max_duration
+        ):
             return
         if _overlaps_excluded(start, end, excluded_ranges):
             return
@@ -943,13 +1158,24 @@ def generate_clip_candidates(
         if end_index > len(units):
             break
         add(start_index, end_index)
-        # Also offer the longest sentence-aligned window that still fits.
+        # Also offer the longest sentence-aligned window that still fits. With
+        # no length target that runs to the next pause (a complete thought),
+        # never to the tail of the lecture.
         longest = end_index
-        while (
-            longest < len(units)
-            and units[longest]["end"] - units[start_index]["start"] <= max_duration
-        ):
-            longest += 1
+        if max_duration is None:
+            while (
+                longest < len(units)
+                and units[longest]["start"] - units[longest - 1]["end"]
+                < CANDIDATE_PAUSE_SECONDS
+            ):
+                longest += 1
+        else:
+            while (
+                longest < len(units)
+                and units[longest]["end"] - units[start_index]["start"]
+                <= max_duration
+            ):
+                longest += 1
         if longest > end_index:
             add(start_index, longest)
         if len(candidates) >= max_candidates:
@@ -966,18 +1192,17 @@ async def discover_clips(
     refinement_note: str,
     excluded_ranges: list[dict[str, float]],
     provider: ProviderConfig | None,
-    min_duration: float = 15.0,
-    max_duration: float = 90.0,
-    max_clips: int = 8,
     language: str = "th",
     cancel_event: threading.Event | None = None,
     approved_exemplars: list[dict[str, Any]] | None = None,
     rejected_exemplars: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Propose clips across the whole transcript with the writing model.
+    """Find clips across the whole transcript with the writing model.
 
-    ``provider=None`` returns the deterministic candidate windows with neutral
-    titles, so the step degrades instead of hard-failing when no model is set.
+    The model chooses both the clips and their length; only the safety guards
+    in ``sanitize_clips`` are deterministic. ``provider=None`` returns the
+    deterministic candidate windows with neutral titles, so the step degrades
+    instead of hard-failing when no model is set.
     """
     if provider is None:
         # Graceful degradation: with no writing model available, still return
@@ -990,8 +1215,8 @@ async def discover_clips(
             segments,
             duration=duration,
             excluded_ranges=excluded_ranges,
-            min_duration=min_duration,
-            max_duration=max_duration,
+            min_duration=SAFETY_MIN_CLIP_SECONDS,
+            max_candidates=flood_ceiling(duration),
         )
         records: list[dict[str, Any]] = []
         for candidate in candidates:
@@ -1002,16 +1227,13 @@ async def discover_clips(
                     "title": str(candidate["text"]).strip()[:60]
                     or f"Clip {len(records) + 1}",
                     "rationale": "",
-                    "score": 0.0,
                 }
             )
         return sanitize_clips(
             records,
             duration=duration,
             excluded_ranges=excluded_ranges,
-            min_duration=min_duration,
-            max_duration=max_duration,
-            max_clips=max_clips,
+            max_clips=flood_ceiling(duration),
         )
     return await _discover_with_prompts(
         segments=segments,
@@ -1021,9 +1243,6 @@ async def discover_clips(
         refinement_note=refinement_note,
         excluded_ranges=excluded_ranges,
         provider=provider,
-        min_duration=min_duration,
-        max_duration=max_duration,
-        max_clips=max_clips,
         language=language,
         cancel_event=cancel_event,
         approved_exemplars=approved_exemplars,

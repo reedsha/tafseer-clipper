@@ -40,6 +40,10 @@ const EN = {
   "step1.transcript.title": "Transcript ready",
   "step1.transcript.continue": "Continue to clip discovery",
   "step1.transcript.replace": "Replace lecture",
+  "step1.transcript.exportAi": "Export for AI chat",
+  "step1.transcript.exportAiHint":
+    "Ask any chat AI to pick the clips, then import the result in Step 2.",
+  "step1.transcript.exportAiSaved": "Brief saved",
 
   "step1.busy.title": "Extracting audio and transcribing…",
   "step1.busy.description":
@@ -54,7 +58,7 @@ const EN = {
     "The first transcription on this computer downloads about 1.5 GB of AI files.",
 
   "step1.brief.title": "Initial prompt (clip finding)",
-  "step1.brief.description": "The standing instructions the AI follows when finding clips. Save your own as presets and switch between them.",
+  "step1.brief.description": "The standing instructions the AI follows when finding clips. It decides how many clips to find and how long each one is; save your own presets and switch between them.",
   "step1.brief.edit": "Edit initial prompt",
 
   "step1.guide.title": "Additional prompt (optional)",
@@ -74,6 +78,23 @@ const EN = {
 
   "step1.privacy":
     "Audio, transcripts and clips stay on this machine unless Cloud mode is selected.",
+
+  // Step 2 · Import from chat
+  "step2.import.title": "Import clips from chat",
+  "step2.import.description":
+    "Paste the JSON reply from your chat AI. Clips arrive as proposals — review each one before approving.",
+  "step2.import.placeholder":
+    '{"clips": [{"start": 83.5, "end": 141.2, "title": "…", "rationale": "…"}]}',
+  "step2.import.summary": "Showing {kept}/{total} clips",
+  "step2.import.dropped": "{count} dropped",
+  "step2.import.thinned":
+    "Too many clips for this lecture — kept an even sample of {kept}.",
+  "step2.import.overlap": "Overlaps an approved clip",
+  "step2.import.clamped": "Times clamped to the lecture",
+  "step2.import.import": "Import clips · {count}",
+  "step2.import.noClips": "No usable clips found in this text.",
+  "step2.import.added": "Added clips: {count}",
+  "step2.import.failed": "Could not import clips",
 
   "settings.language": "Language",
   "settings.language.hint": "Interface language",
@@ -109,6 +130,10 @@ const TH: Partial<Record<MessageKey, string>> = {
   "step1.transcript.title": "ข้อความถอดเสียงพร้อมแล้ว",
   "step1.transcript.continue": "ไปค้นหาคลิปต่อ",
   "step1.transcript.replace": "แทนที่ไฟล์บรรยาย",
+  "step1.transcript.exportAi": "ส่งออกเพื่อแชท AI",
+  "step1.transcript.exportAiHint":
+    "ให้แชท AI ตัวใดก็ได้ช่วยเลือกคลิป แล้วนำผลลัพธ์กลับมาวางในขั้นที่ 2",
+  "step1.transcript.exportAiSaved": "บันทึกไฟล์บทค้นหาแล้ว",
 
   "step1.busy.title": "กำลังแยกเสียงและถอดเสียง…",
   "step1.busy.description":
@@ -123,7 +148,7 @@ const TH: Partial<Record<MessageKey, string>> = {
     "การถอดเสียงครั้งแรกในเครื่องนี้จะดาวน์โหลดไฟล์ AI ประมาณ 1.5 GB",
 
   "step1.brief.title": "พรอมป์หลัก (สำหรับค้นหาคลิป)",
-  "step1.brief.description": "คำสั่งหลักที่ AI ใช้เลือกคลิป บันทึกเป็นพรีเซ็ตแล้วสลับใช้ได้ตามต้องการ",
+  "step1.brief.description": "คำสั่งหลักที่ AI ใช้เลือกคลิป โดย AI เป็นผู้กำหนดจำนวนคลิปและความยาวของแต่ละคลิป บันทึกเป็นพรีเซ็ตแล้วสลับใช้ได้ตามต้องการ",
   "step1.brief.edit": "แก้พรอมป์หลัก",
 
   "step1.guide.title": "พรอมป์เพิ่มเติม (ไม่บังคับ)",
@@ -143,6 +168,23 @@ const TH: Partial<Record<MessageKey, string>> = {
 
   "step1.privacy":
     "เสียง ข้อความถอดเสียง และคลิปจะอยู่ในเครื่องนี้ เว้นแต่เลือกโหมดคลาวด์",
+
+  // Step 2 · Import from chat
+  "step2.import.title": "นำเข้าคลิปจากแชท AI",
+  "step2.import.description":
+    "วางคำตอบ JSON จากแชท AI คลิปจะเข้ามาในฐานะข้อเสนอ — ตรวจแต่ละคลิปก่อนอนุมัติ",
+  "step2.import.placeholder":
+    '{"clips": [{"start": 83.5, "end": 141.2, "title": "…", "rationale": "…"}]}',
+  "step2.import.summary": "แสดง {kept}/{total} คลิป",
+  "step2.import.dropped": "ตัดออก {count} รายการ",
+  "step2.import.thinned":
+    "คลิปเยอะเกินไปสำหรับบรรยายชุดนี้ — เก็บตัวอย่างกระจาย {kept} คลิป",
+  "step2.import.overlap": "ทับซ้อนกับคลิปที่อนุมัติแล้ว",
+  "step2.import.clamped": "ปรับเวลาให้อยู่ในช่วงของบรรยาย",
+  "step2.import.import": "นำเข้าคลิป · {count}",
+  "step2.import.noClips": "ไม่พบคลิปที่ใช้ได้ในข้อความนี้",
+  "step2.import.added": "เพิ่มคลิปแล้ว: {count}",
+  "step2.import.failed": "นำเข้าคลิปไม่สำเร็จ",
 
   "settings.language": "ภาษา",
   "settings.language.hint": "ภาษาของหน้าจอ",
@@ -459,6 +501,18 @@ const TH_BY_EN: Record<string, string> = {
   "Save as a preset": "บันทึกเป็นพรีเซ็ต",
   "Save prompt": "บันทึกพรอมป์",
   "Leave empty to use the built-in defaults.": "เว้นว่างไว้เพื่อใช้ค่าที่มีอยู่แล้ว",
+  "Loaded from a saved preset.": "โหลดจากพรีเซ็ตที่บันทึกไว้",
+  "Saved presets": "พรีเซ็ตที่บันทึกไว้",
+  "No saved presets yet — save one above.": "ยังไม่มีพรีเซ็ตที่บันทึกไว้ — บันทึกอันใหม่ด้านบน",
+  Applied: "ใช้อยู่",
+  "Delete preset": "ลบพรีเซ็ต",
+  "Delete this preset?": "ลบพรีเซ็ตนี้หรือไม่",
+  "The saved prompt is removed from the list. This project's current prompt stays as it is.":
+    "พรอมป์ที่บันทึกไว้จะถูกลบออกจากรายการ พรอมป์ปัจจุบันของโปรเจกต์นี้จะไม่เปลี่ยน",
+  "Presets travel with the portable settings backup and can be picked again from this list.":
+    "พรีเซ็ตจะติดไปกับการสำรองการตั้งค่าแบบพกพา และเลือกใช้ซ้ำได้จากรายการนี้",
+  "Picking a preset loads it into the editor above; Save prompt applies it to this project.":
+    "เลือกพรีเซ็ตเพื่อโหลดลงในช่องด้านบน แล้วกดบันทึกพรอมป์เพื่อใช้กับโปรเจกต์นี้",
 
   // GPU pack
   "Could not enable GPU acceleration": "เปิดการเร่งด้วย GPU ไม่ได้",
@@ -616,6 +670,14 @@ const TH_BY_EN: Record<string, string> = {
   "Display language of the app.": "ภาษาที่แสดงของแอป",
   "Interface text is translated where it reads naturally; technical names and shortcuts stay in English.":
     "แปลข้อความที่อ่านเข้าใจง่ายเป็นภาษาไทย ชื่อทางเทคนิคและทางลัดยังคงเป็นภาษาอังกฤษ",
+
+  // Step 2 · Import from chat (reason strings come from the importer)
+  "Import clips from chat": "นำเข้าคลิปจากแชท AI",
+  "missing times": "ไม่มีเวลาเริ่ม/จบ",
+  "empty range": "ช่วงเวลาว่าง (จบก่อนเริ่ม)",
+  "outside the lecture": "อยู่นอกช่วงของบรรยาย",
+  "under 15 seconds": "สั้นกว่า 15 วินาที",
+  "Untitled clip": "ไม่มีชื่อคลิป",
 };
 
 let activeLocale: Locale = useSettingsStore.getState().uiLanguage;

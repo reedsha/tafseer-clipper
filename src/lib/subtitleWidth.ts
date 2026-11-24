@@ -79,6 +79,12 @@ export interface ThaiLineFit {
   fits: boolean;
   /** Largest `maxCharsPerLine` that still fits, clamped to the slider range. */
   suggestedMaxChars: number;
+  /**
+   * Unclamped character count that still fits. When it falls below the
+   * slider's floor, even the minimum cannot fit and the "use suggestion"
+   * button would offer an impossible fix.
+   */
+  room: number;
 }
 
 /** A representative vocalized Qur'anic sample for Arabic width estimation. */
@@ -177,5 +183,5 @@ export function estimateThaiLineFit({
     NUMERIC_LIMITS.maxCharsPerLine.max,
     Math.max(NUMERIC_LIMITS.maxCharsPerLine.min, room),
   );
-  return { columnPx, linePx, fill, fits: fill <= 1, suggestedMaxChars };
+  return { columnPx, linePx, fill, fits: fill <= 1, suggestedMaxChars, room };
 }

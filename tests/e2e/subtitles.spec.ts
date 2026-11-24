@@ -62,7 +62,6 @@ function buildProject(
     basePrompt: "",
     promptPresetId: null,
     sessionGuide: "",
-    discovery: { minDuration: 15, maxDuration: 90, maxClips: 8 },
     clips: [
       {
         id: CLIP_ID,
@@ -220,8 +219,7 @@ test.describe("subtitle line seeding", () => {
       basePrompt: "",
       promptPresetId: null,
       sessionGuide: "",
-      discovery: { minDuration: 15, maxDuration: 90, maxClips: 8 },
-      clips: [
+        clips: [
         {
           id: "arabic-clip",
           title: "Arabic passage",
@@ -324,8 +322,7 @@ test.describe("batched Arabic check", () => {
       basePrompt: "",
       promptPresetId: null,
       sessionGuide: "",
-      discovery: { minDuration: 15, maxDuration: 90, maxClips: 8 },
-      clips: [
+        clips: [
         {
           id: "batch-clip",
           title: "Three Arabic lines",
@@ -455,8 +452,7 @@ test.describe("batched Arabic check", () => {
       basePrompt: "",
       promptPresetId: null,
       sessionGuide: "",
-      discovery: { minDuration: 15, maxDuration: 90, maxClips: 8 },
-      clips: [
+        clips: [
         {
           id: "offline-clip",
           title: "Corpus and prose",

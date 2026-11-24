@@ -382,7 +382,8 @@ class TranscribeResponse(BaseModel):
     device: str
     compute_type: str
     vram_unloaded: bool
-    #: Downsampled peak envelope (0..1, ~1200 points) for the Step-2 waveform.
+    #: Downsampled peak envelope (0..1, adaptive up to 48k points) for the
+    #: Step-2 waveform. Older sidecars return a shorter envelope.
     waveform_peaks: list[float] = Field(default_factory=list)
 
 
@@ -411,9 +412,6 @@ class DiscoverRequest(BaseModel):
         default_factory=list,
         description="Approved clips locked out of the next re-roll.",
     )
-    max_clips: int = Field(default=8, ge=1, le=50)
-    min_duration: float = Field(default=15.0, gt=1.0, le=600.0)
-    max_duration: float = Field(default=90.0, gt=1.0, le=1800.0)
     language: str = Field(default="th", description="Language for titles/rationales.")
     provider: ProviderOverride | None = None
     #: Additive re-roll feedback: approved/excluded clips already in the project.
@@ -425,12 +423,6 @@ class DiscoverRequest(BaseModel):
         default_factory=list,
         description="Trashed clips the next re-roll should avoid (text excerpts).",
     )
-
-    @model_validator(mode="after")
-    def _duration_bounds(self) -> DiscoverRequest:
-        if self.max_duration <= self.min_duration:
-            raise ValueError("'max_duration' must be greater than 'min_duration'.")
-        return self
 
 
 class ClipProposal(BaseModel):
@@ -677,9 +669,10 @@ class TranscriptRecord:
 _TRANSCRIPTS: dict[str, TranscriptRecord] = {}
 _TRANSCRIPT_LIMIT = 8
 
-#: Transcripts are small (a 3 h lecture is a few hundred KB) and they are what
-#: lets a resumed `.tafseer` project re-run Step 2 after a sidecar restart, so
-#: they are persisted under ``work_dir()/transcripts`` and never pruned.
+#: Transcripts are small (a 3 h lecture's adaptive peak envelope is a few
+#: hundred KB) and they are what lets a resumed `.tafseer` project re-run Step 2
+#: after a sidecar restart, so they are persisted under
+#: ``work_dir()/transcripts`` and never pruned.
 _TRANSCRIPT_SCHEMA = 1
 _TRANSCRIPT_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
@@ -2098,9 +2091,6 @@ async def discover_clips(body: DiscoverRequest, request: Request) -> DiscoverRes
             refinement_note=body.refinement_note,
             excluded_ranges=excluded,
             provider=provider,
-            min_duration=body.min_duration,
-            max_duration=body.max_duration,
-            max_clips=body.max_clips,
             language=body.language,
             cancel_event=cancel_event,
             approved_exemplars=approved,

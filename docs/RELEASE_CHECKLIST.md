@@ -62,7 +62,7 @@ supports 8.1+, and WebView2 is installed by the NSIS bootstrapper when missing
 - [ ] Discovery returns clips for a 1–3 h lecture, including proposals from the **first** part of the lecture (not just the tail).
 - [ ] Approve / re-roll: approved intervals are excluded from the next run.
 - [ ] Waveform renders without a multi-second freeze (precomputed peaks; 3 h WAV).
-- [ ] Video player seeks, plays, and `J/K/L` shuttle changes the playback rate (rate readout visible); `←/→` nudge 0.2 s.
+- [ ] Video player seeks, plays, and `J/K/L` shuttle changes the playback rate (rate readout visible); plain `←/→` move the playhead 1 s while `Shift`/`Alt` trim the in/out edges by the configured key step (0.2 s default).
 - [ ] Cut buffer (+0.3 s) is applied to approved clips.
 
 ## 4. Step 3 — Subtitles

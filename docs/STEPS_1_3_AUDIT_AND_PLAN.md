@@ -454,7 +454,7 @@ they are available.
 
 ```
 pnpm lint            # type-check + backend byte-compile            green
-pnpm test:backend    # Phase 1 E2E: 130/130 (110/110 before)        green
+pnpm test:backend    # Phase 1 E2E: 132/132 (110/110 before)        green
 pnpm test:rust       # cargo test --locked: 11/11                   green
 pnpm test:e2e        # Playwright against the built SPA + sidecar: 43/43 (41 before)
 pnpm build           # production bundle                            green

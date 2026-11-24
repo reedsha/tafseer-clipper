@@ -120,10 +120,7 @@ export default function App() {
     <TooltipProvider delayDuration={250}>
       <div
         data-locale={uiLanguage}
-        className={cn(
-          "flex h-dvh flex-col overflow-hidden bg-background text-foreground",
-          isDesktopRuntime() && "desktop-shell",
-        )}
+        className="flex h-dvh flex-col overflow-hidden bg-background text-foreground"
       >
         <TitleBar />
         <div className="flex min-h-0 flex-1">

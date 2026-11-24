@@ -475,8 +475,8 @@ return {
 
 #### Redesign & Engineering Specification
 1. **Sub-Window Waveform Rendering:**
-   - Restrict the rendered waveform window to $[clipStart - 5\text{s}, clipEnd + 5\text{s}]$ (or the clip range).
-   - Slice the precomputed peaks array so wavesurfer renders only the active time window.
+   - Render exactly the selected clip: $[clipStart, clipEnd]$, with no margin, shaded region, or full-lecture fallback.
+   - Slice the precomputed peaks array to the clip and load it peaks-only (no media URL), so wavesurfer's duration and cursor match the clip rather than the lecture.
    - Canvas width remains locked to container width ($\le 1200\text{ px}$), keeping memory consumption under 1 MB.
 
 ---
@@ -766,7 +766,7 @@ graph TD
 #### `[A-18]` WAV-01 — Sub-Window Audio Peak Waveform Rendering
 - **Target File:** `src/components/WaveformBar.tsx`
 - **Implementation:**
-  - Slice audio peaks to $[clipStart - 5\text{s}, clipEnd + 5\text{s}]$ before rendering, eliminating canvas memory spikes.
+  - Slice audio peaks to the exact selected clip $[clipStart, clipEnd]$ before rendering, eliminating canvas memory spikes while keeping the waveform aligned with the trim edges.
 - **Verification Command:**
   `pnpm typecheck`
 
@@ -826,7 +826,7 @@ graph TD
 
 | Gate ID | Target Component | Command | Acceptance Standard |
 | :--- | :--- | :--- | :--- |
-| **GATE-01** | Python Backend Core | `py -3.12 backend/test_phase1_e2e.py` | 130/130 checks pass without warnings |
+| **GATE-01** | Python Backend Core | `py -3.12 backend/test_phase1_e2e.py` | 132/132 checks pass without warnings |
 | **GATE-02** | Rust Desktop Shell | `cargo test --manifest-path src-tauri/Cargo.toml --locked` | 11/11 unit tests pass |
 | **GATE-03** | TypeScript Frontend | `pnpm typecheck` | 0 type errors across all files |
 | **GATE-04** | Subtitle Math | Automated unit tests for `wrapArabicText` and `buildLetters` | Vocalized Bismillah wraps on 1 line; diacritics share base duration |

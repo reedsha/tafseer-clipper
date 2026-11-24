@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -190,6 +191,8 @@ def pick_font(names: list[str]) -> Path | None:
 class MockLLMHandler(BaseHTTPRequestHandler):
     calls: list[dict] = []
     lock = threading.Lock()
+    #: Default keeps every candidate; tests override to drive the editorial pass.
+    selection_mode: str = "all"
 
     def log_message(self, *_args):  # silence request logging
         return
@@ -229,6 +232,24 @@ class MockLLMHandler(BaseHTTPRequestHandler):
                 "correction_applied": True,
                 "notes": "เพิ่มฮารอกัตให้ตรงกับอัลกุรอาน",
             }
+        elif "CANDIDATES (" in prompt:
+            # Editorial pass: keep the requested subset of candidate numbers.
+            marker = prompt.split("CANDIDATES (", 1)[1]
+            digits = ""
+            for char in marker:
+                if char.isdigit():
+                    digits += char
+                else:
+                    break
+            count = int(digits) if digits else 0
+            if MockLLMHandler.selection_mode == "bad":
+                content = {"keep": [999]}
+            elif MockLLMHandler.selection_mode == "empty":
+                content = {"keep": []}
+            elif MockLLMHandler.selection_mode == "first":
+                content = {"keep": [1] if count else []}
+            else:
+                content = {"keep": list(range(1, count + 1))}
         else:
             content = {
                 "clips": [
@@ -239,19 +260,19 @@ class MockLLMHandler(BaseHTTPRequestHandler):
                         "rationale": "ต้องถูกตัดออกเพราะทับซ้อน",
                     },
                     {
-                        "start": 5.0,
-                        "end": 9.0,
+                        "start": 4.0,
+                        "end": 24.0,
                         "title": "คลิปที่ผ่านการคัดเลือก",
                         "rationale": "ช่วงต้นของซูเราะฮ์",
                     },
                     {
-                        "start": 7.0,
-                        "end": 11.0,
+                        "start": 5.0,
+                        "end": 30.5,
                         "title": "คลิปที่ทับคลิปก่อนหน้า",
-                        "rationale": "ต้องถูกตัดออกเพราะทับซ้อน",
+                        "rationale": "ยังเก็บไว้ให้บรรณาธิการเลือก",
                     },
                     {
-                        "start": 9.0,
+                        "start": 55.0,
                         "end": 999.0,
                         "title": "คลิปที่เลยความยาววิดีโอ",
                         "rationale": "ต้องถูกตัดออก",
@@ -1398,6 +1419,29 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         and audio_stream.get("channels") == 1,
         f"{audio_stream.get('sample_rate')}Hz ch={audio_stream.get('channels')}",
     )
+    # The envelope scales with lecture length so a 30 s clip on a 3 h lecture
+    # still fills a desktop-width bar with hundreds of points.
+    check(
+        "transcriber: waveform envelope resolution adapts to lecture length",
+        transcriber.waveform_peak_target(3 * 3600) == 43_200
+        and transcriber.waveform_peak_target(60) == transcriber.WAVEFORM_PEAK_MIN
+        and transcriber.waveform_peak_target(20 * 3600) == transcriber.WAVEFORM_PEAK_MAX,
+        f"3h={transcriber.waveform_peak_target(3 * 3600)} "
+        f"1m={transcriber.waveform_peak_target(60)} "
+        f"20h={transcriber.waveform_peak_target(20 * 3600)}",
+    )
+    with wave.open(str(extracted), "rb") as handle:
+        extracted_seconds = handle.getnframes() / max(1, handle.getframerate())
+    adaptive_peaks = transcriber.compute_waveform_peaks(extracted)
+    adaptive_target = transcriber.waveform_peak_target(extracted_seconds)
+    check(
+        "transcriber: compute_waveform_peaks fills the adaptive envelope",
+        bool(adaptive_peaks)
+        and len(adaptive_peaks) <= adaptive_target
+        and len(adaptive_peaks) >= adaptive_target * 0.8
+        and all(0.0 <= peak <= 1.0 for peak in adaptive_peaks),
+        f"points={len(adaptive_peaks)} target={adaptive_target} duration={extracted_seconds:.2f}s",
+    )
     glossary = {"อัลเลาะห์": "อัลลอฮฺ", "ซอฮาบะห์": "เศาะฮาบะฮฺ"}
     check(
         "transcriber.apply_glossary: longest-match Thai-Arabic replacement",
@@ -1701,47 +1745,105 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
     )
     clips = asyncio.run(
         analyzer.discover_clips(
-            segments=[{"start": 0.0, "end": 10.0, "text": "เนื้อหาบทเรียนตัฟซีร"}],
-            duration=10.0,
+            segments=[{"start": 0.0, "end": 60.0, "text": "เนื้อหาบทเรียนตัฟซีร"}],
+            duration=60.0,
             base_prompt="",
             session_guide="เน้นช่วงต้น",
             refinement_note="",
             excluded_ranges=[{"start": 2.0, "end": 4.0}],
             provider=provider,
-            min_duration=3.0,
-            max_duration=90.0,
-            max_clips=8,
         )
     )
     check(
-        "analyzer.discover_clips: exclusions and out-of-range filtered, overlaps kept",
+        "analyzer.discover_clips: exclusions and unsafe windows filtered, overlaps kept",
         len(clips) == 2
-        and clips[0]["start"] == 5.0
-        and clips[0]["end"] == 9.0
-        and clips[1]["start"] == 7.0
-        and clips[1]["end"] == 10.0,
+        and clips[0]["start"] == 4.0
+        and clips[0]["end"] == 24.0
+        and clips[1]["start"] == 5.0
+        and clips[1]["end"] == 30.5,
         json.dumps(clips, ensure_ascii=False)[:160],
     )
-    last_prompt = json.dumps(MockLLMHandler.calls[-1], ensure_ascii=False)
+    discovery_prompt = json.dumps(MockLLMHandler.calls[-2], ensure_ascii=False)
+    selection_prompt = json.dumps(MockLLMHandler.calls[-1], ensure_ascii=False)
     check(
-        "analyzer: prompt carries session guide + excluded ranges",
-        "SESSION TOPIC GUIDE" in last_prompt and "2.0s .. 4.0s" in last_prompt,
+        "analyzer: discovery prompt carries the session guide + excluded ranges",
+        "SESSION TOPIC GUIDE" in discovery_prompt
+        and "2.0s .. 4.0s" in discovery_prompt,
+        discovery_prompt[:160],
+    )
+    check(
+        "analyzer: prompts carry no fixed clip count or duration bounds",
+        "at most" not in discovery_prompt
+        and "between" not in discovery_prompt
+        and "CONSTRAINTS" not in discovery_prompt
+        and "no target count" in selection_prompt
+        and "CANDIDATES (2)" in selection_prompt,
+        f"discovery={discovery_prompt[:120]} selection={selection_prompt[:120]}",
+    )
+
+    # The editorial pass is the model's decision: preserving its keep order is
+    # what decides the final count.
+    MockLLMHandler.selection_mode = "first"
+    try:
+        selected = asyncio.run(
+            analyzer.discover_clips(
+                segments=[{"start": 0.0, "end": 60.0, "text": "เนื้อหาบทเรียนตัฟซีร"}],
+                duration=60.0,
+                base_prompt="",
+                session_guide="",
+                refinement_note="",
+                excluded_ranges=[],
+                provider=provider,
+            )
+        )
+    finally:
+        MockLLMHandler.selection_mode = "all"
+    check(
+        "analyzer: the editorial keep list decides the final clip count",
+        len(selected) == 1 and selected[0]["start"] == 4.0,
+        json.dumps(selected, ensure_ascii=False)[:160],
+    )
+
+    # A broken editorial reply must degrade to keeping every candidate.
+    malformed_keep_results: list[dict] = []
+    for mode in ("bad", "empty"):
+        MockLLMHandler.selection_mode = mode
+        try:
+            malformed_keep_results.append(
+                asyncio.run(
+                    analyzer.discover_clips(
+                        segments=[
+                            {"start": 0.0, "end": 60.0, "text": "เนื้อหาบทเรียนตัฟซีร"}
+                        ],
+                        duration=60.0,
+                        base_prompt="",
+                        session_guide="",
+                        refinement_note="",
+                        excluded_ranges=[],
+                        provider=provider,
+                    )
+                )[0]
+            )
+        finally:
+            MockLLMHandler.selection_mode = "all"
+    check(
+        "analyzer: an unusable editorial reply degrades to the candidate pool",
+        len(malformed_keep_results) == 2
+        and all(clip["start"] == 4.0 for clip in malformed_keep_results),
+        json.dumps(malformed_keep_results, ensure_ascii=False)[:160],
     )
 
     # ---- Phase A.4: exemplars reach the standard discovery prompt ---------- #
     exemplar_calls_before = len(MockLLMHandler.calls)
     asyncio.run(
         analyzer.discover_clips(
-            segments=[{"start": 0.0, "end": 10.0, "text": "เนื้อหาบทเรียนตัฟซีร"}],
-            duration=10.0,
+            segments=[{"start": 0.0, "end": 60.0, "text": "เนื้อหาบทเรียนตัฟซีร"}],
+            duration=60.0,
             base_prompt="",
             session_guide="",
             refinement_note="",
             excluded_ranges=[],
             provider=provider,
-            min_duration=3.0,
-            max_duration=90.0,
-            max_clips=4,
             approved_exemplars=[
                 {"start": 0.0, "end": 8.0, "title": "คลิปที่อนุมัติ", "text": "ก" * 900}
             ],
@@ -1750,7 +1852,7 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
             ],
         )
     )
-    exemplar_prompt = json.dumps(MockLLMHandler.calls[-1], ensure_ascii=False)
+    exemplar_prompt = json.dumps(MockLLMHandler.calls[-2], ensure_ascii=False)
     many_exemplars = [
         {"title": f"คลิป {index}", "text": "ข้อความตัวอย่าง"} for index in range(30)
     ]
@@ -1760,7 +1862,7 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
     ]
     check(
         "analyzer: re-roll exemplars reach the standard discovery prompt (bounded)",
-        len(MockLLMHandler.calls) == exemplar_calls_before + 1
+        len(MockLLMHandler.calls) == exemplar_calls_before + 2
         and "PREVIOUSLY APPROVED CLIPS" in exemplar_prompt
         and "PREVIOUSLY PASSED CLIPS" in exemplar_prompt
         and "คลิปที่อนุมัติ" in exemplar_prompt
@@ -2079,9 +2181,6 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
                 refinement_note="",
                 excluded_ranges=[],
                 provider=provider,
-                min_duration=3.0,
-                max_duration=90.0,
-                max_clips=4,
                 cancel_event=cancel_before,
             )
         )
@@ -2871,13 +2970,12 @@ def run_decision_checks(work: Path, source: Path) -> None:
             else:
                 os.environ[name] = value
 
-    # ---- B. sanitize_clips rules table (one case per row) ------------------ #
+    # ---- B. sanitize_clips safety-guard rules table ------------------------ #
     def sanitize(raw, **overrides):
         options = dict(
             duration=100.0,
             excluded_ranges=[],
             min_duration=10.0,
-            max_duration=20.0,
             max_clips=8,
         )
         options.update(overrides)
@@ -2904,7 +3002,6 @@ def run_decision_checks(work: Path, source: Path) -> None:
     r3 = sanitize(
         [{"start": 8.0, "end": 130.0}],
         duration=100.0,
-        max_duration=120.0,
     )
     check(
         "sanitize R3: a duration overrun is clamped into [0, duration]",
@@ -2913,29 +3010,28 @@ def run_decision_checks(work: Path, source: Path) -> None:
     )
     r4 = sanitize([{"start": 0.0, "end": 0.5}])
     check("sanitize R4: an empty (<1s) window is dropped", r4 == [], str(r4))
-    r5_short = sanitize([{"start": 0.0, "end": 4.9}], min_duration=10.0)
-    r5_edge = sanitize([{"start": 0.0, "end": 5.0}], min_duration=10.0)
+    r5_short = sanitize([{"start": 0.0, "end": 9.9}], min_duration=10.0)
+    r5_edge = sanitize([{"start": 0.0, "end": 10.0}], min_duration=10.0)
     check(
-        "sanitize R5: below min_duration*0.5 is dropped, the exact edge is kept",
+        "sanitize R5: a window shorter than the safety floor is dropped",
         r5_short == [] and len(r5_edge) == 1,
         f"short={r5_short} edge={r5_edge}",
     )
-    r6_long = sanitize([{"start": 0.0, "end": 31.0}], max_duration=20.0)
-    r6_edge = sanitize([{"start": 0.0, "end": 30.0}], max_duration=20.0)
+    r6_long = sanitize([{"start": 0.0, "end": 500.0}], duration=600.0)
     check(
-        "sanitize R6: above max_duration*1.5 is dropped, the exact edge is kept",
-        r6_long == [] and len(r6_edge) == 1,
-        f"long={r6_long} edge={r6_edge}",
+        "sanitize R6: there is no maximum length: a long window is kept",
+        len(r6_long) == 1 and r6_long[0]["end"] == 500.0,
+        f"long={r6_long}",
     )
     r7 = sanitize(
-        [{"start": 1.0, "end": 3.0}],
+        [{"start": 1.0, "end": 11.0}],
         excluded_ranges=[{"start": 2.0, "end": 4.0}],
     )
     check("sanitize R7: an excluded-range overlap is dropped", r7 == [], str(r7))
     r8_overlap = sanitize(
         [
-            {"start": 0.0, "end": 10.0, "score": 0.2, "title": "early"},
-            {"start": 5.0, "end": 15.0, "score": 0.9, "title": "better"},
+            {"start": 0.0, "end": 10.0, "title": "early"},
+            {"start": 5.0, "end": 15.0, "title": "better"},
         ]
     )
     check(
@@ -2945,26 +3041,28 @@ def run_decision_checks(work: Path, source: Path) -> None:
     )
     r8_cap = sanitize(
         [
-            {"start": 0.0, "end": 10.0, "score": 0.2, "title": "early"},
-            {"start": 5.0, "end": 15.0, "score": 0.9, "title": "better"},
+            {"start": 30.0, "end": 40.0, "title": "editor-first"},
+            {"start": 0.0, "end": 10.0, "title": "next"},
         ],
         max_clips=1,
+        preserve_order=True,
     )
     check(
-        "sanitize R8: the cap keeps the higher-scored proposal",
-        len(r8_cap) == 1 and r8_cap[0]["title"] == "better",
+        "sanitize R8: preserve_order keeps the editorial ranking above the ceiling",
+        len(r8_cap) == 1 and r8_cap[0]["title"] == "editor-first",
         json.dumps(r8_cap, ensure_ascii=False)[:140],
     )
     r9 = sanitize(
         [
-            {"start": 40.0, "end": 50.0},
             {"start": 0.0, "end": 10.0},
+            {"start": 10.0, "end": 20.0},
             {"start": 20.0, "end": 30.0},
+            {"start": 30.0, "end": 40.0},
         ],
         max_clips=2,
     )
     check(
-        "sanitize R9: result is start-ordered and capped at max_clips",
+        "sanitize R9: start-ordered, and an over-full pool is thinned evenly",
         [clip["start"] for clip in r9] == [0.0, 20.0],
         json.dumps(r9, ensure_ascii=False)[:140],
     )
@@ -2974,6 +3072,92 @@ def run_decision_checks(work: Path, source: Path) -> None:
             set(clip) == {"start", "end", "title", "rationale"}
             for clip in r8_overlap + r9
         ),
+    )
+    safety = sanitize(
+        [
+            {"start": 0.0, "end": 14.9},
+            {"start": 0.0, "end": 15.0},
+            {"start": 0.0, "end": 900.0},
+        ],
+        duration=1000.0,
+        min_duration=analyzer.SAFETY_MIN_CLIP_SECONDS,
+    )
+    check(
+        "sanitize: default safety guards keep >=15s windows and impose no maximum",
+        [clip["end"] for clip in safety] == [15.0, 900.0],
+        json.dumps(safety, ensure_ascii=False)[:160],
+    )
+    ceiling_pairs = [
+        (300, 6),
+        (600, 6),
+        (1800, 15),
+        (3600, 30),
+        (7200, 60),
+        (10800, 90),
+        (14400, 120),
+        (18000, 120),
+    ]
+    actual_pairs = [(secs, analyzer.flood_ceiling(secs)) for secs, _ in ceiling_pairs]
+    check(
+        "analyzer: flood_ceiling scales with lecture length (6..120)",
+        actual_pairs == ceiling_pairs,
+        str(actual_pairs),
+    )
+    check(
+        "analyzer: flood_ceiling floors unusable durations at 6",
+        analyzer.flood_ceiling(0.0) == 6
+        and analyzer.flood_ceiling(-5.0) == 6
+        and analyzer.flood_ceiling(float("nan")) == 6,
+        f"0->{analyzer.flood_ceiling(0.0)} "
+        f"nan->{analyzer.flood_ceiling(float('nan'))}",
+    )
+
+    # ---- E. renderer parity: clipGuards.ts + aiChatBrief.ts --------------- #
+    # The chat-brief importer and the exported brief live in the renderer; the
+    # guards and prompt rules must not drift from the sidecar's copies.
+    repo = BACKEND.parent
+    guards_source = (repo / "src" / "lib" / "clipGuards.ts").read_text(
+        encoding="utf-8"
+    )
+    floor_match = re.search(
+        r"SAFETY_MIN_CLIP_SECONDS\s*=\s*([0-9.]+)", guards_source
+    )
+    check(
+        "renderer parity: clipGuards.ts safety floor matches the sidecar",
+        floor_match is not None
+        and float(floor_match.group(1)) == analyzer.SAFETY_MIN_CLIP_SECONDS,
+        f"ts={floor_match.group(1) if floor_match else 'missing'} "
+        f"py={analyzer.SAFETY_MIN_CLIP_SECONDS}",
+    )
+    samples_block = guards_source.split("FLOOD_CEILING_SAMPLES", 1)[-1]
+    samples = [
+        (int(seconds), int(count))
+        for seconds, count in re.findall(r"\[(\d+),\s*(\d+)\]", samples_block)
+    ]
+    sample_results = [
+        (seconds, analyzer.flood_ceiling(seconds)) for seconds, _ in samples
+    ]
+    check(
+        "renderer parity: clipGuards.ts FLOOD_CEILING_SAMPLES matches flood_ceiling",
+        bool(samples) and sample_results == samples,
+        f"pairs={samples} actual={sample_results}",
+    )
+    brief_source = (repo / "src" / "lib" / "aiChatBrief.ts").read_text(
+        encoding="utf-8"
+    )
+    check(
+        "renderer parity: aiChatBrief.ts carries the sidecar prompt rules verbatim",
+        analyzer.DEFAULT_BASE_PROMPT in brief_source
+        and analyzer.CLIP_SYSTEM_RULES.rstrip("\n") in brief_source
+        and analyzer.CLIP_SELECTION_RULES.rstrip("\n") in brief_source,
+        "DEFAULT_BASE_PROMPT/CLIP_SYSTEM_RULES/CLIP_SELECTION_RULES",
+    )
+    banned = ["CONSTRAINTS", "at most", "duration bounds", "600", "40"]
+    present = [term for term in banned if term in brief_source]
+    check(
+        "renderer parity: aiChatBrief.ts states no duration/count targets",
+        present == [],
+        f"banned terms present: {present}",
     )
 
     # ---- C/D. corpus gate + batched triage -------------------------------- #

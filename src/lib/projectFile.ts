@@ -7,9 +7,7 @@
  */
 
 import {
-  DEFAULT_DISCOVERY_SETTINGS,
   DEFAULT_EXPORT_SETTINGS,
-  type DiscoverySettings,
   type ProjectClip,
   type ProjectData,
   type RecentProject,
@@ -64,28 +62,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function num(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
-function normalizeDiscovery(value: unknown): DiscoverySettings {
-  const raw = isRecord(value) ? value : {};
-  const minDuration = clamp(
-    num(raw.minDuration, DEFAULT_DISCOVERY_SETTINGS.minDuration),
-    5,
-    600,
-  );
-  const maxDuration = clamp(
-    num(raw.maxDuration, DEFAULT_DISCOVERY_SETTINGS.maxDuration),
-    minDuration + 1,
-    1800,
-  );
-  const maxClips = Math.round(
-    clamp(num(raw.maxClips, DEFAULT_DISCOVERY_SETTINGS.maxClips), 1, 50),
-  );
-  return { minDuration, maxDuration, maxClips };
 }
 
 function str(value: unknown, fallback = ""): string {
@@ -223,7 +199,6 @@ function normalizeProject(raw: unknown): ProjectData {
     basePrompt: str(project.basePrompt),
     promptPresetId: strOrNull(project.promptPresetId),
     sessionGuide: str(project.sessionGuide),
-    discovery: normalizeDiscovery(project.discovery),
     clips: normalizeClips(project.clips),
     // Additive field: absent in every project saved before it existed.
     trashedClips: normalizeClips(project.trashedClips).slice(-20),
@@ -318,8 +293,12 @@ const PROJECT_PICKER_TYPES: FilePickerAcceptType[] = [
   },
 ];
 
-function downloadText(text: string, fileName: string): void {
-  const blob = new Blob([text], { type: "application/json" });
+function downloadText(
+  text: string,
+  fileName: string,
+  mimeType = "application/json",
+): void {
+  const blob = new Blob([text], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -331,19 +310,33 @@ function downloadText(text: string, fileName: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 5_000);
 }
 
-/**
- * Save the project to disk. Returns `"saved"` or `"cancelled"` (picker dismissed).
- */
-export async function saveProjectFile(project: ProjectData): Promise<"saved" | "cancelled"> {
-  const text = serializeProject(project);
-  const fileName = suggestProjectFileName(project);
+export interface SaveTextOptions {
+  /** Browser file-picker description for the type. */
+  description: string;
+  /** Desktop save-dialog filter label, e.g. `Tafseer Project (*.tafseer)`. */
+  filterName: string;
+  /** Extension without the dot, e.g. `tafseer`. */
+  extension: string;
+  /** MIME type used by the anchor-download fallback. */
+  mimeType: string;
+}
 
+/**
+ * Save a text file through the same chain as projects: desktop save dialog →
+ * File System Access picker → anchor download. Returns `"saved"` or
+ * `"cancelled"` (picker dismissed).
+ */
+export async function saveTextFile(
+  text: string,
+  fileName: string,
+  options: SaveTextOptions,
+): Promise<"saved" | "cancelled"> {
   if (isDesktopRuntime()) {
     const { save } = await import("@tauri-apps/plugin-dialog");
     const { writeTextFile } = await import("@tauri-apps/plugin-fs");
     const selected = await save({
       defaultPath: fileName,
-      filters: [{ name: "Tafseer Project (*.tafseer)", extensions: ["tafseer"] }],
+      filters: [{ name: options.filterName, extensions: [options.extension] }],
     });
     if (!selected) return "cancelled";
     await writeTextFile(selected, text);
@@ -356,7 +349,12 @@ export async function saveProjectFile(project: ProjectData): Promise<"saved" | "
     try {
       const handle = await picker.call(window, {
         suggestedName: fileName,
-        types: PROJECT_PICKER_TYPES,
+        types: [
+          {
+            description: options.description,
+            accept: { [options.mimeType]: [`.${options.extension}`] },
+          },
+        ],
       });
       const writable = await handle.createWritable();
       await writable.write(text);
@@ -368,8 +366,20 @@ export async function saveProjectFile(project: ProjectData): Promise<"saved" | "
     }
   }
 
-  downloadText(text, fileName);
+  downloadText(text, fileName, options.mimeType);
   return "saved";
+}
+
+/**
+ * Save the project to disk. Returns `"saved"` or `"cancelled"` (picker dismissed).
+ */
+export async function saveProjectFile(project: ProjectData): Promise<"saved" | "cancelled"> {
+  return saveTextFile(serializeProject(project), suggestProjectFileName(project), {
+    description: "Tafseer Clipper project",
+    filterName: "Tafseer Project (*.tafseer)",
+    extension: "tafseer",
+    mimeType: "application/json",
+  });
 }
 
 function pickFileWithInput(): Promise<File | null> {

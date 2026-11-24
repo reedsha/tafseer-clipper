@@ -160,9 +160,6 @@ export interface PromptPreset {
   name: string;
   description: string;
   prompt: string;
-  minDuration: number;
-  maxDuration: number;
-  maxClips: number;
 }
 
 export interface StorageSettings {
@@ -527,16 +524,11 @@ function coercePromptPresets(value: unknown, fallback: PromptPreset[]): PromptPr
     const prompt = asString(item.prompt, "");
     if (!id || !name || !prompt.trim()) continue;
     if (LEGACY_BUILTIN_PROMPT_PRESET_IDS.has(id)) continue;
-    const minDuration = Math.max(5, asNumber(item.minDuration, 15));
-    const maxDuration = Math.max(minDuration + 1, asNumber(item.maxDuration, 90));
     presets.push({
       id,
       name,
       description: asString(item.description, ""),
       prompt,
-      minDuration,
-      maxDuration,
-      maxClips: Math.round(Math.min(50, Math.max(1, asNumber(item.maxClips, 8)))),
     });
   }
   // Deleting every prompt preset must stick across restarts.

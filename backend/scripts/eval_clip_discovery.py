@@ -80,9 +80,6 @@ class Lecture:
     segments: list[dict[str, Any]]
     base_prompt: str
     session_guide: str
-    min_duration: float
-    max_duration: float
-    max_clips: int
     language: str
 
 
@@ -95,7 +92,6 @@ def load_lecture(path: Path) -> Lecture | None:
     duration = project.get("duration")
     if not segments or not isinstance(duration, (int, float)) or duration <= 0:
         return None
-    discovery = project.get("discovery") or {}
     return Lecture(
         id=str(project.get("id") or path.stem),
         name=str(project.get("name") or path.stem),
@@ -103,9 +99,6 @@ def load_lecture(path: Path) -> Lecture | None:
         segments=segments,
         base_prompt=str(project.get("basePrompt") or ""),
         session_guide=str(project.get("sessionGuide") or ""),
-        min_duration=float(discovery.get("minDuration") or 15.0),
-        max_duration=float(discovery.get("maxDuration") or 90.0),
-        max_clips=int(discovery.get("maxClips") or 8),
         language=str(transcript.get("language") or "th"),
     )
 
@@ -201,9 +194,6 @@ async def _run_lecture(
             refinement_note="",
             excluded_ranges=[],
             provider=writing,
-            min_duration=lecture.min_duration,
-            max_duration=lecture.max_duration,
-            max_clips=lecture.max_clips,
             language=lecture.language,
         )
         return {
@@ -259,9 +249,9 @@ async def _run(args: argparse.Namespace) -> int:
                 "name": lecture.name,
                 "duration": lecture.duration,
                 "settings": {
-                    "min_duration": lecture.min_duration,
-                    "max_duration": lecture.max_duration,
-                    "max_clips": lecture.max_clips,
+                    "mode": "model-decided",
+                    "safety_min_seconds": analyzer.SAFETY_MIN_CLIP_SECONDS,
+                    "flood_ceiling": analyzer.flood_ceiling(lecture["duration"]),
                 },
                 "run": run,
             }
@@ -343,8 +333,7 @@ def _build_sheet(args: argparse.Namespace) -> int:
             segments,
             duration=lecture["duration"],
             excluded_ranges=[],
-            min_duration=lecture["settings"]["min_duration"],
-            max_duration=lecture["settings"]["max_duration"],
+            min_duration=analyzer.SAFETY_MIN_CLIP_SECONDS,
         )
         controls = [
             candidate

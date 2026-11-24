@@ -35,7 +35,6 @@ const NO_CLIPS_PROJECT = {
   basePrompt: "",
   promptPresetId: null,
   sessionGuide: "",
-  discovery: { minDuration: 15, maxDuration: 90, maxClips: 8 },
   clips: [],
   selectedClipId: null,
   subtitles: {},
@@ -122,8 +121,8 @@ test.describe("Step 2 search orchestration", () => {
     await expect(page.getByRole("heading", { name: "Find clips" })).toBeVisible();
     await expect(page.getByText("No clips proposed yet")).toBeVisible();
 
-    // The search panel now exposes only the per-search note. Duration bounds
-    // and the target count live on the project, not in the UI.
+    // The search panel now exposes only the per-search note. Clip count and
+    // length are decided by the model, not by project settings.
     await expect(page.getByLabel("Topic focus for this lecture")).toHaveCount(0);
     await expect(page.getByLabel("To find")).toHaveCount(0);
     await expect(page.getByLabel("Shortest (s)")).toHaveCount(0);
@@ -138,11 +137,11 @@ test.describe("Step 2 search orchestration", () => {
     await expect.poll(() => discoveryCalls).toBe(1);
     expect(discoveryBodies[0]).toMatchObject({
       refinement_note: "Focus on patience and gratitude",
-      max_clips: 8,
-      min_duration: 15,
-      max_duration: 90,
     });
     expect(discoveryBodies[0]).not.toHaveProperty("session_guide");
+    expect(discoveryBodies[0]).not.toHaveProperty("max_clips");
+    expect(discoveryBodies[0]).not.toHaveProperty("min_duration");
+    expect(discoveryBodies[0]).not.toHaveProperty("max_duration");
     // An empty result reads as "nothing more found" and keeps the deck as is.
     await expect(page.getByText("No new clips found")).toBeVisible();
   });

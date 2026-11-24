@@ -16,6 +16,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  ClipboardPaste,
   Clock3,
   FileAudio,
   FileVideo2,
@@ -42,7 +43,9 @@ import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { discoverClips, type ClipExemplar, type ClipProposal } from "@/lib/api";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { ImportClipsDialog } from "@/components/ImportClipsDialog";
+import { discoverClips, type ClipExemplar } from "@/lib/api";
 import { aiRouteFor } from "@/lib/aiActivity";
 import {
   applyCutBuffer,
@@ -51,6 +54,7 @@ import {
 } from "@/lib/clipMath";
 import { toMediaSrc } from "@/lib/media";
 import { clamp, formatClock } from "@/lib/format";
+import { proposalToClip } from "@/lib/importClips";
 import type { ProjectClip, ProjectData } from "@/lib/projectTypes";
 import { buildProviderFor, describeProviderGap } from "@/lib/providers";
 import { coerceToRange, NUMERIC_LIMITS } from "@/lib/settingsLimits";
@@ -65,6 +69,9 @@ type CutEdge = "start" | "end";
 
 /** Playback-rate ladder for the J/K/L shuttle (1× = normal speed). */
 const SHUTTLE_RATES = [0.25, 0.5, 1, 1.5, 2, 3, 4] as const;
+
+/** Plain ←/→ seek step in Step 2. Edge trims keep the finer configured step. */
+const PLAYHEAD_STEP_SECONDS = 1;
 
 /**
  * Smallest speech window an edge nudge may leave behind. The real render floor
@@ -112,29 +119,6 @@ function approvedExemplarsFor(project: ProjectData): ClipExemplar[] {
 
 function rejectedExemplarsFor(project: ProjectData): ClipExemplar[] {
   return (project.trashedClips ?? []).map((clip) => exemplar(clip, project));
-}
-
-function proposalToClip(
-  proposal: ClipProposal,
-  index: number,
-  duration: number | null,
-  buffer: number,
-  autoPad: boolean,
-): ProjectClip | null {
-  const speech = normalizeSpeechRange(proposal.start, proposal.end, duration);
-  if (!speech) return null;
-  const cut = applyCutBuffer(speech.start, speech.end, { duration, buffer, autoPad });
-  return {
-    id: crypto.randomUUID(),
-    title: proposal.title.trim() || `Clip ${index + 1}`,
-    rationale: proposal.rationale.trim(),
-    start: cut.start,
-    end: cut.end,
-    speechStart: speech.start,
-    speechEnd: speech.end,
-    approved: false,
-    createdAt: Date.now(),
-  };
 }
 
 /** Titles of the other clips whose exported range overlaps this one. */
@@ -296,6 +280,7 @@ export function Step2Discovery() {
         : "idle";
   const error = discoveryJob?.status === "error" ? discoveryJob.error : null;
   const [refinement, setRefinement] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
   const [bufferDraft, setBufferDraft] = useState(editor.cutBufferSeconds);
   const [buttonStepDraft, setButtonStepDraft] = useState(String(editor.edgeButtonStepSeconds));
   const [keyStepDraft, setKeyStepDraft] = useState(String(editor.edgeKeyStepSeconds));
@@ -303,7 +288,17 @@ export function Step2Discovery() {
   const [shuttleRate, setShuttleRate] = useState(1);
 
   const videoRef = useRef<VideoPlayerHandle>(null);
+  const playheadRef = useRef(0);
   const lastProjectIdRef = useRef<string | null>(project?.id ?? null);
+
+  useEffect(() => {
+    playheadRef.current = playhead;
+  }, [playhead]);
+
+  const handleTimeUpdate = useCallback((seconds: number) => {
+    playheadRef.current = seconds;
+    setPlayhead(seconds);
+  }, []);
 
   const clips = project?.clips ?? [];
   const approvedClips = useMemo(() => clips.filter((clip) => clip.approved), [clips]);
@@ -311,7 +306,6 @@ export function Step2Discovery() {
   const selected = clips.find((clip) => clip.id === project?.selectedClipId) ?? clips[0] ?? null;
   const selectedIndex = selected ? clips.findIndex((clip) => clip.id === selected.id) : -1;
   const duration = project?.duration ?? 0;
-  const audioSrc = useMemo(() => toMediaSrc(project?.audioPath), [project?.audioPath]);
   const videoSrc = useMemo(() => toMediaSrc(project?.sourcePath), [project?.sourcePath]);
 
   // Switching projects resets the *view* only: refinement text and playhead
@@ -323,6 +317,7 @@ export function Step2Discovery() {
     lastProjectIdRef.current = nextId;
     setRefinement("");
     setPlayhead(0);
+    playheadRef.current = 0;
   }, [project?.id]);
 
   useEffect(() => {
@@ -349,6 +344,7 @@ export function Step2Discovery() {
   useEffect(() => {
     if (!selected) return;
     setPlayhead(selected.start);
+    playheadRef.current = selected.start;
     videoRef.current?.seekTo(selected.start);
     // A new clip starts at normal speed; the shuttle re-applies on demand.
     videoRef.current?.setPlaybackRate(1);
@@ -431,9 +427,6 @@ export function Step2Discovery() {
               base_prompt: current.basePrompt,
               refinement_note: note.trim(),
               excluded_ranges: replaceAll ? [] : approvedRanges,
-              max_clips: current.discovery.maxClips,
-              min_duration: current.discovery.minDuration,
-              max_duration: current.discovery.maxDuration,
               language: settings.editor.language || "th",
               provider: buildProviderFor(settings, "discovery"),
               // A re-roll keeps approved clips out of the next search and feeds
@@ -510,11 +503,34 @@ export function Step2Discovery() {
   }, []);
 
   /**
+   * Move the preview playhead and keep the video in sync. The playhead is
+   * always clamped to the selected clip, so a waveform click, an arrow key or
+   * an edge snap can never park it outside the cut.
+   */
+  const seekPlayhead = useCallback((seconds: number) => {
+    if (!Number.isFinite(seconds)) return;
+    const current = useProjectStore.getState().project;
+    const clip =
+      current?.clips.find((item) => item.id === current.selectedClipId) ?? current?.clips[0];
+    const lower = clip?.start ?? 0;
+    const upper = clip?.end ?? Math.max(lower, seconds);
+    const next = clamp(seconds, lower, Math.max(lower, upper));
+    playheadRef.current = next;
+    setPlayhead(next);
+    videoRef.current?.seekTo(next);
+  }, []);
+
+  /**
    * Move one edge of the selected clip by `delta` seconds: a negative value
    * moves it earlier (grow the start, trim the end), a positive value moves it
    * later (trim the start, grow the end). The raw speech bounds stay the
    * source of truth and the cut is recomputed through the current buffer so
    * every edge change remains reversible.
+   *
+   * A front-edge change parks the playhead on the new in-point (you are
+   * auditioning the new opening). A back-edge change leaves the playhead
+   * alone unless the new out-point passes it, in which case it is clamped so
+   * the cursor never sits outside the clip.
    */
   const adjustEdge = useCallback((edge: CutEdge, delta: number) => {
     const current = useProjectStore.getState().project;
@@ -555,7 +571,12 @@ export function Step2Discovery() {
       start: cut.start,
       end: cut.end,
     });
-  }, []);
+    if (edge === "start") {
+      seekPlayhead(cut.start);
+    } else if (playheadRef.current > cut.end) {
+      seekPlayhead(cut.end);
+    }
+  }, [seekPlayhead]);
 
   const applyShuttleRate = useCallback((next: number) => {
     const clamped = Math.min(4, Math.max(0.25, next));
@@ -648,16 +669,20 @@ export function Step2Discovery() {
           shuttle(1);
           break;
         case "ArrowLeft":
-          // Shift owns the cut-in edge, Alt owns the cut-out edge; the arrow
-          // is the direction that edge moves. Plain arrows do nothing here.
-          if (shift === alt) break;
+          // Shift owns the cut-in edge, Alt owns the cut-out edge; a plain
+          // arrow moves the playhead. Both modifiers together are ignored.
+          if (shift && alt) break;
           event.preventDefault();
-          adjustEdge(shift ? "start" : "end", -keyStep);
+          if (shift) adjustEdge("start", -keyStep);
+          else if (alt) adjustEdge("end", -keyStep);
+          else seekPlayhead(playheadRef.current - PLAYHEAD_STEP_SECONDS);
           break;
         case "ArrowRight":
-          if (shift === alt) break;
+          if (shift && alt) break;
           event.preventDefault();
-          adjustEdge(shift ? "start" : "end", keyStep);
+          if (shift) adjustEdge("start", keyStep);
+          else if (alt) adjustEdge("end", keyStep);
+          else seekPlayhead(playheadRef.current + PLAYHEAD_STEP_SECONDS);
           break;
         default:
           break;
@@ -665,7 +690,7 @@ export function Step2Discovery() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [adjustEdge, keyStep, pauseShuttle, shuttle]);
+  }, [adjustEdge, keyStep, pauseShuttle, seekPlayhead, shuttle]);
 
   function handleApprove(clip: ProjectClip) {
     approveClip(clip.id, !clip.approved);
@@ -899,18 +924,42 @@ export function Step2Discovery() {
               />
             </div>
 
-            <Button className="w-full gap-2" size="sm" disabled={status === "running"} onClick={startSearch}>
-              {status === "running" ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <RefreshCw className="size-3.5" />
-              )}
-              {status === "running"
-                ? L("Looking for more moments…")
-                : clips.length === 0
-                  ? L("Find clips")
-                  : L("Find more clips")}
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                className="flex-[85] gap-2"
+                size="sm"
+                disabled={status === "running"}
+                onClick={startSearch}
+              >
+                {status === "running" ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3.5" />
+                )}
+                {status === "running"
+                  ? L("Looking for more moments…")
+                  : clips.length === 0
+                    ? L("Find clips")
+                    : L("Find more clips")}
+              </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-[15] px-0"
+                    disabled={status === "running" || !project?.transcriptId}
+                    onClick={() => setImportOpen(true)}
+                    aria-label={L("Import clips from chat")}
+                  >
+                    <ClipboardPaste className="size-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="text-xs">
+                  {L("Import clips from chat")}
+                </TooltipContent>
+              </Tooltip>
+            </div>
             <div className="flex items-center justify-between gap-2">
               <p className="text-[10px] leading-relaxed text-muted-foreground">
                 {clips.length === 0
@@ -993,7 +1042,7 @@ export function Step2Discovery() {
                   src={videoSrc}
                   clipStart={selected?.start ?? 0}
                   clipEnd={selected?.end ?? 0}
-                  onTimeUpdate={setPlayhead}
+                  onTimeUpdate={handleTimeUpdate}
                 />
               </div>
             ) : (
@@ -1005,21 +1054,12 @@ export function Step2Discovery() {
 
             <div className="mt-3 rounded-lg border border-border bg-card/30 p-3">
               <WaveformBar
-                audioUrl={audioSrc}
                 peaks={project.transcript?.peaks ?? null}
                 duration={duration}
                 clipStart={selected?.start ?? 0}
                 clipEnd={selected?.end ?? 0}
                 playhead={playhead}
-                onSeek={(seconds) => {
-                  // The waveform is clipped to the selected clip, so seeking
-                  // can never leave its boundaries.
-                  const next = selected
-                    ? clamp(seconds, selected.start, selected.end)
-                    : seconds;
-                  setPlayhead(next);
-                  videoRef.current?.seekTo(next);
-                }}
+                onSeek={seekPlayhead}
                 onExpand={(edge) => adjustEdge(edge, edge === "start" ? -buttonStep : buttonStep)}
                 onCollapse={(edge) => adjustEdge(edge, edge === "start" ? buttonStep : -buttonStep)}
               />
@@ -1140,14 +1180,14 @@ export function Step2Discovery() {
                 </div>
 
                 <p className="text-[10px] leading-relaxed text-muted-foreground">
-                  Space play/pause · K pause · L faster (
+                  Space play/pause · ←/→ move {PLAYHEAD_STEP_SECONDS} s · K pause · L faster (
                   <NumberFlow
                     value={shuttleRate}
                     suffix="×"
                     format={{ maximumFractionDigits: 2 }}
                   />
                   ) · J slower, then rewind · Shift+← grow in / Shift+→ trim in · Alt+← trim out /
-                  Alt+→ grow out · {keyStep} s per key press
+                  Alt+→ grow out · {keyStep} s per edge key press
                 </p>
               </div>
             ) : (
@@ -1183,6 +1223,7 @@ export function Step2Discovery() {
         </div>
       </footer>
 
+      <ImportClipsDialog open={importOpen} onOpenChange={setImportOpen} />
     </div>
   );
 }

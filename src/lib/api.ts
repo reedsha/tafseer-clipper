@@ -475,9 +475,6 @@ export interface DiscoverRequest {
   session_guide?: string;
   refinement_note?: string;
   excluded_ranges?: TimeRange[];
-  max_clips?: number;
-  min_duration?: number;
-  max_duration?: number;
   language?: string;
   provider?: ProviderOverride | null;
   /** Kept clips the next re-roll should imitate (additive). */

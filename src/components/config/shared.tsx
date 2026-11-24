@@ -392,14 +392,16 @@ export function LineWidthHint({
             A full line runs past the subtitle column, so subtitle text can reach
             the frame edge. Shorten the line or reduce the font size.
           </p>
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            onClick={() => onUseSuggestion(fit.suggestedMaxChars)}
-          >
-            Use {fit.suggestedMaxChars} chars
-          </Button>
+          {fit.room >= NUMERIC_LIMITS.maxCharsPerLine.min ? (
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              onClick={() => onUseSuggestion(fit.suggestedMaxChars)}
+            >
+              Use {fit.suggestedMaxChars} chars
+            </Button>
+          ) : null}
         </div>
       )}
     </div>
@@ -536,6 +538,11 @@ export const SHORTCUTS = [
     keys: "J K L",
     action: "Shuttle backward / pause / forward",
     where: "Step 2 preview · Step 3 Output preview",
+  },
+  {
+    keys: "← →",
+    action: "Move the preview playhead 1 s",
+    where: "Step 2 · waveform & trim",
   },
   {
     keys: "Shift ← →",

@@ -27,20 +27,10 @@ export const NUMERIC_LIMITS = {
   /** Step 2 edge buttons / keyboard shortcuts for growing or trimming a clip. */
   edgeButtonStepSeconds: { min: 0.1, max: 60, step: 0.1 },
   edgeKeyStepSeconds: { min: 0.1, max: 60, step: 0.1 },
-  maxCharsPerLine: { min: 20, max: 80, step: 1 },
+  /** Floor matches the wrap engine's own minimum (`subtitleCues.ts`). */
+  maxCharsPerLine: { min: 8, max: 80, step: 1 },
   /** Upper bound is a sanity guard; the interval list stays open-ended. */
   autosaveIntervalMs: { min: 0, max: 60 * 60_000, step: 1_000 },
-} as const satisfies Record<string, NumericRange>;
-
-/**
- * Bounds for the per-search clip length. These mirror the backend
- * `DiscoverRequest` validators (`backend/main.py`: min > 1 ≤ 600, max > 1 ≤
- * 1800, max > min) so a value accepted here can never produce a 422.
- */
-export const DISCOVERY_LIMITS = {
-  minDuration: { min: 2, max: 600, step: 1 },
-  maxDuration: { min: 2, max: 1800, step: 1 },
-  maxClips: { min: 1, max: 50, step: 1 },
 } as const satisfies Record<string, NumericRange>;
 
 export type NumericLimitKey = keyof typeof NUMERIC_LIMITS;

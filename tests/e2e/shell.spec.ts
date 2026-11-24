@@ -131,13 +131,19 @@ test.describe("app shell", () => {
       "aria-pressed",
       "true",
     );
-    // …and the clip brief opens without leaving the step.
+    // …and the clip brief opens without leaving the step. The desktop title-bar
+    // offset lives on <html> so the portal-rendered drawer starts below it
+    // instead of sliding underneath the window controls.
+    await page.evaluate(() => document.documentElement.classList.add("desktop-shell"));
     await page.getByRole("button", { name: "Clip brief & system prompt" }).click();
     await expect(page.getByRole("heading", { name: "Initial prompt — clip finding" })).toBeVisible();
+    const panel = page.getByRole("dialog");
+    await expect.poll(async () => (await panel.boundingBox())?.y ?? 0).toBeGreaterThanOrEqual(31);
     await page.getByRole("button", { name: "Close initial prompt" }).click();
     await expect(
       page.getByRole("heading", { name: "Initial prompt — clip finding" }),
     ).toBeHidden();
+    await page.evaluate(() => document.documentElement.classList.remove("desktop-shell"));
 
     // The hint names GPU/CPU capability only — never a product line, and the
     // CPU fallback is always stated. Either the GPU is ready or the CPU path
@@ -145,6 +151,62 @@ test.describe("app shell", () => {
     await expect(
       page.getByText(/GPU ready|CPU transcription|acceleration runtime is not installed/),
     ).toBeVisible();
+  });
+
+  test("the import dialog clears the desktop title bar", async ({ page }) => {
+    await seedResumableProject(page);
+    await goToWorkspace(page);
+
+    const sidebar = page.getByRole("complementary", { name: "Sessions" });
+    await sidebar.getByRole("button", { name: new RegExp(PROJECT_NAME) }).first().click();
+    await expect(page.getByRole("heading", { name: "Find clips" })).toBeVisible();
+
+    // Same regression as the prompt drawer: the portal must inherit the
+    // title-bar offset from <html>, so it starts below the window controls.
+    await page.evaluate(() => document.documentElement.classList.add("desktop-shell"));
+    await page.getByRole("button", { name: "Import clips from chat" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect
+      .poll(async () => (await dialog.boundingBox())?.y ?? 0)
+      .toBeGreaterThanOrEqual(31);
+    await page.evaluate(() => document.documentElement.classList.remove("desktop-shell"));
+  });
+
+  test("prompt presets can be saved, picked and deleted from the drawer", async ({
+    page,
+  }) => {
+    await goToWorkspace(page);
+
+    const openDrawer = () => page.getByRole("button", { name: "Clip brief & system prompt" }).click();
+    await openDrawer();
+    const drawer = page.getByRole("dialog");
+    await expect(drawer.getByText("No saved presets yet — save one above.")).toBeVisible();
+
+    const prompt = "Focus on stories about patience and gratitude.";
+    await drawer.getByLabel("What to look for").fill(prompt);
+    await drawer.getByPlaceholder("Preset name").fill("Short reminders");
+    await drawer.getByRole("button", { name: "Save preset" }).click();
+    await expect(drawer).toBeHidden();
+
+    await openDrawer();
+    const reopened = page.getByRole("dialog");
+    const row = reopened.getByRole("button", { name: /^Short reminders/ });
+    await expect(row).toBeVisible();
+    await row.click();
+    await expect(reopened.getByLabel("What to look for")).toHaveValue(prompt);
+    await expect(reopened.getByRole("button", { name: "Save prompt" })).toBeVisible();
+    await reopened.getByRole("button", { name: "Save prompt" }).click();
+    await expect(reopened).toBeHidden();
+
+    await openDrawer();
+    const third = page.getByRole("dialog");
+    await expect(third.getByRole("button", { name: /^Short reminders/ })).toBeVisible();
+    await third.getByRole("button", { name: "Delete preset Short reminders" }).click();
+    const confirm = page.getByRole("dialog", { name: "Delete this preset?" });
+    await expect(confirm).toBeVisible();
+    await confirm.getByRole("button", { name: "Delete preset", exact: true }).click();
+    await expect(third.getByText("No saved presets yet — save one above.")).toBeVisible();
   });
 
   test("Settings exposes the GPU acceleration section and stays vendor-neutral", async ({

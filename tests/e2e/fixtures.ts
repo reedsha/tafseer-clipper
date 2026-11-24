@@ -69,7 +69,6 @@ const PROJECT = {
   basePrompt: "",
   promptPresetId: null,
   sessionGuide: "",
-  discovery: { minDuration: 15, maxDuration: 90, maxClips: 8 },
   clips: [
     {
       id: CLIP1_ID,

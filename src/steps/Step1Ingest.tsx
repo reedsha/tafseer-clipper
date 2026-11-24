@@ -12,6 +12,7 @@ import {
   Captions,
   CheckCircle2,
   ChevronRight,
+  FileDown,
   FileVideo2,
   FolderOpen,
   Info,
@@ -39,7 +40,9 @@ import {
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { extractAndTranscribe } from "@/lib/api";
+import { buildAiBrief } from "@/lib/aiChatBrief";
 import { describeAcceleration } from "@/lib/acceleration";
 import { aiRouteFor } from "@/lib/aiActivity";
 import { buildDiagnostics, copyText } from "@/lib/diagnostics";
@@ -54,6 +57,7 @@ import {
   subscribeNativeDrops,
 } from "@/lib/media";
 import { type TranscriptData } from "@/lib/projectTypes";
+import { saveTextFile } from "@/lib/projectFile";
 import {
   buildDecisionProviderFor,
   buildProviderFor,
@@ -255,6 +259,38 @@ export function Step1Ingest() {
     }
   }
 
+  async function handleExportBrief() {
+    if (!project?.transcript) return;
+    try {
+      const brief = buildAiBrief({
+        projectName: project.name,
+        basePrompt: project.basePrompt,
+        language: useSettingsStore.getState().editor.language || "th",
+        sessionGuide: project.sessionGuide,
+        segments: project.transcript.segments,
+      });
+      const base =
+        (project.name || "untitled")
+          .replace(/[\\/:*?"<>|]/g, "-")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 80) || "untitled";
+      const result = await saveTextFile(brief, `${base}-ai-clips.md`, {
+        description: "AI chat brief",
+        filterName: "AI chat brief (*.md)",
+        extension: "md",
+        mimeType: "text/markdown",
+      });
+      if (result === "saved") {
+        toast.success(t("step1.transcript.exportAiSaved"));
+      }
+    } catch (caught) {
+      toast.error("Could not export the brief", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
+    }
+  }
+
   function handleDrop(event: DragEvent<HTMLElement>) {
     event.preventDefault();
     setDragging(false);
@@ -297,7 +333,6 @@ export function Step1Ingest() {
         basePrompt: previous.basePrompt,
         promptPresetId: previous.promptPresetId,
         sessionGuide: previous.sessionGuide,
-        discovery: { ...previous.discovery },
       });
     }
     setBrowserFile(null);
@@ -630,6 +665,22 @@ export function Step1Ingest() {
                       {t("step1.transcript.continue")}
                       <ChevronRight className="size-3.5" />
                     </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={() => void handleExportBrief()}
+                        >
+                          <FileDown className="size-3.5" />
+                          {t("step1.transcript.exportAi")}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" className="text-xs">
+                        {t("step1.transcript.exportAiHint")}
+                      </TooltipContent>
+                    </Tooltip>
                     <Button variant="ghost" size="sm" onClick={() => void handleBrowse()}>
                       {t("step1.transcript.replace")}
                     </Button>

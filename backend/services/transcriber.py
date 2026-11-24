@@ -43,8 +43,16 @@ logger = logging.getLogger("tafseer.transcriber")
 #: Hide the console window a bundled FFmpeg would otherwise flash on Windows.
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
-#: Downsampled waveform envelope returned to the Step-2 wavesurfer scrubber.
-WAVEFORM_PEAK_COUNT = 1200
+#: Waveform envelope returned to the Step-2 wavesurfer scrubber. The envelope
+#: targets ~4 points per second so a short clip still has a readable shape on a
+#: long lecture, with a floor for tiny files and a cap that keeps the response
+#: and the persisted transcript bounded.
+WAVEFORM_PEAKS_PER_SECOND = 4
+WAVEFORM_PEAK_MIN = 6000
+WAVEFORM_PEAK_MAX = 48000
+#: Backwards-compatible upper bound for envelopes read from disk. Older
+#: transcripts carry 1200 points; new ones never exceed the cap above.
+WAVEFORM_PEAK_COUNT = WAVEFORM_PEAK_MAX
 
 
 class TranscriptionError(RuntimeError):
@@ -255,16 +263,33 @@ def extract_audio(video_path: str | Path, out_wav: str | Path) -> Path:
 # --------------------------------------------------------------------------- #
 # Waveform envelope (Step-2 wavesurfer scrubber)
 # --------------------------------------------------------------------------- #
+def waveform_peak_target(duration_seconds: float) -> int:
+    """Envelope point count for a lecture of ``duration_seconds``.
+
+    ~4 points/second keeps a 30 s clip on a 3 h lecture above a hundred points,
+    while the 6k floor gives short files a smooth bar and the 48k cap keeps the
+    JSON payload (and the persisted transcript) under a few hundred kilobytes.
+    """
+    if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+        return WAVEFORM_PEAK_MIN
+    return max(
+        WAVEFORM_PEAK_MIN,
+        min(WAVEFORM_PEAK_MAX, round(duration_seconds * WAVEFORM_PEAKS_PER_SECOND)),
+    )
+
+
 def compute_waveform_peaks(
-    wav_path: str | Path, *, points: int = WAVEFORM_PEAK_COUNT
+    wav_path: str | Path, *, points: int | None = None
 ) -> list[float]:
     """Downsampled peak envelope (``0..1``) of a PCM WAV, stdlib only.
 
     The extracted audio is always 16 kHz mono ``pcm_s16le``; numpy is only a
     test dependency, so this streams the file bucket by bucket with the stdlib
-    ``wave``/``array`` modules (C-level ``max``/``min`` per bucket).  Any
-    unreadable/unsupported WAV yields an empty list - the waveform is optional
-    UI sugar, never a reason to fail a transcription.
+    ``wave``/``array`` modules (C-level ``max``/``min`` per bucket).  When
+    ``points`` is omitted the count adapts to the lecture length via
+    :func:`waveform_peak_target`. Any unreadable/unsupported WAV yields an empty
+    list - the waveform is optional UI sugar, never a reason to fail a
+    transcription.
     """
     target = Path(wav_path)
     try:
@@ -273,6 +298,10 @@ def compute_waveform_peaks(
             sample_width = handle.getsampwidth()
             if total_frames <= 0 or sample_width != 2:
                 return []
+            if points is None:
+                frame_rate = handle.getframerate()
+                duration = total_frames / frame_rate if frame_rate > 0 else 0.0
+                points = waveform_peak_target(duration)
             buckets = max(1, min(int(points), total_frames))
             frames_per_bucket = max(1, math.ceil(total_frames / buckets))
             peaks: list[float] = []
