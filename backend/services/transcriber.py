@@ -40,6 +40,18 @@ from services.cancel import raise_if_cancelled
 
 logger = logging.getLogger("tafseer.transcriber")
 
+#: Silent, non-editable bias list for STT code-switching into Arabic script.
+#: Hard-coded so editors never have to curate ASR hints (idea 1).  Covers the
+#: standard Arabic recitation intros plus high-frequency verse openers that
+#: typically follow a Thai intro ("อัลลอฮฺทรงตรัสว่า...").
+RECITATION_INTRO_PROMPT = (
+    "أعوذ بالله من الشيطان الرجيم. بسم الله الرحمن الرحيم. "
+    "قال الله تعالى. قال الله عز وجل. صدق الله العظيم. "
+    "يا أيها الذين آمنوا. يا أيها الناس. الحمد لله رب العالمين. "
+    "قل هو الله أحد. إن الله مع الصابرين. وما خلقت الجن والإنس. "
+    "إنا أنزلناه. ومن يتق الله."
+)
+
 #: Hide the console window a bundled FFmpeg would otherwise flash on Windows.
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 

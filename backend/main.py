@@ -53,7 +53,7 @@ from services.cancel import JobCancelled
 # module can import ctranslate2/faster-whisper, which load the CUDA DLLs.
 accel.activate_runtime_dirs()
 
-from services import analyzer, decision, recitation, renderer, subtitle_gen, transcriber  # noqa: E402
+from services import analyzer, decision, quran, recitation, renderer, subtitle_gen, transcriber  # noqa: E402
 from services import verify as verify_service  # noqa: E402
 
 # --------------------------------------------------------------------------- #
@@ -1823,7 +1823,7 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
             result = await run_in_threadpool(
                 engine.transcribe,
                 wav_path,
-                initial_prompt=body.initial_prompt,
+                initial_prompt=body.initial_prompt or transcriber.RECITATION_INTRO_PROMPT,
                 language=body.language,
                 vad_filter=body.vad_filter,
                 glossary=body.glossary,
@@ -1842,7 +1842,7 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                 api_key=body.cloud.api_key,
                 model=body.cloud.model,
                 language=body.cloud.language or body.language,
-                prompt=body.initial_prompt or None,
+                prompt=body.initial_prompt or transcriber.RECITATION_INTRO_PROMPT,
                 glossary=body.glossary,
                 cancel_event=cancel_event,
             )
@@ -1861,7 +1861,28 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                 except analyzer.LLMError as exc:
                     logger.warning("Step-1 AI enrichment skipped: %s", exc)
 
+            resolved_ids: set[int] = set()
             if body.detect_arabic and (provider is not None or decision_provider is not None):
+                # Phase B: short-circuit segments where first-pass STT already
+                # produced Arabic script that matches the corpus with high
+                # confidence.  Apply the canonical slice replacement in place
+                # and skip audio re-transcription for those spans.
+                for segment in result.segments:
+                    text = str(segment.text or "")
+                    if not re.search(r"[\u0600-\u06FF]", text):
+                        continue
+                    span = quran.match_span(text)
+                    if span is None or span.tier != "auto":
+                        continue
+                    new_text = recitation.replace_slice(text, span)
+                    has_thai_outside = recitation.has_thai_outside(text, span)
+                    segment.text = new_text
+                    if not has_thai_outside:
+                        segment.language = "ar"
+                    segment.reference = span.reference
+                    segment.confidence = span.score_orthographic
+                    resolved_ids.add(int(segment.id))
+
                 audit_input = [
                     {
                         "id": segment.id,
@@ -1889,6 +1910,28 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                 except analyzer.LLMError as exc:
                     logger.warning("Arabic audit failed; keeping the plain transcript: %s", exc)
                     spans = []
+                # Phase B: drop spans already resolved by the first-pass
+                # short-circuit so their audio is not re-transcribed.
+                if resolved_ids:
+                    resolved_segments = [
+                        segment for segment in result.segments if int(segment.id) in resolved_ids
+                    ]
+                    filtered: list[dict[str, Any]] = []
+                    for span in spans:
+                        span_start = float(span.get("start") or 0.0)
+                        span_end = float(span.get("end") or 0.0)
+                        start_id = int(span.get("start_id", -1))
+                        end_id = int(span.get("end_id", -1))
+                        if start_id in resolved_ids or end_id in resolved_ids:
+                            continue
+                        if any(
+                            max(0.0, min(seg.end, span_end) - max(seg.start, span_start)) > 0.15
+                            for seg in resolved_segments
+                        ):
+                            continue
+                        filtered.append(span)
+                    spans = filtered
+
                 if spans:
                     async def transcribe_span(
                         path: Path,
@@ -2149,40 +2192,51 @@ async def verify_arabic(body: VerifyArabicRequest) -> VerifyArabicResponse:
             ],
         )
 
-    # Per-line "Check Arabic": the corpus gate answers a known verse with no
-    # model round-trip; anything else goes to the proofreader exactly as today.
+    # Per-line "Check Arabic": corpus gate first, then pure-algorithm span match.
     gated = verify_service.corpus_gate(body.arabic_text)
     if gated is not None:
         return VerifyArabicResponse(
             verified_text=gated.verified_text,
             correction_applied=gated.correction_applied,
             notes=gated.notes,
-            model=provider.model if provider is not None else "",
+            model="",
             source=gated.source,
             reference=gated.reference,
         )
-    if provider is None:
-        outcome = verify_service.needs_model_outcome(
-            verify_service.VerifyLine(arabic_text=body.arabic_text)
-        )
+    span = quran.match_span(body.arabic_text)
+    if span is not None and span.tier in ("auto", "rescue"):
+        verified = span.matched_canonical.strip() or body.arabic_text
+        if span.tier == "rescue":
+            span_len = span.end_word - span.start_word + 1
+            if span_len < 6:
+                outcome = verify_service.needs_model_outcome(
+                    verify_service.VerifyLine(arabic_text=body.arabic_text)
+                )
+                return VerifyArabicResponse(
+                    verified_text=outcome.verified_text,
+                    correction_applied=outcome.correction_applied,
+                    notes=outcome.notes,
+                    model="",
+                    source=outcome.source,
+                    reference=span.reference,
+                )
         return VerifyArabicResponse(
-            verified_text=outcome.verified_text,
-            correction_applied=outcome.correction_applied,
-            notes=outcome.notes,
+            verified_text=verified,
+            correction_applied=verified != body.arabic_text.strip(),
+            notes=f"Matches the Qur'an corpus ({span.reference}).",
             model="",
-            source=outcome.source,
+            source="quran",
+            reference=span.reference,
         )
-    result = await analyzer.verify_arabic(
-        arabic_text=body.arabic_text,
-        context_thai=body.context_thai,
-        provider=provider,
+    outcome = verify_service.needs_model_outcome(
+        verify_service.VerifyLine(arabic_text=body.arabic_text)
     )
     return VerifyArabicResponse(
-        verified_text=result["verified_text"],
-        correction_applied=result["correction_applied"],
-        notes=result["notes"],
-        model=provider.model,
-        source="proofread",
+        verified_text=outcome.verified_text,
+        correction_applied=outcome.correction_applied,
+        notes=outcome.notes,
+        model="",
+        source=outcome.source,
     )
 
 

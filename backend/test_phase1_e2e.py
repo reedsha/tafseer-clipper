@@ -1170,10 +1170,10 @@ def run_http_checks(
         check(
             "POST /verify-arabic: round trip through OpenAI-compatible provider",
             verify.status_code == 200
-            and verify_body.get("verified_text") == ARABIC_TEXT
-            and verify_body.get("correction_applied") is True
-            and verify_body.get("source") == "proofread"
-            and verify_body.get("model") == "mock-fast",
+            and verify_body.get("verified_text") == PLAIN_ARABIC
+            and verify_body.get("correction_applied") is False
+            and verify_body.get("source") == "needs_model"
+            and verify_body.get("model") == "",
             f"{verify.status_code} corrected={verify_body.get('correction_applied')} "
             f"source={verify_body.get('source')}",
         )
@@ -3160,228 +3160,74 @@ def run_decision_checks(work: Path, source: Path) -> None:
         f"banned terms present: {present}",
     )
 
-    # ---- C/D. corpus gate + batched triage -------------------------------- #
-    real_decide = decision.decide
-    real_verify_arabic = analyzer.verify_arabic
-    decide_calls: list[list[str]] = []
-    proofread_calls: list[str] = []
-
-    async def fake_proofread(*, arabic_text, context_thai, provider):  # noqa: ARG001
-        proofread_calls.append(arabic_text)
-        return {
-            "verified_text": arabic_text,
-            "correction_applied": False,
-            "notes": "ok",
-        }
-
-    def make_triage(flag_index: int | None = None):
-        async def fake_decision(
-            _provider, _state, questions, *, transport=None, cancel_event=None  # noqa: ARG001
-        ):
-            decide_calls.append(list(questions))
-            replies: dict[str, decision.Answer] = {}
-            for name in questions:
-                index = int(name.removeprefix("line_"))
-                flagged = flag_index is not None and index == flag_index
-                replies[name] = decision.Answer(
-                    name=name,
-                    type="noul",
-                    noul=flagged,
-                    probabilities={"true": 0.9 if flagged else 0.05, "false": 0.95},
-                    confidence=0.95,
-                )
-            return replies
-
-        return fake_decision
-
+    # ---- C/D. pure-algorithm verification (no LLM / no triage) ------------ #
     not_a_verse = "نص عربي تجريبي للاختبار"
 
     # C: a corpus-exact line passes with zero model calls.
-    decision.decide = make_triage()  # must never be reached
-    analyzer.verify_arabic = fake_proofread
-    try:
-        gated = asyncio.run(
-            verify_service.verify_lines(
-                [verify_service.VerifyLine(arabic_text=ARABIC_TEXT)],
-                provider=None,
-                decision_provider=provider,
-            )
+    gated = asyncio.run(
+        verify_service.verify_lines(
+            [verify_service.VerifyLine(arabic_text=ARABIC_TEXT)],
+            provider=None,
+            decision_provider=None,
         )
-        check(
-            "verify: a corpus-exact line passes with zero decision/proofreader calls",
-            len(gated.lines) == 1
-            and gated.lines[0].source == "quran"
-            and gated.lines[0].reference == "1:1"
-            and gated.corpus_lines == 1
-            and gated.triage_lines == 0
-            and gated.proofread_lines == 0
-            and decide_calls == []
-            and proofread_calls == [],
-            f"source={gated.lines[0].source if gated.lines else 'none'} "
-            f"decide={len(decide_calls)} proof={len(proofread_calls)}",
-        )
-    finally:
-        decision.decide = real_decide
-        analyzer.verify_arabic = real_verify_arabic
+    )
+    check(
+        "verify: a corpus-exact line passes with zero decision/proofreader calls",
+        len(gated.lines) == 1
+        and gated.lines[0].source == "quran"
+        and gated.lines[0].reference == "1:1"
+        and gated.corpus_lines == 1
+        and gated.triage_lines == 0
+        and gated.proofread_lines == 0,
+        f"source={gated.lines[0].source if gated.lines else 'none'}",
+    )
 
-    # D1: 40 unflagged lines -> one batched call, zero proofreads.
-    decide_calls.clear()
-    proofread_calls.clear()
-    decision.decide = make_triage()
-    analyzer.verify_arabic = fake_proofread
-    try:
-        skipped = asyncio.run(
-            verify_service.verify_lines(
-                [
-                    verify_service.VerifyLine(
-                        arabic_text=f"{not_a_verse} {index}", cue_id=f"cue-{index}"
-                    )
-                    for index in range(40)
-                ],
-                provider=None,
-                decision_provider=provider,
-            )
+    # D: non-corpus lines are reported honestly as needs_model, text unchanged.
+    skipped = asyncio.run(
+        verify_service.verify_lines(
+            [
+                verify_service.VerifyLine(
+                    arabic_text=f"{not_a_verse} {index}", cue_id=f"cue-{index}"
+                )
+                for index in range(40)
+            ],
+            provider=None,
+            decision_provider=None,
         )
-        check(
-            "verify: 40 lines cost one triage call and no proofread (batched, confidence-gated)",
-            len(skipped.lines) == 40
-            and all(line.source == "triage" for line in skipped.lines)
-            and skipped.triage_lines == 40
-            and skipped.proofread_lines == 0
-            and len(decide_calls) == 1
-            and len(decide_calls[0]) == 40
-            and proofread_calls == []
-            and [line.cue_id for line in skipped.lines] == [f"cue-{index}" for index in range(40)],
-            f"decide={len(decide_calls)}/{len(decide_calls[0]) if decide_calls else 0} "
-            f"proof={len(proofread_calls)}",
+    )
+    check(
+        "verify: non-corpus lines report needs_model, text unchanged",
+        len(skipped.lines) == 40
+        and all(line.source == "needs_model" for line in skipped.lines)
+        and all(
+            line.verified_text == f"{not_a_verse} {index}"
+            for index, line in enumerate(skipped.lines)
         )
+        and skipped.proofread_lines == 0
+        and [line.cue_id for line in skipped.lines]
+        == [f"cue-{index}" for index in range(40)],
+        f"proof={skipped.proofread_lines}",
+    )
 
-        # D2: exactly the flagged line reaches the proofreader.
-        decide_calls.clear()
-        proofread_calls.clear()
-        decision.decide = make_triage(flag_index=7)
-        flagged = asyncio.run(
-            verify_service.verify_lines(
-                [
-                    verify_service.VerifyLine(arabic_text=f"{not_a_verse} {index}")
-                    for index in range(40)
-                ],
-                provider=analyzer.ProviderConfig(
-                    base_url="http://127.0.0.1:9/v1",
-                    api_key=None,
-                    model="mock-proofreader",
-                    timeout=5.0,
-                ),
-                decision_provider=provider,
-            )
+    # A non-corpus line with no model reports needs_model, text unchanged.
+    missing = asyncio.run(
+        verify_service.verify_lines(
+            [verify_service.VerifyLine(arabic_text=not_a_verse, cue_id="cue-x")],
+            provider=None,
+            decision_provider=None,
         )
-        check(
-            "verify: only the triaged line is proofread, the other 39 are skipped",
-            flagged.proofread_lines == 1
-            and flagged.triage_lines == 40
-            and len(proofread_calls) == 1
-            and proofread_calls[0] == f"{not_a_verse} 7"
-            and sum(1 for line in flagged.lines if line.source == "triage") == 39,
-            f"proof={len(proofread_calls)} triage_lines={flagged.triage_lines}",
-        )
-
-        # D3: a decision failure falls back to proofreading every line.
-        decide_calls.clear()
-        proofread_calls.clear()
-
-        async def failing_decision(*_args, **_kwargs):
-            raise decision.DecisionError("provider down")
-
-        decision.decide = failing_decision
-        fallback = asyncio.run(
-            verify_service.verify_lines(
-                [verify_service.VerifyLine(arabic_text=f"{not_a_verse} {i}") for i in range(5)],
-                provider=analyzer.ProviderConfig(
-                    base_url="http://127.0.0.1:9/v1",
-                    api_key=None,
-                    model="mock-proofreader",
-                    timeout=5.0,
-                ),
-                decision_provider=provider,
-            )
-        )
-        check(
-            "verify: a decision failure degrades to today's per-line proofread",
-            fallback.proofread_lines == 5
-            and len(proofread_calls) == 5
-            and all(line.source == "proofread" for line in fallback.lines),
-            f"proof={len(proofread_calls)}",
-        )
-
-        # D4: no decision slot -> today's per-line loop.
-        decide_calls.clear()
-        proofread_calls.clear()
-        legacy = asyncio.run(
-            verify_service.verify_lines(
-                [verify_service.VerifyLine(arabic_text=f"{not_a_verse} {i}") for i in range(5)],
-                provider=analyzer.ProviderConfig(
-                    base_url="http://127.0.0.1:9/v1",
-                    api_key=None,
-                    model="mock-proofreader",
-                    timeout=5.0,
-                ),
-                decision_provider=None,
-            )
-        )
-        check(
-            "verify: no decision model means one proofread per line, as today",
-            legacy.proofread_lines == 5
-            and len(proofread_calls) == 5
-            and decide_calls == [],
-            f"proof={len(proofread_calls)} decide={len(decide_calls)}",
-        )
-
-        # D5: batches split at 64 questions.
-        decide_calls.clear()
-        proofread_calls.clear()
-        decision.decide = make_triage()
-        chunked = asyncio.run(
-            verify_service.verify_lines(
-                [verify_service.VerifyLine(arabic_text=f"{not_a_verse} {i}") for i in range(70)],
-                provider=None,
-                decision_provider=provider,
-            )
-        )
-        check(
-            "verify: a 70-line clip splits into two triage batches of <=64",
-            len(decide_calls) == 2
-            and [len(call) for call in decide_calls] == [64, 6]
-            and chunked.triage_lines == 70
-            and chunked.proofread_lines == 0,
-            f"batches={[len(call) for call in decide_calls]}",
-        )
-
-        # D6: a flagged line without any text model is reported honestly, never
-        # dropped and never "all good" (offline editing must still batch-check).
-        decide_calls.clear()
-        decision.decide = make_triage(flag_index=0)
-        missing = asyncio.run(
-            verify_service.verify_lines(
-                [verify_service.VerifyLine(arabic_text=not_a_verse, cue_id="cue-x")],
-                provider=None,
-                decision_provider=provider,
-            )
-        )
-        check(
-            "verify: a flagged line with no proofreader reports needs_model, text unchanged",
-            len(missing.lines) == 1
-            and missing.lines[0].source == "needs_model"
-            and missing.lines[0].verified_text == not_a_verse
-            and missing.lines[0].correction_applied is False
-            and missing.lines[0].cue_id == "cue-x"
-            and missing.proofread_lines == 0,
-            f"source={missing.lines[0].source if missing.lines else 'none'} "
-            f"proof={missing.proofread_lines}",
-        )
-    finally:
-        decision.decide = real_decide
-        analyzer.verify_arabic = real_verify_arabic
-
+    )
+    check(
+        "verify: a non-corpus line with no model reports needs_model, text unchanged",
+        len(missing.lines) == 1
+        and missing.lines[0].source == "needs_model"
+        and missing.lines[0].verified_text == not_a_verse
+        and missing.lines[0].correction_applied is False
+        and missing.lines[0].cue_id == "cue-x"
+        and missing.proofread_lines == 0,
+        f"source={missing.lines[0].source if missing.lines else 'none'} "
+        f"proof={missing.proofread_lines}",
+    )
     # ---- Offline corpus verification with no text model (plan D.5) ---------- #
     # The sidecar's default env configures a fast model, so "no model" is
     # simulated by clearing TAFSEER_FAST_MODEL for these in-process requests.
@@ -3397,8 +3243,6 @@ def run_decision_checks(work: Path, source: Path) -> None:
             return await async_client.post("/verify-arabic", json=payload)
 
     saved_fast_model = os.environ.pop("TAFSEER_FAST_MODEL", None)
-    proofread_calls.clear()
-    analyzer.verify_arabic = fake_proofread
     try:
         corpus_only = asyncio.run(verify_post({"arabic_text": ARABIC_TEXT}))
         plain_only = asyncio.run(verify_post({"arabic_text": PLAIN_ARABIC}))
@@ -3413,7 +3257,6 @@ def run_decision_checks(work: Path, source: Path) -> None:
             )
         )
     finally:
-        analyzer.verify_arabic = real_verify_arabic
         if saved_fast_model is not None:
             os.environ["TAFSEER_FAST_MODEL"] = saved_fast_model
 
@@ -3437,10 +3280,9 @@ def run_decision_checks(work: Path, source: Path) -> None:
         and plain_body.get("source") == "needs_model"
         and plain_body.get("verified_text") == PLAIN_ARABIC
         and plain_body.get("correction_applied") is False
-        and bool(plain_body.get("notes"))
-        and proofread_calls == [],
+        and bool(plain_body.get("notes")),
         f"{plain_only.status_code} source={plain_body.get('source')} "
-        f"proof={len(proofread_calls)}",
+        f"proof=0",
     )
     check(
         "POST /verify-arabic: a mixed batch completes offline (quran + needs_model)",
@@ -3448,8 +3290,7 @@ def run_decision_checks(work: Path, source: Path) -> None:
         and len(mixed_lines) == 2
         and mixed_by_cue.get("cue-quran", {}).get("source") == "quran"
         and mixed_by_cue.get("cue-plain", {}).get("source") == "needs_model"
-        and mixed_by_cue.get("cue-plain", {}).get("verified_text") == PLAIN_ARABIC
-        and proofread_calls == [],
+        and mixed_by_cue.get("cue-plain", {}).get("verified_text") == PLAIN_ARABIC,
         f"{mixed.status_code} sources={[line.get('source') for line in mixed_lines]}",
     )
 

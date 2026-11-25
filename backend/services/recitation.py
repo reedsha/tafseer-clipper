@@ -32,6 +32,63 @@ RECITATION_PAD_SECONDS = 0.3
 
 _ARABIC_CHAR = re.compile(r"[\u0600-\u06FF]")
 _THAI_CHAR = re.compile(r"[\u0E00-\u0E7F]")
+
+
+def _has_arabic_script(text: str) -> bool:
+    return bool(re.search(r"[\u0600-\u06FF]", text or ""))
+
+
+_ARABIC_SCRIPT = re.compile(r"[\u0600-\u06FF]")
+
+
+def _arabic_word_indices(words: list[str]) -> list[int]:
+    return [i for i, word in enumerate(words) if _ARABIC_SCRIPT.search(word)]
+
+
+def replace_slice(text: str, span: Any) -> str:
+    """Rebuild ``text`` with the matched Arabic slice replaced by canonical text.
+
+    Slice indices from ``match_span`` refer to the *normalized* (Arabic-only)
+    word list, so they are mapped back onto the original token list via the
+    Arabic-script word positions.  Thai words outside the slice are preserved.
+    """
+    words = (text or "").split()
+    arabic_idx = _arabic_word_indices(words)
+    if not arabic_idx:
+        return text
+    start = int(span.start_word)
+    end = int(span.end_word)
+    if start >= len(arabic_idx):
+        start = len(arabic_idx) - 1
+    if end >= len(arabic_idx):
+        end = len(arabic_idx) - 1
+    if end < start:
+        end = start
+    start_orig = arabic_idx[start]
+    end_orig = arabic_idx[end]
+    canonical_words = str(span.matched_canonical or "").split()
+    new_words = words[:start_orig] + canonical_words + words[end_orig + 1 :]
+    return " ".join(new_words)
+
+
+def has_thai_outside(text: str, span: Any) -> bool:
+    """Whether Thai characters survive outside the matched slice."""
+    words = (text or "").split()
+    arabic_idx = _arabic_word_indices(words)
+    if not arabic_idx:
+        return bool(_THAI_CHAR.search(text or ""))
+    start = int(span.start_word)
+    end = int(span.end_word)
+    if start >= len(arabic_idx):
+        start = len(arabic_idx) - 1
+    if end >= len(arabic_idx):
+        end = len(arabic_idx) - 1
+    if end < start:
+        end = start
+    start_orig = arabic_idx[start]
+    end_orig = arabic_idx[end]
+    outside = words[:start_orig] + words[end_orig + 1 :]
+    return any(_THAI_CHAR.search(word) for word in outside)
 _MIN_ARABIC_CHARS = 4
 _MIN_ARABIC_RATIO = 0.45
 
@@ -98,21 +155,35 @@ def _replacement_for_span(
     translation: str | None = None
     source = _kind_source(kind, False)
 
-    match = quran.match_text(text)
-    if match is not None:
-        # Only overwrite the spoken transcription with the canonical verse when
-        # the match is exact or high-confidence verbatim. Otherwise keep the
+    span = quran.match_span(text)
+    if span is not None and span.tier in ("auto", "rescue"):
+        # Only overwrite when the match is strong enough; otherwise keep the
         # verbatim Whisper transcription and merely annotate the reference.
-        if quran.normalize_arabic(match.arabic) == quran.normalize_arabic(text) or match.score >= 0.88:
-            text = match.arabic
-            reference = match.reference
-            translation = match.thai
-            confidence = max(confidence, match.score)
+        span_len = span.end_word - span.start_word + 1
+        auto = span.tier == "auto" or (span.tier == "rescue" and span_len >= 6)
+        if auto:
+            text = replace_slice(text, span)
+            reference = span.reference
+            # Resolve thai translation from the candidate verse if possible.
+            try:
+                base = span.reference.split("-")[0]
+                parts = base.split(":")
+                if len(parts) == 2:
+                    verse = quran.lookup(int(parts[0]), int(parts[1]))
+                    if verse is not None:
+                        translation = verse.thai
+            except (ValueError, TypeError):  # noqa: BLE001
+                pass
+            confidence = max(confidence, span.score_orthographic)
             source = "quran"
         else:
-            reference = match.reference
-            confidence = max(confidence, match.score)
+            reference = span.reference
+            confidence = max(confidence, span.score_phonetic)
             source = "recitation"
+    elif span is not None and span.reference:
+        reference = span.reference
+        confidence = max(confidence, span.score_orthographic)
+        source = "recitation"
 
     return transcriber.Segment(
         id=-1,

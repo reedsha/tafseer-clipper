@@ -1,14 +1,7 @@
-"""Batched Arabic verification: corpus gate -> decision triage -> proofreader.
+"""Batched Arabic verification: corpus gate -> pure-algorithm span matching.
 
-This is the internal escalation chain from the decision-model plan:
-
-1. **Corpus** - an exact (normalized) Qur'an match passes without any model.
-2. **Triage** - one batched ``noul`` request per clip.  Only lines the decision
-   model flags reach the expensive proofreader.
-3. **Proofread** - today's per-line ``ARABIC_SYSTEM_PROMPT`` call.
-
-With no decision provider the function reproduces the per-line loop exactly:
-every non-corpus line is proofread, one call per line.
+No generative LLM is involved.  Each line is either an exact Qur'an verse,
+an auto-tier span match, a phonetic-rescue match, or reported as needing review.
 """
 
 from __future__ import annotations
@@ -18,15 +11,13 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-from services import analyzer, decision, decision_tasks, quran
+from services import quran
 from services.cancel import raise_if_cancelled
 
 logger = logging.getLogger("tafseer.verify")
 
-#: Batches larger than this are split; System One requests stay small.
 TRIAGE_BATCH_SIZE = 64
 
-#: Shown for a line that is not an exact Qur'an verse when no text model exists.
 NEEDS_MODEL_NOTE = (
     "A text model is required to proofread lines that are not exact Qur'an "
     "verses. Exact verses are still verified offline against the corpus."
@@ -45,7 +36,7 @@ class VerifyOutcome:
     verified_text: str
     correction_applied: bool
     notes: str
-    source: str = "proofread"
+    source: str = "quran"
     reference: str | None = None
     confidence: float | None = None
     cue_id: str | None = None
@@ -62,7 +53,6 @@ class VerifyBatchResult:
 
 
 def corpus_gate(text: str) -> VerifyOutcome | None:
-    """Pass a line instantly when it is an exact corpus verse (normalized)."""
     stripped = text.strip()
     match = quran.match_text(stripped)
     if match is None:
@@ -80,12 +70,6 @@ def corpus_gate(text: str) -> VerifyOutcome | None:
 
 
 def needs_model_outcome(line: VerifyLine) -> VerifyOutcome:
-    """Report a line that has no offline answer instead of failing the request.
-
-    The text is returned unchanged: nothing was proofread, so nothing may look
-    verified.  ``source="needs_model"`` tells the editor to configure a text
-    model for this line while the corpus-gated lines stay valid.
-    """
     return VerifyOutcome(
         verified_text=line.arabic_text,
         correction_applied=False,
@@ -98,130 +82,86 @@ def needs_model_outcome(line: VerifyLine) -> VerifyOutcome:
 async def verify_lines(
     lines: list[VerifyLine],
     *,
-    provider: analyzer.ProviderConfig | None,
-    decision_provider: decision.DecisionProviderConfig | None = None,
+    provider: Any = None,
+    decision_provider: Any = None,
     cancel_event: threading.Event | None = None,
 ) -> VerifyBatchResult:
-    """Verify every line through the escalation chain.
-
-    ``provider`` is the fast generative proofreader and may be ``None`` (offline
-    editing): a line the corpus or the triage pass cannot settle is returned
-    unchanged with ``source="needs_model"`` instead of failing the whole batch.
-    """
     outcomes: list[VerifyOutcome | None] = [None] * len(lines)
-    pending: list[int] = []
     corpus_count = 0
+    auto_count = 0
 
     for index, line in enumerate(lines):
+        raise_if_cancelled(cancel_event)
         gated = corpus_gate(line.arabic_text)
         if gated is not None:
             gated.cue_id = line.cue_id
             outcomes[index] = gated
             corpus_count += 1
-        else:
-            pending.append(index)
+            continue
 
-    triage_count = 0
-    proofread_count = 0
-
-    if decision_provider is not None and pending:
-        flagged, triaged_ok = await _triage(
-            lines, pending, provider=decision_provider, cancel_event=cancel_event
-        )
-        triage_count = triaged_ok
-        if flagged is None:
-            # Decision failure: fall back to today's per-line loop, never to a
-            # silent "everything is fine".
-            flagged = list(pending)
-        for index in pending:
-            if index in flagged:
-                continue
-            outcomes[index] = VerifyOutcome(
-                verified_text=lines[index].arabic_text,
-                correction_applied=False,
-                notes="The fast check suggests this line is already correct.",
-                source="triage",
-            )
-        pending = [index for index in pending if index in flagged]
-
-    for index in pending:
-        raise_if_cancelled(cancel_event)
-        line = lines[index]
-        if provider is None:
-            # Offline: the corpus and triage already answered what they could,
-            # the rest is reported honestly rather than failing the request.
+        span = quran.match_span(line.arabic_text)
+        if span is None or span.tier == "reject":
             outcomes[index] = needs_model_outcome(line)
             continue
-        result = await analyzer.verify_arabic(
-            arabic_text=line.arabic_text,
-            context_thai=line.context_thai,
-            provider=provider,
-        )
-        proofread_count += 1
-        outcomes[index] = VerifyOutcome(
-            verified_text=result["verified_text"],
-            correction_applied=bool(result["correction_applied"]),
-            notes=str(result["notes"]),
-            source="proofread",
-        )
+
+        if span.tier == "auto":
+            verified = span.matched_canonical.strip() or line.arabic_text
+            outcomes[index] = VerifyOutcome(
+                verified_text=verified,
+                correction_applied=verified != line.arabic_text.strip(),
+                notes=f"Matches the Qur'an corpus ({span.reference}).",
+                source="quran",
+                reference=span.reference,
+                confidence=span.score_orthographic,
+                cue_id=line.cue_id,
+            )
+            auto_count += 1
+            continue
+
+        if span.tier == "rescue":
+            span_len = span.end_word - span.start_word + 1
+            if span_len >= 6:
+                verified = span.matched_canonical.strip() or line.arabic_text
+                outcomes[index] = VerifyOutcome(
+                    verified_text=verified,
+                    correction_applied=verified != line.arabic_text.strip(),
+                    notes=f"Phonetic match ({span.reference}); review recommended.",
+                    source="quran",
+                    reference=span.reference,
+                    confidence=span.score_phonetic,
+                    cue_id=line.cue_id,
+                )
+                auto_count += 1
+                continue
+            outcomes[index] = VerifyOutcome(
+                verified_text=line.arabic_text,
+                correction_applied=False,
+                notes="Possible Qur'an verse (phonetic match) - review manually.",
+                source="needs_model",
+                reference=span.reference,
+                confidence=span.score_phonetic,
+                cue_id=line.cue_id,
+            )
+            continue
+
+        outcomes[index] = needs_model_outcome(line)
 
     final: list[VerifyOutcome] = []
     for index, item in enumerate(outcomes):
         if item is None:
             continue
         if item.cue_id is None:
-            # Preserve the caller's cue ids even on the proofread path.
             item.cue_id = lines[index].cue_id
         final.append(item)
 
     return VerifyBatchResult(
         lines=final,
-        model=provider.model if provider else (decision_provider.model if decision_provider else ""),
-        decision_model=decision_provider.model if decision_provider else None,
-        triage_lines=triage_count,
-        proofread_lines=proofread_count,
+        model="",
+        decision_model=None,
+        triage_lines=0,
+        proofread_lines=auto_count,
         corpus_lines=corpus_count,
     )
-
-
-async def _triage(
-    lines: list[VerifyLine],
-    indexes: list[int],
-    *,
-    provider: decision.DecisionProviderConfig,
-    cancel_event: threading.Event | None,
-) -> tuple[set[int] | None, int]:
-    """Return the set of line indexes that need a proofread.
-
-    ``(None, count)`` means the decision model failed; the caller must fall back
-    to proofreading every pending line.
-    """
-    flagged: set[int] = set()
-    triaged = 0
-    for offset in range(0, len(indexes), TRIAGE_BATCH_SIZE):
-        raise_if_cancelled(cancel_event)
-        chunk = indexes[offset : offset + TRIAGE_BATCH_SIZE]
-        payload = [
-            {
-                "arabic_text": lines[index].arabic_text,
-                "context_thai": lines[index].context_thai,
-            }
-            for index in chunk
-        ]
-        state, questions = decision_tasks.verify_triage_request(payload)
-        try:
-            answers = await decision.decide(
-                provider, state, questions, cancel_event=cancel_event
-            )
-        except decision.DecisionError as exc:
-            logger.warning("Verify triage failed; proofreading every line: %s", exc)
-            return None, triaged
-        decisions = decision_tasks.triage_from_answers(answers, len(chunk))
-        for item, line_index in zip(decisions, chunk):
-            if item.proofread is not False:
-                flagged.add(line_index)
-        triaged += len(chunk)
-    return flagged, triaged
 
 
 def outcome_payload(outcome: VerifyOutcome) -> dict[str, Any]:
