@@ -11,6 +11,14 @@ Conventional Commit into `main`, and a `chore(release): vX.Y.Z` pull request
 appears that bumps every version anchor and regenerates this file. Merging that
 pull request creates the `vX.Y.Z` tag and starts the Windows release build.
 
+## [0.5.0-beta](https://github.com/reedsha/tafseer-clipper/compare/v0.4.0-beta...v0.5.0-beta) (2026-11-25)
+
+
+### Features
+
+* **arabic:** offline corpus verification and first-pass recitation short-circuit ([4425b31](https://github.com/reedsha/tafseer-clipper/commit/4425b31554066947d93f5362908362f9994b5882))
+* **ui:** remove vocabulary hint, manage fonts, move analysis config to Step 1 ([381cc7b](https://github.com/reedsha/tafseer-clipper/commit/381cc7bc0aeb3e3c4b24f98384171806ef4cdf23))
+
 ## [0.4.0-beta](https://github.com/reedsha/tafseer-clipper/compare/v0.3.0-beta...v0.4.0-beta) (2026-11-24)
 
 
