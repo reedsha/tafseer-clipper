@@ -117,11 +117,8 @@ test.describe("app shell", () => {
     ).toBeVisible();
     await expect(page.getByText(/1\.5 GB/)).toBeVisible();
 
-    // The AI setup card is gone; its vocabulary hint now lives on this screen.
+    // The AI setup card is gone; transcription vocabulary hint removed.
     await expect(page.getByRole("heading", { name: "AI setup" })).toHaveCount(0);
-    await expect(
-      page.getByRole("textbox", { name: "Transcription vocabulary hint" }),
-    ).toBeVisible();
 
     // The engine is chosen on this screen instead of only behind the stage
     // gear, so a first-run editor never has to hunt for it…

@@ -166,7 +166,6 @@ test.describe("configuration screens", () => {
 
     for (const section of [
       "AI connection",
-      "Fast judgments",
       "GPU acceleration",
       "Storage & cache",
       "Engine & diagnostics",
@@ -498,24 +497,30 @@ test.describe("fast judgments", () => {
     });
 
     await goToWorkspace(page);
-    await openSettingsSection(page, "Fast judgments");
+    await openStepConfig(page, 1, "Upload");
 
     const probeButton = page.getByRole("button", { name: "Test", exact: true }).last();
 
     // Judgments cannot be turned off. With no model chosen the step explains
     // the fallback, and Test waits until there is something to test.
     await expect(
-      page.getByRole("switch", { name: "Arabic triage fast judgments" }),
+      page.getByRole("switch", { name: "Recitation & sentence breaks fast judgments" }),
     ).toHaveCount(0);
     await expect(
       page.getByText("No model chosen yet — this step uses the standard path.").first(),
     ).toBeVisible();
     await expect(probeButton).toBeDisabled();
 
+    // The analysis slot defaults to "this computer"; switch to the cloud
+    // account so the mocked /list-models feeds the picker.
     await page
-      .getByRole("button", { name: "Arabic triage model", exact: true })
+      .getByRole("button", { name: "Your AI account", exact: true })
       .click();
-    const listbox = page.getByRole("listbox", { name: "Arabic triage model" });
+
+    await page
+      .getByRole("button", { name: "Recitation & sentence breaks model", exact: true })
+      .click();
+    const listbox = page.getByRole("listbox", { name: "Recitation & sentence breaks model" });
     await expect(listbox.getByRole("option", { name: "jev-fast" })).toBeVisible();
     await expect(listbox.getByRole("option", { name: "nimble-decider" })).toBeVisible();
     // The decision picker filters strictly by the familiar decision-family name
@@ -538,7 +543,7 @@ test.describe("fast judgments", () => {
     const persisted = await page.evaluate(() =>
       JSON.parse(window.localStorage.getItem("tafseer.settings.v1") ?? "null"),
     );
-    expect(persisted.state.decisionSlots.verify_triage).toEqual({
+    expect(persisted.state.decisionSlots.analysis).toEqual({
       enabled: true,
       mode: "cloud",
       model: "jev-fast",
@@ -585,12 +590,13 @@ test.describe("model selector overflow", () => {
     });
 
     await goToWorkspace(page);
-    await openSettingsSection(page, "Fast judgments");
-    await page.getByRole("button", { name: "Arabic triage model", exact: true }).click();
+    await openStepConfig(page, 1, "Upload");
+    await page.getByRole("button", { name: "Your AI account", exact: true }).click();
+    await page.getByRole("button", { name: "Recitation & sentence breaks model", exact: true }).click();
 
     const popover = page.locator('[data-slot="popover-content"]');
     const scrollBox = popover.locator('[class~="max-h-60"]');
-    const listbox = page.getByRole("listbox", { name: "Arabic triage model" });
+    const listbox = page.getByRole("listbox", { name: "Recitation & sentence breaks model" });
 
     // Every model is still offered — the picker never truncates the list.
     await expect(listbox.getByRole("option")).toHaveCount(manyModels.length);
@@ -768,12 +774,14 @@ test.describe("model-type filtering", () => {
     });
 
     await goToWorkspace(page);
-    await openSettingsSection(page, "Fast judgments");
+    await openStepConfig(page, 1, "Upload");
 
-    const modelTrigger = page.getByRole("button", { name: "Arabic triage model", exact: true });
+    await page.getByRole("button", { name: "Your AI account", exact: true }).click();
+
+    const modelTrigger = page.getByRole("button", { name: "Recitation & sentence breaks model", exact: true });
     await modelTrigger.click();
 
-    const listbox = page.getByRole("listbox", { name: "Arabic triage model" });
+    const listbox = page.getByRole("listbox", { name: "Recitation & sentence breaks model" });
     await expect(listbox.getByRole("option", { name: "jev-fast" })).toBeVisible();
     await expect(listbox.getByRole("option", { name: "nimble-decider" })).toBeVisible();
     // The generative-only id fails the familiar decision-family name pattern.
@@ -782,11 +790,11 @@ test.describe("model-type filtering", () => {
     // opens a free-text field where an unfamiliar id stays reachable by typing
     // the exact name (the sanctioned escape, not silent suppression).
     await page.getByRole("button", { name: /Custom model name/ }).click();
-    const customInput = page.getByLabel("Arabic triage model (custom)");
+    const customInput = page.getByLabel("Recitation & sentence breaks model (custom)");
     await expect(customInput).toBeVisible();
     await customInput.fill("unrelated-llm");
     await expect(
-      page.getByRole("button", { name: "Arabic triage model", exact: true }),
+      page.getByRole("button", { name: "Recitation & sentence breaks model", exact: true }),
     ).toContainText("unrelated-llm");
   });
 
