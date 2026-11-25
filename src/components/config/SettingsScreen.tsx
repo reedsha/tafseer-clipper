@@ -98,7 +98,6 @@ import { cn } from "cn";
 function getSections(): { id: SettingsSection; label: string; icon: LucideIcon }[] {
   return [
   { id: "connection", label: L("AI connection"), icon: KeyRound },
-  { id: "judgments", label: L("Fast judgments"), icon: Sparkles },
   { id: "gpu", label: L("GPU acceleration"), icon: Cpu },
   { id: "storage", label: L("Storage & cache"), icon: FolderOpen },
   { id: "engine", label: L("Engine & diagnostics"), icon: Activity },
@@ -112,8 +111,6 @@ function getSections(): { id: SettingsSection; label: string; icon: LucideIcon }
 function getSectionDescriptions(): Record<SettingsSection, string> {
   return {
   connection: L("One AI connection for clip finding, Arabic checking and cloud speech-to-text — cloud or on this computer."),
-  judgments:
-    L("Small, fast models for yes/no and ranking decisions. They make each step quicker and fall back automatically when they are off."),
   gpu: L("Optional hardware acceleration. Everything falls back to the CPU automatically."),
   storage: L("Auto-save, the project folder and the temporary disk cache."),
   engine: L("Live status of the processing engine, plus a copyable support bundle."),
@@ -177,7 +174,6 @@ export function SettingsScreen() {
           </header>
           <div className="space-y-5">
             {settingsSection === "connection" ? <ConnectionSection /> : null}
-            {settingsSection === "judgments" ? <JudgmentsSection /> : null}
             {settingsSection === "gpu" ? <GpuSection /> : null}
             {settingsSection === "storage" ? <StorageSection /> : null}
             {settingsSection === "engine" ? <EngineSection /> : null}
@@ -414,18 +410,11 @@ const DECISION_SLOTS: {
     description:
       "Classifies each transcript segment, so the lecture is grouped before you reach Find Clips.",
   },
-  {
-    id: "verify_triage",
-    title: L("Arabic triage"),
-    hint: L("Step 3 · skips lines that are already correct"),
-    description:
-      "Checks which Arabic lines plausibly need a correction, so the proofreader only runs where it matters.",
-  },
 ];
 
 type ProbeState = { status: "idle" | "running" | "ok" | "failed"; detail: string };
 
-function JudgmentsSection() {
+export function JudgmentsSection() {
   const decisionSlots = useSettingsStore((state) => state.decisionSlots);
   const updateDecisionSlot = useSettingsStore((state) => state.updateDecisionSlot);
   const cloud = useSettingsStore((state) => state.cloud);
@@ -500,8 +489,8 @@ function JudgmentsSection() {
 
   return (
     <Section
-      title={L("Fast judgments")}
-      description="Small models for quick yes/no and ranking decisions. Each step uses its configured model automatically; if no model is set or the service is unreachable, that step quietly falls back to the way it works today."
+      title={L("Analysis model")}
+      description="A fast model that finds spoken Arabic and sentence boundaries during transcription. If no model is set or the service is unreachable, transcription falls back to the standard path."
     >
       <div className="space-y-3">
         {DECISION_SLOTS.map((slot) => {

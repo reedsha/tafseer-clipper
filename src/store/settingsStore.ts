@@ -214,6 +214,7 @@ export interface SettingsState extends SettingsData {
   updateStorage: (patch: Partial<StorageSettings>) => void;
 
   setImportedFonts: (fonts: FontInfo[], fontsDir: string | null) => void;
+  removeImportedFont: (key: string) => void;
 
   createPreset: (name: string) => string;
   renamePreset: (id: string, name: string) => void;
@@ -774,6 +775,13 @@ export const useSettingsStore = create<SettingsState>()(
             fontsDir: fontsDir ?? state.fontsDir,
           };
         }),
+
+      removeImportedFont: (key) =>
+        set((state) => ({
+          importedFonts: state.importedFonts.filter(
+            (font) => `${font.family}::${font.style}` !== key,
+          ),
+        })),
 
       createPreset: (name) => {
         const id = crypto.randomUUID();

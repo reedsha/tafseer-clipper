@@ -37,9 +37,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { extractAndTranscribe } from "@/lib/api";
 import { buildAiBrief } from "@/lib/aiChatBrief";
@@ -83,7 +81,6 @@ export function Step1Ingest() {
   const cloud = useSettingsStore((state) => state.cloud);
   const cloudStt = useSettingsStore((state) => state.cloudStt);
   const whisper = useSettingsStore((state) => state.whisper);
-  const updateWhisper = useSettingsStore((state) => state.updateWhisper);
   const sidecar = useSettingsStore((state) => state.sidecar);
   const aiEntries = useAiActivityStore((state) => state.entries);
   const activeTranscription =
@@ -399,7 +396,6 @@ export function Step1Ingest() {
             {
               file_path: sourcePath,
               use_local_whisper: settings.transcriptionMode === "local",
-              initial_prompt: settings.whisper.initialPrompt,
               language: settings.editor.language || null,
               glossary,
               model: settings.transcriptionMode === "local" ? settings.whisper.model : null,
@@ -838,31 +834,6 @@ export function Step1Ingest() {
             </div>
 
             <aside className="space-y-4">
-              <section className="rounded-lg border border-border bg-card/40 p-4">
-                <div className="space-y-0.5">
-                  <Label
-                    htmlFor="transcription-vocabulary"
-                    className="text-[13px] font-medium text-foreground"
-                  >
-                    Transcription vocabulary hint
-                  </Label>
-                  <p className="text-xs leading-relaxed text-muted-foreground">
-                    Words the recognizer should expect when a Thai lecture switches to Arabic —
-                    for example อัลลอฮฺ, อัลกุรอาน, ซูเราะฮฺ. This is a hint, not a command: it nudges
-                    spelling without changing what was said. It applies to both transcription
-                    engines when the service accepts a prompt.
-                  </p>
-                </div>
-                <Textarea
-                  id="transcription-vocabulary"
-                  value={whisper.initialPrompt}
-                  onChange={(event) => updateWhisper({ initialPrompt: event.target.value })}
-                  rows={5}
-                  spellCheck={false}
-                  className="mt-2 resize-y font-mono text-xs leading-relaxed"
-                />
-              </section>
-
               <section className="rounded-lg border border-border bg-card/40 p-4">
                 <div className="space-y-0.5">
                   <h2 className="text-[13px] font-medium text-foreground">

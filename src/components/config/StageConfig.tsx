@@ -67,6 +67,7 @@ import {
   type ThaiStyle,
 } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
+import { JudgmentsSection } from "@/components/config/SettingsScreen";
 import { cn } from "cn";
 
 import {
@@ -400,6 +401,10 @@ function Stage1Config() {
           Add pair
         </Button>
       </Section>
+
+      <Separator />
+
+      <JudgmentsSection />
     </>
   );
 }
@@ -1156,8 +1161,7 @@ function Stage3Config() {
   const setImportedFonts = useSettingsStore((state) => state.setImportedFonts);
   const editor = useSettingsStore((state) => state.editor);
   const updateEditor = useSettingsStore((state) => state.updateEditor);
-  const verificationProvider = useSettingsStore((state) => state.verificationProvider);
-  const updateVerificationProvider = useSettingsStore((state) => state.updateVerificationProvider);
+
   const project = useProjectStore((state) => state.project);
 
   const fontInputRef = useRef<HTMLInputElement>(null);
@@ -1448,8 +1452,8 @@ function Stage3Config() {
           <Separator />
 
           <Section
-            title={L("Custom fonts")}
-            description={L("Fonts are added to the app so exported subtitles always render Thai and Uthmani Arabic correctly.")}
+            title={L("Fonts")}
+            description={L("Fonts available to the app so exported subtitles always render Thai and Uthmani Arabic correctly. Import .TTF/.OTF files or remove ones you no longer need.")}
           >
             <div className="flex flex-wrap items-center gap-2">
               <input
@@ -1475,27 +1479,40 @@ function Stage3Config() {
                 {L("Import .TTF / .OTF")}
               </Button>
               <span className="text-[11px] text-muted-foreground">
-                {importedFonts.length} custom font
+                {importedFonts.length} font
                 {importedFonts.length === 1 ? "" : "s"} available
               </span>
             </div>
 
             {importedFonts.length > 0 ? (
               <div className="flex flex-wrap gap-1.5">
-                {importedFonts.map((font) => (
-                  <Badge
-                    key={`${font.family}::${font.style}`}
-                    variant="secondary"
-                    className="font-normal"
-                  >
-                    {font.family}
-                    <span className="ml-1 text-muted-foreground">{font.style}</span>
-                  </Badge>
-                ))}
+                {importedFonts.map((font) => {
+                  const key = `${font.family}::${font.style}`;
+                  return (
+                    <Badge
+                      key={key}
+                      variant="secondary"
+                      className="font-normal"
+                    >
+                      {font.family}
+                      <span className="ml-1 text-muted-foreground">{font.style}</span>
+                      <button
+                        type="button"
+                        className="ml-1.5 inline-flex items-center text-muted-foreground hover:text-foreground"
+                        aria-label={`Remove ${font.family} ${font.style}`}
+                        onClick={() =>
+                          useSettingsStore.getState().removeImportedFont(key)
+                        }
+                      >
+                        <Trash2 className="size-3" />
+                      </button>
+                    </Badge>
+                  );
+                })}
               </div>
             ) : (
               <p className="text-xs text-muted-foreground">
-                {L("No custom fonts imported yet — system fonts are used until you import.")}
+                {L("No fonts imported yet — system fonts are used until you import.")}
               </p>
             )}
 
@@ -1510,40 +1527,11 @@ function Stage3Config() {
 
           <Section
             title={L("Arabic verification")}
-            description={L("Checks the Uthmani Quranic/Hadith spelling of each Arabic line in Step 3. Used for Arabic spelling checks only and defaults to the Find Clips model.")}
+            description={L("Checks each Arabic line in Step 3 against the Qur'an corpus offline. No AI model is used; non-Qur'an lines are reported for manual review.")}
           >
-            <SegmentedToggle<"inherit" | "local" | "cloud">
-              label={L("Verification model")}
-              value={verificationProvider.mode}
-              options={[
-                { value: "inherit", label: L("Inherit") },
-                { value: "local", label: L("This computer") },
-                { value: "cloud", label: L("AI service") },
-              ]}
-              onChange={(mode) => updateVerificationProvider({ mode })}
-            />
-            {verificationProvider.mode === "inherit" ? (
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                {L("Uses the same engine and model chosen for clip finding. Change them in the Find Clips configuration.")}
-              </p>
-            ) : (
-              <Field
-                label="Model"
-                hint={
-                  verificationProvider.mode === "cloud"
-                    ? L("From your AI connection")
-                    : L("Installed Ollama models")
-                }
-              >
-                <ModelSelect
-                  source={verificationProvider.mode === "cloud" ? "cloud" : "ollama"}
-                  label="Arabic verification model"
-                  filter="text"
-                  value={verificationProvider.model}
-                  onChange={(value) => updateVerificationProvider({ model: value })}
-                />
-              </Field>
-            )}
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {L("Arabic verification is fully offline — no model selection needed.")}
+            </p>
           </Section>
         </div>
       </div>

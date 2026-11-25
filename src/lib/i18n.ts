@@ -363,6 +363,7 @@ const TH_BY_EN: Record<string, string> = {
   "Cut buffer padding": "กันชนการตัด",
   "Style presets": "พรีเซ็ตสไตล์",
   "Custom fonts": "ฟอนต์ที่เพิ่มเอง",
+  "Fonts": "ฟอนต์",
   "Arabic verification": "การตรวจภาษาอาหรับ",
   "Add preset": "เพิ่มพรีเซ็ต",
   "New preset": "พรีเซ็ตใหม่",
@@ -549,6 +550,8 @@ const TH_BY_EN: Record<string, string> = {
   "Checks the Uthmani Quranic/Hadith spelling of each Arabic line in Step 3. Used for Arabic spelling checks only and defaults to the Find Clips model.":
     "ตรวจการสะกดตามอุษมานีของข้อความอัลกุรอานและหะดีษในขั้นตอนที่ 3 ใช้เฉพาะการตรวจภาษาอาหรับ และใช้โมเดลเดียวกับการค้นหาคลิปตามค่าเริ่มต้น",
   "No custom fonts imported yet — system fonts are used until you import.":
+    "ยังไม่มีฟอนต์ที่เพิ่มเอง ระบบจะใช้ฟอนต์ของเครื่องจนกว่าจะนำเข้า",
+  "No fonts imported yet — system fonts are used until you import.":
     "ยังไม่มีฟอนต์ที่เพิ่มเอง ระบบจะใช้ฟอนต์ของเครื่องจนกว่าจะนำเข้า",
   "Uses the same engine and model chosen for clip finding. Change them in the Find Clips configuration.":
     "ใช้เครื่องมือและโมเดลเดียวกับการค้นหาคลิป เปลี่ยนได้ในการตั้งค่าค้นหาคลิป",

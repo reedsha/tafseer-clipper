@@ -4,7 +4,6 @@ import { create } from "zustand";
 /** Sections of the full-page Settings screen (left sidebar entries). */
 export type SettingsSection =
   | "connection"
-  | "judgments"
   | "gpu"
   | "storage"
   | "engine"
