@@ -690,16 +690,17 @@ function PresetGrid({
       {presets.map((preset) => {
         const editing = preset.id === editingPresetId;
         return (
-          <button
+          <Button
             key={preset.id}
             type="button"
+            variant="ghost"
             onClick={() => onPick(preset)}
             aria-pressed={editing}
             className={cn(
-              "flex min-w-0 flex-col gap-1.5 rounded-md border p-1.5 text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              "h-auto min-w-0 flex-col items-stretch justify-start gap-1.5 rounded-md border p-1.5 text-left font-normal whitespace-normal focus-visible:ring-2 focus-visible:ring-ring",
               editing
-                ? "border-ring/50 bg-accent/40"
-                : "border-border bg-card/40 hover:border-ring/30 hover:bg-accent/20",
+                ? "border-ring/50 bg-accent/40 hover:bg-accent/40 dark:hover:bg-accent/40"
+                : "border-border bg-card/40 hover:border-ring/30 hover:bg-accent/20 dark:hover:bg-accent/20",
             )}
           >
             <PresetSwatch preset={preset} />
@@ -711,7 +712,7 @@ function PresetGrid({
                 AR {preset.arabic.fontSize} · TH {preset.thai.fontSize}
               </span>
             </span>
-          </button>
+          </Button>
         );
       })}
     </div>
@@ -1496,16 +1497,18 @@ function Stage3Config() {
                     >
                       {font.family}
                       <span className="ml-1 text-muted-foreground">{font.style}</span>
-                      <button
+                      <Button
                         type="button"
-                        className="ml-1.5 inline-flex items-center text-muted-foreground hover:text-foreground"
+                        variant="ghost"
+                        size="icon-xs"
+                        className="ml-1.5 size-4 rounded-sm p-0 text-muted-foreground hover:bg-transparent hover:text-foreground dark:hover:bg-transparent"
                         aria-label={`Remove ${font.family} ${font.style}`}
                         onClick={() =>
                           useSettingsStore.getState().removeImportedFont(key)
                         }
                       >
                         <Trash2 className="size-3" />
-                      </button>
+                      </Button>
                     </Badge>
                   );
                 })}

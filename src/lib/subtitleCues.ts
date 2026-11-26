@@ -14,7 +14,33 @@
  */
 
 import type { SubtitleCue, TranscriptSegment } from "@/lib/projectTypes";
-import { wrapSubtitleText } from "@/lib/subtitleWrap";
+import { arabicVisualLength, wrapArabicText, wrapSubtitleText } from "@/lib/subtitleWrap";
+
+type SegmenterLike<T> = { segment(input: string): Iterable<T> };
+type SegmenterCtor = new (
+  locales?: string,
+  options?: { granularity: "grapheme" | "word" | "sentence" },
+) => SegmenterLike<{ segment: string; index: number }>;
+
+const _SegmenterClass = (Intl as unknown as { Segmenter?: SegmenterCtor }).Segmenter;
+
+const GRAPHEME_SEGMENTER: SegmenterLike<{ segment: string; index: number }> | null = (() => {
+  if (!_SegmenterClass) return null;
+  try {
+    return new _SegmenterClass(undefined, { granularity: "grapheme" });
+  } catch {
+    return null;
+  }
+})();
+
+const THAI_WORD_SEGMENTER: SegmenterLike<{ segment: string; index: number }> | null = (() => {
+  if (!_SegmenterClass) return null;
+  try {
+    return new _SegmenterClass("th", { granularity: "word" });
+  } catch {
+    return null;
+  }
+})();
 
 const ARABIC_RUN = /[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]+/g;
 const THAI_CHAR = /[\u0E00-\u0E7F]/;
@@ -152,44 +178,34 @@ function buildLetters(
     }
 
     // Segment into grapheme clusters so combining marks share their base
-    // character's timestamp window instead of receiving acoustic duration.
+    // character's timestamp window instead of receiving acoustic duration, while
+    // keeping one Letter entry per UTF-16 code unit so Intl.Segmenter indices
+    // align even when astral code points are present.
     let graphemes: string[] = [];
-    try {
-      const Segmenter = (Intl as unknown as {
-        Segmenter?: new (
-          locales?: string,
-          options?: { granularity: "grapheme" },
-        ) => { segment(input: string): Iterable<{ segment: string }> };
-      }).Segmenter;
-      if (Segmenter) {
-        graphemes = [...new Segmenter(undefined, { granularity: "grapheme" }).segment(source)].map(
-          (part) => part.segment,
-        );
+    if (GRAPHEME_SEGMENTER) {
+      try {
+        graphemes = [...GRAPHEME_SEGMENTER.segment(source)].map((part) => part.segment);
+      } catch {
+        graphemes = [];
       }
-    } catch {
-      graphemes = [];
     }
     if (graphemes.length === 0) {
       graphemes = Array.from(source);
     }
     const graphemeCount = graphemes.length;
-    let codeIndex = 0;
     for (let g = 0; g < graphemeCount; g += 1) {
       const cluster = graphemes[g];
       const clusterStart = start + ((end - start) * g) / graphemeCount;
       const clusterEnd = start + ((end - start) * (g + 1)) / graphemeCount;
-      // The first code unit is the base; combining marks share its window.
-      const chars = Array.from(cluster);
-      for (let c = 0; c < chars.length; c += 1) {
+      for (let c = 0; c < cluster.length; c += 1) {
         letters.push({
-          char: chars[c],
+          char: cluster[c],
           start: clusterStart,
           end: clusterEnd,
           sentenceId: segment.sentence_id ?? null,
           segmentId: segment.id,
         });
       }
-      codeIndex += chars.length;
     }
     cursor = end;
   }
@@ -216,31 +232,16 @@ function wordsFromLetters(letters: Letter[], pick: "thai" | "arabic"): Word[] {
     });
   };
 
-  if (pick === "thai") {
-    const Segmenter = (
-      Intl as unknown as {
-        Segmenter?: new (
-          locales?: string,
-          options?: { granularity: "word" | "grapheme" | "sentence" },
-        ) => { segment(input: string): Iterable<{ segment: string; index: number }> };
+  if (pick === "thai" && THAI_WORD_SEGMENTER) {
+    try {
+      for (const part of THAI_WORD_SEGMENTER.segment(text)) {
+        if (!part.segment.trim()) continue;
+        push(part.index, part.segment.length, part.segment);
       }
-    ).Segmenter;
-    if (Segmenter) {
-      try {
-        const segmenter = new Segmenter("th", { granularity: "word" });
-        for (const part of segmenter.segment(text)) {
-          if (!part.segment.trim()) continue;
-          push(part.index, part.segment.length, part.segment);
-        }
-        return words;
-      } catch {
-        /* Fall through. */
-      }
+      return words;
+    } catch {
+      /* Fall through. */
     }
-    const regex = /\S+/g;
-    let match: RegExpExecArray | null;
-    while ((match = regex.exec(text))) push(match.index, match[0].length, match[0]);
-    return words;
   }
 
   const regex = /\S+/g;
@@ -264,25 +265,6 @@ function joinWords(words: Word[]): string {
     previous = text;
   }
   return out.trim();
-}
-
-function wrapSpacedText(text: string, maxChars: number): string {
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  if (!words.length || maxChars <= 0) return text.trim();
-  const lines: string[] = [];
-  let line = "";
-  for (const word of words) {
-    if (!line) {
-      line = word;
-    } else if (line.length + 1 + word.length <= maxChars) {
-      line += ` ${word}`;
-    } else {
-      lines.push(line);
-      line = word;
-    }
-  }
-  if (line) lines.push(line);
-  return lines.join("\n");
 }
 
 /** Deterministic grouping when the LLM sentence map is absent. */
@@ -340,6 +322,7 @@ function splitByCaps(
   words: Word[],
   maxChars: number,
   maxDuration: number,
+  measureLength: (text: string) => number = (text) => text.length,
 ): Word[][] {
   const chunks: Word[][] = [];
   let current: Word[] = [];
@@ -350,7 +333,7 @@ function splitByCaps(
     }
     const candidate = joinWords([...current, word]);
     const span = word.end - current[0].start;
-    if (candidate.length > maxChars || span > maxDuration) {
+    if (measureLength(candidate) > maxChars || span > maxDuration) {
       chunks.push(current);
       current = [word];
     } else {
@@ -440,11 +423,11 @@ function emitArabicCues(
           translation: segment.translation ?? undefined,
         }
       : {};
-    const chunks = splitByCaps(group, maxCharsPerCue, MAX_CUE_SECONDS);
+    const chunks = splitByCaps(group, maxCharsPerCue, MAX_CUE_SECONDS, arabicVisualLength);
     for (const chunk of chunks) {
       const start = chunk[0].start;
       const end = chunk[chunk.length - 1].end;
-      const arabic = wrapSpacedText(joinWords(chunk), arabicMaxChars);
+      const arabic = wrapArabicText(joinWords(chunk), arabicMaxChars);
       pushCue(cues, start, end, arabic, "", metadata);
     }
   }

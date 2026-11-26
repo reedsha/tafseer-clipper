@@ -8,12 +8,15 @@
 //! does business work.
 
 mod acceleration;
+mod job_object;
+mod secrets;
 
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{Emitter, Manager, WindowEvent};
@@ -52,6 +55,8 @@ const SIDECAR_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 struct SidecarState {
     /// `None` when spawning failed; the renderer then talks to the fallback port.
     child: Mutex<Option<CommandChild>>,
+    /// Win32 Job Object owning the sidecar tree (`KILL_ON_JOB_CLOSE` on drop).
+    job_object: Mutex<Option<job_object::SidecarJobObject>>,
     /// Kept so `set_running_jobs` can refresh the tooltip.
     tray: Mutex<Option<TrayIcon>>,
     /// Number of tasks the renderer reports as running; drives the close dialog
@@ -131,12 +136,12 @@ fn spawn_sidecar(
     app: &tauri::AppHandle,
     paths: &SidecarPaths,
     cuda_dir: Option<&Path>,
-) -> (Option<CommandChild>, Option<u16>) {
+) -> (Option<CommandChild>, Option<job_object::SidecarJobObject>, Option<u16>) {
     let Some(executable) = sidecar_executable(app) else {
         eprintln!(
             "[tafseer] falling back to 127.0.0.1:{FALLBACK_SIDECAR_PORT}"
         );
-        return (None, None);
+        return (None, None, None);
     };
     let command = app.shell().command(&executable);
 
@@ -160,8 +165,17 @@ fn spawn_sidecar(
 
     match command.spawn() {
         Ok((mut events, child)) => {
+            let job = job_object::SidecarJobObject::create();
+            if let Some(ref job_obj) = job {
+                if !job_obj.assign_pid(child.pid()) {
+                    eprintln!(
+                        "[tafseer] warning: could not attach backend.exe (pid {}) to job object",
+                        child.pid()
+                    );
+                }
+            }
             // Read the stdout handshake (TAFSEER_SIDECAR_READY:port=XXXXX) with
-            // a 10s timeout before draining the rest of the pipes.
+            // a 30s timeout before draining the rest of the pipes.
             let (tx, rx) = mpsc::channel::<Option<u16>>();
             let tx_clone = tx.clone();
             tauri::async_runtime::spawn(async move {
@@ -226,7 +240,7 @@ fn spawn_sidecar(
                 .recv_timeout(SIDECAR_HANDSHAKE_TIMEOUT + Duration::from_secs(1))
                 .ok()
                 .flatten();
-            (Some(child), port)
+            (Some(child), job, port)
         }
         Err(error) => {
             eprintln!(
@@ -234,7 +248,7 @@ fn spawn_sidecar(
                  falling back to 127.0.0.1:{FALLBACK_SIDECAR_PORT}",
                 executable.display()
             );
-            (None, None)
+            (None, None, None)
         }
     }
 }
@@ -256,6 +270,13 @@ fn stop_sidecar(app: &tauri::AppHandle) {
             Err(error) => eprintln!("[tafseer] failed to stop backend.exe (pid {pid}): {error}"),
         }
     }
+    // Dropping the Job Object handle closes the final reference and tears down
+    // any lingering FFmpeg/worker child processes in the sidecar tree.
+    let _ = state
+        .job_object
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
 }
 
 /// Bring the main window back from the tray.
@@ -294,6 +315,146 @@ fn grant_project_folder_scope(app: tauri::AppHandle, folder_path: String) -> Res
     let scope = app.fs_scope();
     scope.allow_directory(&path, true).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn nearest_canonical_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if let Ok(canon) = std::fs::canonicalize(dir) {
+            return Some(canon);
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+fn is_under_allowed_base(app: &tauri::AppHandle, target: &Path) -> bool {
+    let Some(ancestor) = nearest_canonical_ancestor(target) else {
+        return false;
+    };
+    let candidates = [
+        Some(local_app_data_dir(app)),
+        app.path().local_data_dir().ok(),
+        app.path().app_data_dir().ok(),
+        app.path().data_dir().ok(),
+        app.path().config_dir().ok(),
+        app.path().home_dir().ok(),
+        app.path().document_dir().ok(),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .any(|root| ancestor.starts_with(root))
+}
+
+fn validate_atomic_project_path(app: &tauri::AppHandle, path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("Project file path must be absolute".to_string());
+    }
+    if path.components().any(|component| matches!(component, Component::ParentDir)) {
+        return Err("Parent directory traversal is not permitted in project paths".to_string());
+    }
+    let ext_ok = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("tafseer"));
+    if !ext_ok {
+        return Err("Atomic project writes are limited to .tafseer files".to_string());
+    }
+    if app.fs_scope().is_allowed(path) || is_under_allowed_base(app, path) {
+        return Ok(());
+    }
+    Err(format!(
+        "Access denied: {} is outside the allowed project scope",
+        path.display()
+    ))
+}
+
+fn atomic_replace_file(target: &Path, contents: &str) -> Result<(), String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| "Target path has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Target path has no file name".to_string())?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_path = parent.join(format!(
+        ".{file_name}.tmp.{}.{nanos}",
+        std::process::id()
+    ));
+
+    let write_res = (|| -> Result<(), String> {
+        let mut file = std::fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+        file.write_all(contents.as_bytes()).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    if let Err(err) = write_res {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        let src_wide: Vec<u16> = tmp_path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let dst_wide: Vec<u16> = target
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: Both buffers are NUL-terminated UTF-16 paths pointing to valid stack allocations.
+        let ok = unsafe {
+            MoveFileExW(
+                src_wide.as_ptr(),
+                dst_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ok == 0 {
+            let err = std::io::Error::last_os_error();
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("Atomic replace failed: {err}"));
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Err(err) = std::fs::rename(&tmp_path, target) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("Atomic replace failed: {err}"));
+        }
+    }
+
+    Ok(())
+}
+
+/// Write a `.tafseer` snapshot via a sibling temp file, fsync, and atomic replace.
+#[tauri::command]
+fn write_project_file_atomic(
+    app: tauri::AppHandle,
+    path: String,
+    contents: String,
+) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    validate_atomic_project_path(&app, &target)?;
+    atomic_replace_file(&target, &contents)
 }
 
 /// Renderer → shell: how many tasks are running. Drives the close dialog and
@@ -349,6 +510,9 @@ pub fn run() {
             acceleration::acceleration_status,
             acceleration::download_acceleration_pack,
             grant_project_folder_scope,
+            write_project_file_atomic,
+            secrets::protect_secret,
+            secrets::unprotect_secret,
             set_running_jobs,
             quit_app,
             minimize_to_tray
@@ -361,19 +525,20 @@ pub fn run() {
             // An installed GPU acceleration pack is handed to the sidecar as
             // TAFSEER_CUDA_DIR; an invalid marker is ignored (CPU fallback).
             let cuda_dir = acceleration::installed_cuda_dir(app.handle());
-            let (child, negotiated_port) = spawn_sidecar(app.handle(), &paths, cuda_dir.as_deref());
+            let (mut child, mut job_object, negotiated_port) =
+                spawn_sidecar(app.handle(), &paths, cuda_dir.as_deref());
             if child.is_some() && negotiated_port.is_none() {
                 eprintln!(
                     "[tafseer] the sidecar started but never announced its port; \
-                     falling back to 127.0.0.1:{FALLBACK_SIDECAR_PORT}"
+                     stopping hung process and falling back to 127.0.0.1:{FALLBACK_SIDECAR_PORT}"
                 );
+                if let Some(hung) = child.take() {
+                    let _ = hung.kill();
+                }
+                job_object.take();
             }
             let port = negotiated_port.unwrap_or(FALLBACK_SIDECAR_PORT);
-            let sidecar_url = if child.is_some() {
-                format!("http://127.0.0.1:{port}")
-            } else {
-                format!("http://127.0.0.1:{FALLBACK_SIDECAR_PORT}")
-            };
+            let sidecar_url = format!("http://127.0.0.1:{port}");
 
             // A tray icon is the "keep running" affordance: closing with active
             // tasks can hide the window here while the sidecar finishes them.
@@ -412,6 +577,7 @@ pub fn run() {
             // call from the renderer always finds the state.
             app.manage(SidecarState {
                 child: Mutex::new(child),
+                job_object: Mutex::new(job_object),
                 tray: Mutex::new(Some(tray)),
                 running_jobs: AtomicUsize::new(0),
             });
@@ -464,4 +630,33 @@ pub fn run() {
             stop_sidecar(app_handle);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::atomic_replace_file;
+
+    #[test]
+    fn atomic_replace_creates_and_overwrites_without_temp_leftovers() {
+        let dir = std::env::temp_dir().join(format!(
+            "tafseer-atomic-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = dir.join("nested").join("project.tafseer");
+
+        atomic_replace_file(&target, "{\"v\":1}").expect("initial atomic write");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"v\":1}");
+
+        atomic_replace_file(&target, "{\"v\":2}").expect("overwrite atomic write");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"v\":2}");
+
+        let leftovers: Vec<_> = std::fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected temp files left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

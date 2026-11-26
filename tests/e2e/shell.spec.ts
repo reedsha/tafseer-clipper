@@ -150,6 +150,48 @@ test.describe("app shell", () => {
     ).toBeVisible();
   });
 
+  test("Step 1 surfaces missing acceleration runtime even when GPU encoding works", async ({
+    page,
+  }) => {
+    await page.route("**/health*", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "ok",
+          version: "0.5.1-beta",
+          cuda_available: false,
+          nvenc_available: true,
+          vram_mb: 8192,
+          ffmpeg_available: true,
+          ffmpeg_path: "ffmpeg",
+          ffprobe_available: true,
+          fonts_dir: "fonts",
+          work_dir: "work",
+          disk_cache_bytes: 0,
+          whisper: { model: "tiny", loaded: false, device: "cpu", compute_type: "int8" },
+          acceleration: {
+            transcription: "cpu",
+            encoding: "gpu",
+            gpu_detected: true,
+            gpu_name: "GeForce Test",
+            cuda_runtime: false,
+            pack_installed: false,
+            reason: "cuda-runtime-missing",
+          },
+          providers: { ollama: { detected: false, url: null, models: [] }, whisper_local: { models: [] } },
+          hardware: { tier: "medium" },
+        }),
+      });
+    });
+
+    await goToWorkspace(page);
+    await expect(page.getByRole("button", { name: "Engine ready" })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(page.getByText(/acceleration runtime is not installed/)).toBeVisible();
+  });
+
   test("the import dialog clears the desktop title bar", async ({ page }) => {
     await seedResumableProject(page);
     await goToWorkspace(page);

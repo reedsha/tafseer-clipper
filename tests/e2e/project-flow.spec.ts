@@ -113,6 +113,8 @@ test.describe("project flow", () => {
     await expect(page.getByText("Batch rendered")).toBeVisible();
     await expect(queueRow.getByText("Rendered", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Render again" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Open folder" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Copy path" })).toBeVisible();
     // No clip may be left queued after the terminal `done` event.
     await expect(page.getByText("Queued", { exact: true })).toBeHidden();
   });

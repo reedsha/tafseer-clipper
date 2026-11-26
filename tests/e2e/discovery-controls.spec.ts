@@ -297,4 +297,94 @@ test.describe("Step 2 search orchestration", () => {
     await expect(page.getByText("Overlaps: Charity in secret")).toBeVisible();
     await expect(page.getByText("Overlaps: The patience of Ayyub")).toBeVisible();
   });
+
+  test("forwards non-empty sessionGuide in session_guide payload", async ({ page }) => {
+    await page.addInitScript((settings) => {
+      if (window.location.protocol !== "http:") return;
+      window.localStorage.setItem("tafseer.settings.v1", JSON.stringify(settings));
+    }, SETTINGS);
+    await seedProjectFile(page, {
+      ...NO_CLIPS_PROJECT,
+      id: "e2e00000-0000-4000-8000-000000000006",
+      name: "Guided-session",
+      sessionGuide: "Surah Al-Asr and patience",
+    });
+
+    const discoveryBodies: Record<string, unknown>[] = [];
+    await page.route("**/discover-clips", async (route) => {
+      discoveryBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ clips: [], model: "test-model", excluded_ranges_applied: 0 }),
+      });
+    });
+
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Guided-session/ })
+      .first()
+      .click();
+    await page.getByRole("button", { name: "Find clips", exact: true }).last().click();
+    await expect.poll(() => discoveryBodies.length).toBe(1);
+    expect(discoveryBodies[0]).toMatchObject({
+      session_guide: "Surah Al-Asr and patience",
+    });
+  });
+
+  test("consumes text/event-stream progress and renders final clips from /discover-clips", async ({
+    page,
+  }) => {
+    await page.addInitScript((settings) => {
+      if (window.location.protocol !== "http:") return;
+      window.localStorage.setItem("tafseer.settings.v1", JSON.stringify(settings));
+    }, SETTINGS);
+    await seedProjectFile(page, {
+      ...NO_CLIPS_PROJECT,
+      id: "e2e00000-0000-4000-8000-000000000007",
+      name: "SSE-discovery-session",
+    });
+
+    let sawAcceptHeader = false;
+    await page.route("**/discover-clips", async (route) => {
+      const accept = route.request().headers()["accept"] ?? "";
+      sawAcceptHeader = accept.includes("text/event-stream");
+      const donePayload = {
+        clips: [
+          {
+            start: 10,
+            end: 40,
+            title: "Streamed SSE clip",
+            rationale: "Delivered over SSE progress stream.",
+          },
+        ],
+        model: "test-model",
+        excluded_ranges_applied: 0,
+      };
+      const sseBody = [
+        ": keepalive\n\n",
+        `event: start\ndata: ${JSON.stringify({ stage: "planning", progress: 0.0, label: "Preparing clip search…" })}\n\n`,
+        `event: progress\ndata: ${JSON.stringify({ stage: "discovering", progress: 0.5, label: "Scanning section 1 of 2…", done: 1, total: 2 })}\n\n`,
+        `event: done\ndata: ${JSON.stringify(donePayload)}\n\n`,
+      ].join("");
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream; charset=utf-8",
+        body: sseBody,
+      });
+    });
+
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /SSE-discovery-session/ })
+      .first()
+      .click();
+    await page.getByRole("button", { name: "Find clips", exact: true }).last().click();
+
+    await expect(page.getByText("Streamed SSE clip", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Clip proposals ready")).toBeVisible();
+    expect(sawAcceptHeader).toBe(true);
+  });
 });

@@ -17,6 +17,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Copy, Minus, Square, X } from "lucide-react";
 
 import { BrandMark } from "@/components/BrandMark";
+import { Button } from "@/components/ui/button";
 import { L } from "@/lib/i18n";
 import { isDesktopRuntime } from "@/lib/projectFile";
 import { cn } from "cn";
@@ -33,20 +34,21 @@ interface TitleBarButtonProps {
 
 function TitleBarButton({ label, onClick, close, children }: TitleBarButtonProps) {
   return (
-    <button
+    <Button
       type="button"
+      variant="ghost"
       aria-label={label}
       title={label}
       onClick={onClick}
       className={cn(
-        "flex h-full w-11 items-center justify-center text-muted-foreground transition-colors",
-        "hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:outline-none",
+        "h-full w-11 rounded-none px-0 py-0 text-muted-foreground",
+        "hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:ring-0",
         close &&
-          "hover:bg-destructive hover:text-destructive-foreground focus-visible:bg-destructive focus-visible:text-destructive-foreground",
+          "hover:bg-destructive hover:text-destructive-foreground dark:hover:bg-destructive focus-visible:bg-destructive focus-visible:text-destructive-foreground",
       )}
     >
       {children}
-    </button>
+    </Button>
   );
 }
 

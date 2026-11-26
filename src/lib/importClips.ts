@@ -205,7 +205,7 @@ export function parseImportedClips(
 
   let thinned = false;
   let rows = valid;
-  if (hasDuration && totalCount > floodCeiling(duration)) {
+  if (hasDuration && valid.length > floodCeiling(duration)) {
     rows = thinEvenly(valid, floodCeiling(duration));
     thinned = true;
   }

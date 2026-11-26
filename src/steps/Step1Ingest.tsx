@@ -37,6 +37,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { extractAndTranscribe } from "@/lib/api";
@@ -381,7 +382,7 @@ export function Step1Ingest() {
       kind: "transcribe",
       projectId,
       label: "Transcribing lecture",
-      run: async (signal) => {
+      run: async (signal, hooks) => {
         const activityId = useAiActivityStore.getState().start({
           ...route,
           detail:
@@ -418,7 +419,15 @@ export function Step1Ingest() {
               detect_arabic: true,
               group_sentences: true,
             },
-            { signal },
+            {
+              signal,
+              onProgress: (event) => {
+                hooks.setStage(event.label || null, {
+                  done: Math.round(event.progress * 100),
+                  total: 100,
+                });
+              },
+            },
           );
           useAiActivityStore.getState().finish(activityId, "done", result.model || undefined);
           // `peaks` is the additive P2 field on TranscriptData (precomputed
@@ -691,8 +700,30 @@ export function Step1Ingest() {
                     </p>
                   </div>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    {t("step1.busy.description")}
+                    {transcribeJob?.stageLabel || t("step1.busy.description")}
                   </p>
+                  {transcribeJob?.progress ? (
+                    <div className="mt-2.5 flex items-center gap-2">
+                      <Progress
+                        value={Math.round(
+                          (transcribeJob.progress.done / Math.max(1, transcribeJob.progress.total)) *
+                            100,
+                        )}
+                        className="h-1.5"
+                      />
+                      <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                        <NumberFlow
+                          value={Math.round(
+                            (transcribeJob.progress.done /
+                              Math.max(1, transcribeJob.progress.total)) *
+                              100,
+                          )}
+                          suffix="%"
+                          format={{ maximumFractionDigits: 0 }}
+                        />
+                      </span>
+                    </div>
+                  ) : null}
                   <div className="mt-2 space-y-1">
                     {activeTranscription ? <AiActivityLine entry={activeTranscription} /> : null}
                     <p className="text-xs leading-relaxed text-muted-foreground">

@@ -22,9 +22,12 @@ import { Step2Discovery } from "@/steps/Step2Discovery";
 import { Step3Subtitles } from "@/steps/Step3Subtitles";
 import { Step4Export } from "@/steps/Step4Export";
 import { useJobStore } from "@/store/jobStore";
-import { startProjectAutosave, useProjectStore } from "@/store/projectStore";
+import { useProjectStore, startProjectAutosave } from "@/store/projectStore";
 import { useRenderStore } from "@/store/renderStore";
-import { useSettingsStore } from "@/store/settingsStore";
+import {
+  hydrateDesktopSettingsSecrets,
+  useSettingsStore,
+} from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
 
 function Workspace() {
@@ -59,13 +62,64 @@ export default function App() {
   }, [project, closeConfig]);
 
   useEffect(() => {
-    void refreshHealth();
-    const timer = window.setInterval(() => {
-      // Background poll: keep the current status LED instead of flashing
-      // "checking" every 15 s.
-      void useSettingsStore.getState().refreshHealth({ background: true });
-    }, 15_000);
-    return () => window.clearInterval(timer);
+    void hydrateDesktopSettingsSecrets();
+  }, []);
+
+  useEffect(() => {
+    const MIN_POLL_MS = 15_000;
+    const MAX_POLL_MS = 60_000;
+    let disposed = false;
+    let timer: number | null = null;
+    let delayMs = MIN_POLL_MS;
+
+    const clearPoll = () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const scheduleNext = (waitMs: number) => {
+      clearPoll();
+      if (disposed || document.hidden) return;
+      timer = window.setTimeout(() => {
+        void runBackgroundPoll();
+      }, waitMs);
+    };
+
+    const runBackgroundPoll = async () => {
+      if (disposed || document.hidden) return;
+      await useSettingsStore.getState().refreshHealth({ background: true });
+      if (disposed) return;
+      const status = useSettingsStore.getState().sidecar.status;
+      delayMs = status === "online" ? Math.min(MAX_POLL_MS, delayMs * 2) : MIN_POLL_MS;
+      scheduleNext(delayMs);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        clearPoll();
+        return;
+      }
+      delayMs = MIN_POLL_MS;
+      const checkedAt = useSettingsStore.getState().sidecar.checkedAt;
+      const stale = checkedAt === null || Date.now() - checkedAt >= MIN_POLL_MS;
+      if (stale) {
+        void runBackgroundPoll();
+      } else {
+        scheduleNext(Math.max(1_000, MIN_POLL_MS - (Date.now() - checkedAt)));
+      }
+    };
+
+    void refreshHealth().then(() => {
+      scheduleNext(delayMs);
+    });
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      disposed = true;
+      clearPoll();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, [refreshHealth]);
 
   useEffect(() => startProjectAutosave(), []);

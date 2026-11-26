@@ -165,90 +165,6 @@ def recitation_from_answers(
 
 
 # --------------------------------------------------------------------------- #
-# Step 3 - Arabic correction triage (noul)
-# --------------------------------------------------------------------------- #
-def verify_triage_request(
-    lines: list[dict[str, Any]],
-    *,
-    max_questions: int = 64,
-) -> tuple[str, dict[str, Question]]:
-    usable = lines[:max_questions]
-    blocks: list[str] = []
-    for index, line in enumerate(usable):
-        arabic = str(line.get("arabic_text", "")).strip()
-        context = str(line.get("context_thai", "")).strip()
-        blocks.append(
-            f"#{index}\nARABIC: {arabic}\nTHAI CONTEXT: {context or '(none)'}"
-        )
-    state = (
-        "Arabic subtitle lines from a Thai Tafseer channel, each with its "
-        "surrounding Thai explanation. Decide whether the Arabic text plausibly "
-        "needs correction before an expensive proofread.\n\n" + "\n\n".join(blocks)
-    )
-    questions: dict[str, Question] = {}
-    for index in range(len(usable)):
-        questions[f"line_{index}"] = Question(
-            type="noul",
-            instructions=(
-                f"Is a spelling, Uthmani-orthography, or Harakat correction likely "
-                f"needed for line #{index}?"
-            ),
-            criteria={
-                "true": (
-                    "The Arabic may be mis-transcribed, missing diacritics, or "
-                    "otherwise differ from authentic scripture."
-                ),
-                "false": (
-                    "It is already an exact, fully vocalized quotation."
-                ),
-            },
-        )
-    return state, questions
-
-
-@dataclass(slots=True)
-class TriageDecision:
-    index: int
-    #: ``True`` proofread, ``False`` skip with confidence, ``None`` escalate.
-    proofread: bool | None
-    confidence: float
-    likelihood: float
-
-
-def triage_from_answers(
-    answers: dict[str, Answer],
-    count: int,
-    *,
-    skip_below: float = 0.4,
-) -> list[TriageDecision]:
-    """Apply the confidence gate to one batched triage reply."""
-    decisions: list[TriageDecision] = []
-    for index in range(count):
-        answer = answers.get(f"line_{index}")
-        if answer is None:
-            decisions.append(TriageDecision(index, None, 0.0, 0.5))
-            continue
-        explicit = answer.probability("true")
-        if explicit is not None:
-            likelihood = explicit
-        else:
-            likelihood = 1.0 if answer.noul else 0.0
-        if answer.confidence < 0.5:
-            decisions.append(
-                TriageDecision(index, None, answer.confidence, likelihood)
-            )
-        elif not answer.noul and likelihood <= skip_below:
-            decisions.append(
-                TriageDecision(index, False, answer.confidence, likelihood)
-            )
-        else:
-            decisions.append(
-                TriageDecision(index, True, answer.confidence, likelihood)
-            )
-    return decisions
-
-
-# --------------------------------------------------------------------------- #
 # Step 1 - sentence boundaries (noul)
 # --------------------------------------------------------------------------- #
 def sentence_break_request(
@@ -312,11 +228,8 @@ __all__ = [
     "MIN_CONFIDENT",
     "RECITATION_LEGEND",
     "RecitationClassification",
-    "TriageDecision",
     "recitation_from_answers",
     "recitation_request",
     "sentence_break_request",
     "sentence_breaks_from_answers",
-    "triage_from_answers",
-    "verify_triage_request",
 ]

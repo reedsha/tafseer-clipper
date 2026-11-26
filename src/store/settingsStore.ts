@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import { getHealth, type FontInfo, type HealthResponse } from "@/lib/api";
+import { isDesktopRuntime } from "@/lib/projectFile";
+import { loadDesktopSecrets, persistDesktopSecrets } from "@/lib/secrets";
 import {
   coerceToRange,
   NUMERIC_LIMITS,
@@ -13,18 +15,6 @@ import {
 /* -------------------------------------------------------------------------- */
 
 export type EngineMode = "local" | "cloud";
-
-/**
- * Where the Step 3 Arabic spelling check runs. `inherit` (the default) reuses
- * the shared clip-finding model; otherwise a dedicated engine/model override is
- * used for Arabic verification only.
- */
-export type VerificationProviderMode = "inherit" | "local" | "cloud";
-
-export interface VerificationProviderSettings {
-  mode: VerificationProviderMode;
-  model: string;
-}
 
 /** Interface language; Thai entries may fall back to English until reviewed. */
 export type UiLanguage = "en" | "th";
@@ -66,11 +56,10 @@ export interface WhisperSettings {
   model: string;
   computeType: ComputeType;
   autoUnload: boolean;
-  initialPrompt: string;
 }
 
 /** The System One slots from docs/DECISION_MODELS_PLAN.md. */
-export type DecisionSlotId = "analysis" | "verify_triage";
+export type DecisionSlotId = "analysis";
 export type DecisionSlotMode = "local" | "cloud";
 /** Two wire formats exist; `auto` is measured once by Test, then remembered. */
 export type DecisionFormat = "auto" | "systemone" | "decisions";
@@ -183,7 +172,6 @@ export interface SettingsData {
   cloudStt: CloudSttSettings;
   whisper: WhisperSettings;
   decisionSlots: DecisionSlots;
-  verificationProvider: VerificationProviderSettings;
   arabic: ArabicStyle;
   thai: ThaiStyle;
   presets: StylePreset[];
@@ -207,7 +195,6 @@ export interface SettingsState extends SettingsData {
   updateCloudStt: (patch: Partial<CloudSttSettings>) => void;
   updateWhisper: (patch: Partial<WhisperSettings>) => void;
   updateDecisionSlot: (slot: DecisionSlotId, patch: Partial<DecisionSlotSettings>) => void;
-  updateVerificationProvider: (patch: Partial<VerificationProviderSettings>) => void;
   updateArabic: (patch: Partial<ArabicStyle>) => void;
   updateThai: (patch: Partial<ThaiStyle>) => void;
   updateEditor: (patch: Partial<EditorDefaults>) => void;
@@ -244,14 +231,6 @@ export interface SettingsState extends SettingsData {
 
 const STORAGE_KEY = "tafseer.settings.v1";
 const SETTINGS_FORMAT = "tafseer-settings";
-
-export const DEFAULT_WHISPER_PROMPT = [
-  "ถ้อยคำภาษาอาหรับและศัพท์อิสลามที่พบบ่อย:",
-  "อัลลอฮฺ, เราะสูลุลลอฮฺ, ศ็อลลัลลอฮุอะลัยฮิวะซัลลัม, เศาะฮาบะฮฺ,",
-  "อัลกุรอาน, ซูเราะฮฺ, อายะฮฺ, หะดีษ, ตัฟซีร, ฟัรฎ์, สุนัต, หะรอม, หะลาล,",
-  "ซูเราะฮฺ อัลฟาติฮะฮฺ, อัลบะเกาะเราะฮฺ, อาล อิมรอน, อันนูร, อัลกะฮ์ฟ, ยาซีน, อัรเราะฮ์มาน,",
-  "บิสมิลลาฮิรเราะฮ์มานิรเราะฮีม.",
-].join(" ");
 
 const DEFAULT_ARABIC: ArabicStyle = {
   fontFamily: "Noto Naskh Arabic",
@@ -328,7 +307,6 @@ const DEFAULT_GLOSSARY: GlossaryEntry[] = [
  */
 const DEFAULT_DECISION_SLOTS: DecisionSlots = {
   analysis: { enabled: true, mode: "local", model: "", format: "auto", endpointUrl: "" },
-  verify_triage: { enabled: true, mode: "cloud", model: "", format: "auto", endpointUrl: "" },
 };
 
 const DEFAULT_DATA: SettingsData = {
@@ -358,10 +336,8 @@ const DEFAULT_DATA: SettingsData = {
     model: "",
     computeType: "int8",
     autoUnload: true,
-    initialPrompt: DEFAULT_WHISPER_PROMPT,
   },
   decisionSlots: structuredClone(DEFAULT_DECISION_SLOTS),
-  verificationProvider: { mode: "inherit", model: "" },
   arabic: { ...DEFAULT_ARABIC },
   thai: { ...DEFAULT_THAI },
   presets: DEFAULT_PRESETS.map((item) => ({
@@ -568,16 +544,6 @@ function coerceDecisionSlots(value: unknown): DecisionSlots {
   return slots;
 }
 
-function coerceVerificationProvider(value: unknown): VerificationProviderSettings {
-  const fallback = DEFAULT_DATA.verificationProvider;
-  if (!isRecord(value)) return { ...fallback };
-  const mode =
-    value.mode === "inherit" || value.mode === "local" || value.mode === "cloud"
-      ? value.mode
-      : fallback.mode;
-  return { mode, model: asString(value.model, fallback.model).trim() };
-}
-
 function coerceFonts(value: unknown): FontInfo[] {
   if (!Array.isArray(value)) return [];
   const fonts: FontInfo[] = [];
@@ -637,10 +603,8 @@ function coerceSettingsData(raw: unknown): SettingsData {
       model: asString(whisper.model, DEFAULT_DATA.whisper.model),
       computeType: asCompute(whisper.computeType, DEFAULT_DATA.whisper.computeType),
       autoUnload: asBoolean(whisper.autoUnload, DEFAULT_DATA.whisper.autoUnload),
-      initialPrompt: asString(whisper.initialPrompt, DEFAULT_DATA.whisper.initialPrompt),
     },
     decisionSlots: coerceDecisionSlots(raw.decisionSlots),
-    verificationProvider: coerceVerificationProvider(raw.verificationProvider),
     arabic: coerceArabic(raw.arabic, DEFAULT_DATA.arabic),
     thai: coerceThai(raw.thai, DEFAULT_DATA.thai),
     presets: coercePresets(raw.presets, DEFAULT_DATA.presets),
@@ -701,7 +665,6 @@ function pickSettingsData(state: SettingsState): SettingsData {
     cloudStt: state.cloudStt,
     whisper: state.whisper,
     decisionSlots: state.decisionSlots,
-    verificationProvider: state.verificationProvider,
     arabic: state.arabic,
     thai: state.thai,
     presets: state.presets,
@@ -720,6 +683,8 @@ function pickSettingsData(state: SettingsState): SettingsData {
 /* -------------------------------------------------------------------------- */
 
 let healthRequestInFlight = false;
+let cloudKeyTouched = false;
+let cloudSttKeyTouched = false;
 
 /* A freshly spawned sidecar needs a few seconds to import before its loopback
    socket accepts connections, and the first launch after install can be slower
@@ -742,9 +707,23 @@ export const useSettingsStore = create<SettingsState>()(
       setAnalysisMode: (mode) => set({ analysisMode: mode }),
       setUiLanguage: (language) => set({ uiLanguage: language }),
 
-      updateCloud: (patch) => set((state) => ({ cloud: { ...state.cloud, ...patch } })),
+      updateCloud: (patch) => {
+        if (patch.apiKey !== undefined) cloudKeyTouched = true;
+        set((state) => ({ cloud: { ...state.cloud, ...patch } }));
+        if (patch.apiKey !== undefined && isDesktopRuntime()) {
+          const { cloud, cloudStt } = get();
+          void persistDesktopSecrets(cloud.apiKey, cloudStt.apiKey);
+        }
+      },
       updateOllama: (patch) => set((state) => ({ ollama: { ...state.ollama, ...patch } })),
-      updateCloudStt: (patch) => set((state) => ({ cloudStt: { ...state.cloudStt, ...patch } })),
+      updateCloudStt: (patch) => {
+        if (patch.apiKey !== undefined) cloudSttKeyTouched = true;
+        set((state) => ({ cloudStt: { ...state.cloudStt, ...patch } }));
+        if (patch.apiKey !== undefined && isDesktopRuntime()) {
+          const { cloud, cloudStt } = get();
+          void persistDesktopSecrets(cloud.apiKey, cloudStt.apiKey);
+        }
+      },
       updateWhisper: (patch) => set((state) => ({ whisper: { ...state.whisper, ...patch } })),
       updateDecisionSlot: (slot, patch) =>
         set((state) => ({
@@ -752,10 +731,6 @@ export const useSettingsStore = create<SettingsState>()(
             ...state.decisionSlots,
             [slot]: { ...state.decisionSlots[slot], ...patch },
           },
-        })),
-      updateVerificationProvider: (patch) =>
-        set((state) => ({
-          verificationProvider: { ...state.verificationProvider, ...patch },
         })),
       updateArabic: (patch) => set((state) => ({ arabic: { ...state.arabic, ...patch } })),
       updateThai: (patch) => set((state) => ({ thai: { ...state.thai, ...patch } })),
@@ -883,11 +858,23 @@ export const useSettingsStore = create<SettingsState>()(
           return { ok: false, error: "This is not a Tafseer Clipper settings backup." };
         }
         const data = coerceSettingsData(payload.settings);
+        cloudKeyTouched = true;
+        cloudSttKeyTouched = true;
         set({ ...data });
+        if (isDesktopRuntime()) {
+          void persistDesktopSecrets(data.cloud.apiKey, data.cloudStt.apiKey);
+        }
         return { ok: true };
       },
 
-      resetSettings: () => set({ ...structuredClone(DEFAULT_DATA) }),
+      resetSettings: () => {
+        cloudKeyTouched = true;
+        cloudSttKeyTouched = true;
+        set({ ...structuredClone(DEFAULT_DATA) });
+        if (isDesktopRuntime()) {
+          void persistDesktopSecrets("", "");
+        }
+      },
 
       refreshHealth: async (options) => {
         if (healthRequestInFlight) return;
@@ -959,7 +946,17 @@ export const useSettingsStore = create<SettingsState>()(
       // fonts and presets). `migrate` re-runs the same coercion the merge does.
       version: 2,
       migrate: (persisted) => coerceSettingsData(persisted),
-      partialize: (state) => pickSettingsData(state),
+      partialize: (state) => {
+        const data = pickSettingsData(state);
+        if (!isDesktopRuntime()) return data;
+        // Desktop stores plaintext secrets only in memory and seals them in
+        // `tafseer.secrets.v1` via Windows DPAPI.
+        return {
+          ...data,
+          cloud: { ...data.cloud, apiKey: "" },
+          cloudStt: { ...data.cloudStt, apiKey: "" },
+        };
+      },
       merge: (persisted, current) => ({
         ...current,
         ...coerceSettingsData(persisted),
@@ -968,3 +965,27 @@ export const useSettingsStore = create<SettingsState>()(
     },
   ),
 );
+
+/** Unseal DPAPI-backed desktop API keys on startup without clobbering edits. */
+export async function hydrateDesktopSettingsSecrets(): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  const { secrets } = await loadDesktopSecrets();
+  const state = useSettingsStore.getState();
+  const nextCloudKey = cloudKeyTouched ? state.cloud.apiKey : secrets.cloudApiKey || state.cloud.apiKey;
+  const nextSttKey = cloudSttKeyTouched
+    ? state.cloudStt.apiKey
+    : secrets.cloudSttApiKey || state.cloudStt.apiKey;
+
+  if (nextCloudKey !== state.cloud.apiKey || nextSttKey !== state.cloudStt.apiKey) {
+    useSettingsStore.setState((current) => ({
+      cloud: cloudKeyTouched ? current.cloud : { ...current.cloud, apiKey: nextCloudKey },
+      cloudStt: cloudSttKeyTouched
+        ? current.cloudStt
+        : { ...current.cloudStt, apiKey: nextSttKey },
+    }));
+  }
+
+  if (cloudKeyTouched || cloudSttKeyTouched) {
+    await persistDesktopSecrets(nextCloudKey, nextSttKey);
+  }
+}

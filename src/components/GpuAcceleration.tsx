@@ -89,7 +89,7 @@ function GpuPackAction({ summary }: { summary: AccelerationSummary }) {
 
   const downloading = busy || pack.phase === "downloading";
   const installed = pack.status?.installed === true || pack.phase === "installed";
-  const needsRestart = installed && summary.state !== "ready" && summary.gpuDetected;
+  const needsRestart = installed && summary.transcription !== "gpu" && summary.gpuDetected;
   const fraction = accelerationFraction(pack);
   const percent = fraction === null ? null : Math.round(fraction * 100);
 
@@ -271,7 +271,11 @@ export function GpuInlineHint({ summary }: { summary: AccelerationSummary }) {
       <p className="flex items-center gap-1.5 text-[10px] leading-relaxed text-muted-foreground/80">
         <GpuStatusLine summary={summary} />
         <span aria-hidden>·</span>
-        <span>Transcription can use the GPU.</span>
+        <span>
+          {summary.transcription === "gpu"
+            ? "Transcription can use the GPU."
+            : "Encoding uses the GPU; transcription runs on the CPU."}
+        </span>
       </p>
     );
   }

@@ -1,5 +1,5 @@
 import { L } from "@/lib/i18n";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import NumberFlow from "@number-flow/react";
 import { toast } from "sonner";
 import {
@@ -61,9 +61,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { presetMatchesStyle } from "@/components/config/shared";
 import { verifyArabic, verifyArabicBatch } from "@/lib/api";
-import { aiRouteFor, decisionActivityFor } from "@/lib/aiActivity";
 import { formatClock } from "@/lib/format";
-import { buildDecisionProviderFor, buildProviderFor } from "@/lib/providers";
 import { FRAMING_LABELS, type FramingMode, type Resolution, type SubtitleCue } from "@/lib/projectTypes";
 import {
   nudgeVerticalOffset,
@@ -77,7 +75,7 @@ import { deliverTaskResult, useJobStore, useTaskJob } from "@/store/jobStore";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
-import { splitAtWordBoundary, wrapSubtitleText } from "@/lib/subtitleWrap";
+import { splitAtWordBoundary, wrapArabicText, wrapSubtitleText } from "@/lib/subtitleWrap";
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
@@ -95,6 +93,239 @@ function clamp(value: number, min: number, max: number): number {
 function hasText(cue: SubtitleCue): boolean {
   return cue.arabic.trim().length > 0 || cue.thai.trim().length > 0;
 }
+
+interface SubtitleCueRowProps {
+  cue: SubtitleCue;
+  index: number;
+  active: boolean;
+  hasFollowing: boolean;
+  canPlay: boolean;
+  verifyingThis: boolean;
+  verifyAll: boolean;
+  onPlayCue: (cue: SubtitleCue) => void;
+  onSelectCue: (cue: SubtitleCue) => void;
+  onToggleReviewed: (cue: SubtitleCue) => void;
+  onCueChange: (cueId: string, field: CueField, value: string) => void;
+  onCueBlur: (cueId: string, field: CueField) => void;
+  onSelectCaret: (cueId: string, field: CueField, offset: number) => void;
+  onSplitAt: (cueId: string, field: CueField, offset: number) => void;
+  onVerify: (cue: SubtitleCue) => void;
+  onSplitCue: (cue: SubtitleCue) => void;
+  onMerge: (cueId: string) => void;
+  onDelete: (cueId: string) => void;
+}
+
+const SubtitleCueRow = memo(function SubtitleCueRow({
+  cue,
+  index,
+  active,
+  hasFollowing,
+  canPlay,
+  verifyingThis,
+  verifyAll,
+  onPlayCue,
+  onSelectCue,
+  onToggleReviewed,
+  onCueChange,
+  onCueBlur,
+  onSelectCaret,
+  onSplitAt,
+  onVerify,
+  onSplitCue,
+  onMerge,
+  onDelete,
+}: SubtitleCueRowProps) {
+  return (
+    <div
+      data-cue-row={cue.id}
+      className={cn(
+        "min-w-0 overflow-hidden rounded-lg border transition-colors",
+        active
+          ? "border-ring/50 bg-accent/20"
+          : "border-border bg-card/40 hover:bg-accent/10",
+      )}
+    >
+      <div className="flex items-start gap-1 px-1.5 py-1.5">
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          aria-label={`Play line ${index + 1}`}
+          disabled={!canPlay}
+          onClick={() => onPlayCue(cue)}
+          className="mt-0.5"
+        >
+          <Play className="size-3" />
+        </Button>
+
+        <div
+          role="button"
+          tabIndex={0}
+          aria-expanded={active}
+          aria-label={`Subtitle line ${index + 1}`}
+          onClick={() => onSelectCue(cue)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              onSelectCue(cue);
+            }
+          }}
+          className="min-w-0 flex-1 cursor-default rounded-sm px-1 py-0.5 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40"
+        >
+          <div className="flex items-center gap-1.5 text-[11px] tabular-nums text-muted-foreground">
+            <span className="font-mono">
+              <TimeFlow value={cue.start} tenths />
+              <span aria-hidden> → </span>
+              <TimeFlow value={cue.end} tenths />
+            </span>
+            <span className="text-muted-foreground/50">·</span>
+            <NumberFlow
+              value={cue.end - cue.start}
+              suffix="s"
+              format={{ maximumFractionDigits: 1 }}
+            />
+          </div>
+          <p
+            dir={cue.arabic ? "rtl" : undefined}
+            className={cn(
+              "mt-0.5 line-clamp-2 whitespace-pre-line text-sm leading-snug",
+              cue.arabic ? "font-arabic text-foreground/90" : "text-muted-foreground/50",
+            )}
+          >
+            {cue.arabic || L("No Arabic line")}
+          </p>
+          <p
+            lang="th"
+            className={cn(
+              "line-clamp-2 text-xs leading-snug",
+              cue.thai ? "text-foreground/90" : "text-muted-foreground/60",
+            )}
+          >
+            {cue.thai.replace(/\n/g, " ") || L("No Thai line")}
+          </p>
+        </div>
+
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          aria-label={cue.reviewed ? "Mark as not checked" : "Mark as checked"}
+          aria-pressed={cue.reviewed}
+          disabled={!hasText(cue)}
+          onClick={() => onToggleReviewed(cue)}
+          className={cn(
+            "mt-0.5",
+            cue.reviewed ? "text-foreground/80" : "text-muted-foreground/50",
+          )}
+        >
+          {cue.reviewed ? <CheckCircle2 className="size-4" /> : <Circle className="size-4" />}
+        </Button>
+      </div>
+
+      {active ? (
+        <div className="space-y-2 border-t border-border/70 px-2.5 py-2">
+          <Textarea
+            value={cue.arabic}
+            onChange={(event) => onCueChange(cue.id, "arabic", event.target.value)}
+            onBlur={() => onCueBlur(cue.id, "arabic")}
+            onSelect={(event) =>
+              onSelectCaret(cue.id, "arabic", event.currentTarget.selectionStart)
+            }
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                event.preventDefault();
+                onSplitAt(cue.id, "arabic", event.currentTarget.selectionStart);
+              }
+            }}
+            rows={2}
+            dir="rtl"
+            lang="ar"
+            spellCheck={false}
+            placeholder="Arabic Quran / Hadith line (optional)"
+            className="resize-y text-right font-arabic text-base leading-relaxed"
+          />
+          <Textarea
+            value={cue.thai}
+            onChange={(event) => onCueChange(cue.id, "thai", event.target.value)}
+            onBlur={() => onCueBlur(cue.id, "thai")}
+            onSelect={(event) =>
+              onSelectCaret(cue.id, "thai", event.currentTarget.selectionStart)
+            }
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                event.preventDefault();
+                onSplitAt(cue.id, "thai", event.currentTarget.selectionStart);
+              }
+            }}
+            rows={2}
+            lang="th"
+            placeholder="Thai explanation"
+            className="resize-y text-sm leading-relaxed"
+          />
+          <div className="flex flex-wrap items-center gap-1">
+            <Button
+              size="xs"
+              variant="outline"
+              className="gap-1"
+              disabled={!canPlay}
+              onClick={() => onPlayCue(cue)}
+            >
+              <Play className="size-3" />
+              {L("Play")}
+            </Button>
+            {cue.arabic.trim() ? (
+              <Button
+                size="xs"
+                variant="outline"
+                className="gap-1"
+                disabled={verifyingThis || verifyAll}
+                title="Verify Quran / Fix Arabic"
+                onClick={() => void onVerify(cue)}
+              >
+                {verifyingThis ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <ShieldCheck className="size-3" />
+                )}
+                {L("Check Arabic")}
+              </Button>
+            ) : null}
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label="Split line at the cursor"
+              title="Split line at the cursor (Ctrl + Enter)"
+              onClick={() => onSplitCue(cue)}
+            >
+              <Scissors className="size-3" />
+            </Button>
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label="Merge with the next line"
+              title="Merge with the next line"
+              disabled={!hasFollowing}
+              onClick={() => onMerge(cue.id)}
+            >
+              <Merge className="size-3" />
+            </Button>
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              className="ml-auto text-destructive"
+              title="Delete this line"
+              aria-label={`Delete line ${index + 1}`}
+              onClick={() => onDelete(cue.id)}
+            >
+              <Trash2 className="size-3.5" />
+            </Button>
+          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Ctrl + Enter splits at the cursor · Space plays the line.
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
+});
 
 function arabicSourceLabel(cue: SubtitleCue): string {
   if (cue.source === "quran") {
@@ -203,11 +434,12 @@ export function Step3Subtitles() {
      Raw transcript segments are not subtitle lines: rebuild them into readable
      lines, and auto-heal a track saved by the old one-cue-per-segment seeding. */
   useEffect(() => {
-    if (!project || !selectedClip) return;
-    const segments = project.transcript?.segments ?? [];
+    const current = useProjectStore.getState().project;
+    if (!current || !selectedClip) return;
+    const segments = current.transcript?.segments ?? [];
     if (!segments.length) return;
 
-    const existing = project.subtitles[selectedClip.id] ?? [];
+    const existing = current.subtitles[selectedClip.id] ?? [];
     if (existing.length) {
       if (looksLikeFragmentSeed(existing)) {
         const key = `${selectedClip.id}:${existing.length}`;
@@ -250,7 +482,16 @@ export function Step3Subtitles() {
       arabicMaxCharsPerLine,
     });
     if (seeded.length) setSubtitles(selectedClip.id, seeded);
-  }, [project, selectedClip, maxCharsPerLine, maxLines, arabicMaxCharsPerLine, setSubtitles]);
+  }, [
+    project?.id,
+    project?.transcriptId,
+    project?.transcript,
+    selectedClip,
+    maxCharsPerLine,
+    maxLines,
+    arabicMaxCharsPerLine,
+    setSubtitles,
+  ]);
 
   /**
    * Detect a saved track that was generated before word-safe cuts (or by a
@@ -596,13 +837,23 @@ export function Step3Subtitles() {
       const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
       const next = latest.map((cue) => {
         if (cue.id !== cueId) return cue;
-        const wrapped =
-          field === "thai" ? wrapSubtitleText(cue.thai, maxCharsPerLine) : cue.thai;
-        return wrapped === cue.thai ? cue : { ...cue, thai: wrapped };
+        if (field === "thai") {
+          const wrapped = wrapSubtitleText(cue.thai, maxCharsPerLine);
+          return wrapped === cue.thai ? cue : { ...cue, thai: wrapped };
+        }
+        const wrapped = wrapArabicText(cue.arabic, arabicMaxCharsPerLine);
+        return wrapped === cue.arabic ? cue : { ...cue, arabic: wrapped };
       });
       setSubtitles(selectedClipId, next);
     },
-    [maxCharsPerLine, selectedClipId, setSubtitles],
+    [arabicMaxCharsPerLine, maxCharsPerLine, selectedClipId, setSubtitles],
+  );
+
+  const handleSelectCaret = useCallback(
+    (cueId: string, field: CueField, offset: number) => {
+      caretRef.current = { cueId, field, offset };
+    },
+    [],
   );
 
   const setReviewed = useCallback(
@@ -731,7 +982,10 @@ export function Step3Subtitles() {
         ...cue,
         id: crypto.randomUUID(),
         end: boundary,
-        arabic: field === "arabic" ? editedFirst : otherFirst,
+        arabic: wrapArabicText(
+          field === "arabic" ? editedFirst : otherFirst,
+          arabicMaxCharsPerLine,
+        ),
         thai: wrapSubtitleText(
           field === "thai" ? editedFirst : otherFirst,
           maxCharsPerLine,
@@ -742,7 +996,10 @@ export function Step3Subtitles() {
         ...cue,
         id: crypto.randomUUID(),
         start: boundary,
-        arabic: field === "arabic" ? editedSecond : otherSecond,
+        arabic: wrapArabicText(
+          field === "arabic" ? editedSecond : otherSecond,
+          arabicMaxCharsPerLine,
+        ),
         thai: wrapSubtitleText(
           field === "thai" ? editedSecond : otherSecond,
           maxCharsPerLine,
@@ -761,7 +1018,7 @@ export function Step3Subtitles() {
         description: `Split at ${formatClock(boundary - cue.start, true)} into the line · ${editedFirst.length} / ${editedSecond.length} characters.`,
       });
     },
-    [maxCharsPerLine, selectedClip, selectedClipId, setSubtitles],
+    [arabicMaxCharsPerLine, maxCharsPerLine, selectedClip, selectedClipId, setSubtitles],
   );
 
   /** Split the active line at the last caret position, or at the midpoint. */
@@ -794,7 +1051,10 @@ export function Step3Subtitles() {
       const following = latest[index + 1];
       if (!cue || !following) return;
 
-      const arabic = [cue.arabic.trim(), following.arabic.trim()].filter(Boolean).join(" ");
+      const arabic = wrapArabicText(
+        [cue.arabic.trim(), following.arabic.trim()].filter(Boolean).join(" "),
+        arabicMaxCharsPerLine,
+      );
       const thai = wrapSubtitleText(
         [cue.thai.trim(), following.thai.trim()].filter(Boolean).join(" "),
         maxCharsPerLine,
@@ -815,7 +1075,7 @@ export function Step3Subtitles() {
         description: `One line now covers ${formatClock(merged.end - merged.start, true)}.`,
       });
     },
-    [maxCharsPerLine, selectedClipId, setSubtitles],
+    [arabicMaxCharsPerLine, maxCharsPerLine, selectedClipId, setSubtitles],
   );
 
   const handleDelete = useCallback(
@@ -895,8 +1155,7 @@ export function Step3Subtitles() {
     async (
       cue: SubtitleCue,
       announce = true,
-      track = true,
-    ): Promise<"corrected" | "verified" | "needs-model"> => {
+    ): Promise<"corrected" | "verified" | "unmatched"> => {
       const arabicText = cue.arabic.trim();
       if (!arabicText) {
         toast.error("Nothing to verify", {
@@ -906,61 +1165,21 @@ export function Step3Subtitles() {
       }
       // Capture the owning session now: the reply may land after a switch.
       const projectId = useProjectStore.getState().project?.id;
-      const settings = useSettingsStore.getState();
-      const verificationOverrideConfigured =
-        settings.verificationProvider.mode !== "inherit" &&
-        settings.verificationProvider.model.trim() !== "";
-      const verifyProvider = buildProviderFor(settings, "verify");
-      // A missing text model no longer blocks the check: the sidecar gates exact
-      // Qur'an verses offline and reports which lines still need a model.
-      const hasModel = Boolean(verifyProvider.model?.trim());
-      const openCheckerSetup = () =>
-        useUiStore.getState().openConfig(verificationOverrideConfigured ? 3 : 2);
-      const missingModelToast = () =>
-        toast.error("The Arabic checker isn't connected yet", {
-          description: verificationOverrideConfigured
-            ? "Choose a model in the Subtitles configuration."
-            : "Choose a model in the Find Clips configuration.",
-          action: { label: "Set up", onClick: openCheckerSetup },
-        });
+      const result = await verifyArabic({
+        arabic_text: arabicText,
+        context_thai: cue.thai.replace(/\n/g, " "),
+        provider: null,
+      });
 
-      // A batch owns one activity for the whole run; single-line checks own
-      // theirs so the log never fills with one entry per line.
-      const activityId = track
-        ? useAiActivityStore.getState().start({
-            ...aiRouteFor(settings, "arabic-check"),
-            // Offline: the corpus answers, so the log must not imply a model call.
-            ...(hasModel ? {} : { detail: "Qur'an corpus only" }),
-          })
-        : null;
-      let result: Awaited<ReturnType<typeof verifyArabic>>;
-      try {
-        result = await verifyArabic({
-          arabic_text: arabicText,
-          context_thai: cue.thai.replace(/\n/g, " "),
-          provider: hasModel ? verifyProvider : null,
-        });
-      } catch (error) {
-        if (activityId) useAiActivityStore.getState().finish(activityId, "failed");
-        if (!hasModel) {
-          missingModelToast();
-          throw new Error("not-configured");
-        }
-        throw error;
-      }
-      if (activityId) {
-        useAiActivityStore.getState().finish(activityId, "done", result.model || undefined);
-      }
-
-      if (result.source === "needs_model") {
+      if (result.source === "unmatched" || result.source === "needs_model") {
         if (announce) {
-          toast.warning("This line needs a text model", {
+          toast.info("Not in the Qur'an corpus", {
             description:
-              "Exact Qur'an verses are checked offline. Proofreading anything else needs a fast text model.",
-            action: { label: "Set up", onClick: openCheckerSetup },
+              result.notes ||
+              "Only Qur'an verses are checked offline. Review non-Qur'anic Arabic manually.",
           });
         }
-        return "needs-model";
+        return "unmatched";
       }
 
       if (selectedClipId && projectId) {
@@ -1012,7 +1231,7 @@ export function Step3Subtitles() {
         await verifyOne(cue);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (message !== "empty" && message !== "not-configured") {
+        if (message !== "empty") {
           toast.error("Verification failed", { description: message });
         }
       } finally {
@@ -1024,7 +1243,6 @@ export function Step3Subtitles() {
 
   const handleVerifyAll = useCallback(async () => {
     if (!selectedClipId) return;
-    const settings = useSettingsStore.getState();
     const projectId = useProjectStore.getState().project?.id;
     if (!projectId) return;
     const alreadyRunning = useJobStore
@@ -1034,25 +1252,12 @@ export function Step3Subtitles() {
           job.kind === "verify" && job.projectId === projectId && job.status === "running",
       );
     if (alreadyRunning) return;
-    const verificationOverrideConfigured =
-      settings.verificationProvider.mode !== "inherit" &&
-      settings.verificationProvider.model.trim() !== "";
-    const verifyProvider = buildProviderFor(settings, "verify");
-    // No text model is not a dead end: the sidecar gates exact Qur'an verses
-    // offline and reports the lines that still need one, instead of refusing.
-    const hasModel = Boolean(verifyProvider.model?.trim());
-    const openCheckerSetup = () =>
-      useUiStore.getState().openConfig(verificationOverrideConfigured ? 3 : 2);
     const targets = (useProjectStore.getState().project?.subtitles[selectedClipId] ?? []).filter(
       (cue) => cue.arabic.trim().length > 0,
     );
     if (!targets.length) return;
 
-    const decisionRoute = decisionActivityFor(settings, "verify_triage");
-    const decisionProvider = buildDecisionProviderFor(settings, "verify_triage");
     const clipId = selectedClipId;
-    // One request per clip keeps the round-trips at 1–3 instead of one per line
-    // (docs/DECISION_MODELS_PLAN.md §5); 64 is the sidecar's batch ceiling.
     const BATCH = 64;
     type VerifiedLine = {
       cueId: string;
@@ -1064,94 +1269,69 @@ export function Step3Subtitles() {
     let corrected = 0;
     let failed = 0;
     let checked = 0;
-    /** Lines the corpus or the fast check settled with no text model. */
-    let offlineSettled = 0;
     let corpus = 0;
-    let needsModel = 0;
+    let unmatched = 0;
 
     useJobStore.getState().startTask({
       kind: "verify",
       projectId,
       label: "Checking Arabic",
       run: async (signal, hooks) => {
-        const activityId = useAiActivityStore.getState().start(
-          decisionRoute
-            ? { task: "arabic-check", ...decisionRoute }
-            : {
-                ...aiRouteFor(settings, "arabic-check"),
-                // Offline: no model is called, so the log must not look like one was.
-                ...(hasModel ? {} : { detail: "Qur'an corpus only" }),
-              },
-        );
         const allLines: VerifiedLine[] = [];
         hooks.setProgress(0, targets.length);
-        try {
-          for (let offset = 0; offset < targets.length; offset += BATCH) {
-            if (signal.aborted) break;
-            const chunk = targets.slice(offset, offset + BATCH);
-            try {
-              const result = await verifyArabicBatch(
-                {
-                  lines: chunk.map((cue) => ({
-                    arabic_text: cue.arabic.trim(),
-                    context_thai: cue.thai.replace(/\n/g, " "),
-                    cue_id: cue.id,
-                  })),
-                  provider: hasModel ? verifyProvider : null,
-                  decision_provider: decisionProvider,
-                },
-                { signal },
-              );
-              const byCue = new Map(
-                result.lines
-                  .filter((line) => line.cue_id)
-                  .map((line) => [line.cue_id as string, line]),
-              );
-              const chunkLines: VerifiedLine[] = [];
-              for (const cue of chunk) {
-                const line = byCue.get(cue.id);
-                if (!line) continue;
-                // A corpus-gated line is a real verification; a line the
-                // sidecar could only pass back unchanged needs a model.
-                if (line.source === "needs_model") {
-                  needsModel += 1;
-                  continue;
-                }
-                // Corpus-gated and fast-check-passed lines are settled offline.
-                offlineSettled += 1;
-                if (line.source === "quran") corpus += 1;
-                if (line.correction_applied) corrected += 1;
-                if (line.verified_text) {
-                  const entry: VerifiedLine = {
-                    cueId: cue.id,
-                    arabic: line.verified_text,
-                    source: line.source,
-                    reference: line.reference ?? undefined,
-                    confidence: line.confidence ?? undefined,
-                  };
-                  chunkLines.push(entry);
-                  allLines.push(entry);
-                }
+        for (let offset = 0; offset < targets.length; offset += BATCH) {
+          if (signal.aborted) break;
+          const chunk = targets.slice(offset, offset + BATCH);
+          try {
+            const result = await verifyArabicBatch(
+              {
+                lines: chunk.map((cue) => ({
+                  arabic_text: cue.arabic.trim(),
+                  context_thai: cue.thai.replace(/\n/g, " "),
+                  cue_id: cue.id,
+                })),
+                provider: null,
+                decision_provider: null,
+              },
+              { signal },
+            );
+            const byCue = new Map(
+              result.lines
+                .filter((line) => line.cue_id)
+                .map((line) => [line.cue_id as string, line]),
+            );
+            const chunkLines: VerifiedLine[] = [];
+            for (const cue of chunk) {
+              const line = byCue.get(cue.id);
+              if (!line) continue;
+              if (line.source === "unmatched" || line.source === "needs_model") {
+                unmatched += 1;
+                continue;
               }
-              if (chunkLines.length) {
-                hooks.deliverPartial({ kind: "verify", clipId, lines: chunkLines });
+              if (line.source === "quran") corpus += 1;
+              if (line.correction_applied) corrected += 1;
+              if (line.verified_text) {
+                const entry: VerifiedLine = {
+                  cueId: cue.id,
+                  arabic: line.verified_text,
+                  source: line.source,
+                  reference: line.reference ?? undefined,
+                  confidence: line.confidence ?? undefined,
+                };
+                chunkLines.push(entry);
+                allLines.push(entry);
               }
-              checked += chunk.length;
-            } catch {
-              if (signal.aborted) break;
-              failed += chunk.length;
             }
-            hooks.setProgress(Math.min(targets.length, offset + chunk.length), targets.length);
+            if (chunkLines.length) {
+              hooks.deliverPartial({ kind: "verify", clipId, lines: chunkLines });
+            }
+            checked += chunk.length;
+          } catch {
+            if (signal.aborted) break;
+            failed += chunk.length;
           }
-        } catch (caught) {
-          useAiActivityStore
-            .getState()
-            .finish(activityId, signal.aborted ? "cancelled" : "failed");
-          throw caught;
+          hooks.setProgress(Math.min(targets.length, offset + chunk.length), targets.length);
         }
-        useAiActivityStore
-          .getState()
-          .finish(activityId, signal.aborted ? "cancelled" : failed > 0 ? "failed" : "done");
         // A cancelled batch keeps whatever chunks already landed (delivered as
         // partials); a finished one returns the full list so a session that was
         // not open can still receive it through the journal.
@@ -1165,28 +1345,20 @@ export function Step3Subtitles() {
           });
           return;
         }
-        if (!hasModel) {
-          // Offline run: report exactly what the corpus could settle and what
-          // still needs a proofreader, instead of pretending everything passed.
-          if (needsModel === 0) {
-            toast.success(L("Arabic checked"), {
-              description: `${offlineSettled} line${
-                offlineSettled === 1 ? "" : "s"
-              } checked offline — ${corpus} exact Qur'an match${corpus === 1 ? "" : "es"}.`,
-            });
-            return;
-          }
-          toast.warning(`Checked ${offlineSettled} of ${targets.length} lines offline`, {
-            description: `${needsModel} line${
-              needsModel === 1 ? "" : "s"
-            } need a text model for proofreading. Exact Qur'an verses are always checked offline.`,
-            action: { label: "Set up", onClick: openCheckerSetup },
+        if (unmatched === 0) {
+          toast.success(L("Arabic checked"), {
+            description: `${corpus} Qur'an match${corpus === 1 ? "" : "es"} · ${corrected} corrected.`,
           });
           return;
         }
-        toast.success(L("Arabic checked"), {
-          description: `${targets.length} line${targets.length === 1 ? "" : "s"} · ${corrected} corrected.`,
-        });
+        toast.info(
+          `Matched ${corpus} of ${targets.length} lines in the Qur'an corpus`,
+          {
+            description: `${corrected} corrected · ${unmatched} non-Qur'anic line${
+              unmatched === 1 ? "" : "s"
+            } left unchanged for manual review.`,
+          },
+        );
       },
       onError: (message) => {
         toast.error("Arabic check failed", { description: message });
@@ -1571,224 +1743,29 @@ export function Step3Subtitles() {
                     </p>
                   </div>
                 ) : (
-                  visibleCues.map(({ cue, index }) => {
-                    const active = activeCue?.id === cue.id;
-                    const following = cues[index + 1] ?? null;
-                    return (
-                      <div
-                        key={cue.id}
-                        data-cue-row={cue.id}
-                        className={cn(
-                          "min-w-0 overflow-hidden rounded-lg border transition-colors",
-                          active
-                            ? "border-ring/50 bg-accent/20"
-                            : "border-border bg-card/40 hover:bg-accent/10",
-                        )}
-                      >
-                        <div className="flex items-start gap-1 px-1.5 py-1.5">
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            aria-label={`Play line ${index + 1}`}
-                            disabled={!canPlay}
-                            onClick={() => playCue(cue)}
-                            className="mt-0.5"
-                          >
-                            <Play className="size-3" />
-                          </Button>
-
-                          <div
-                            role="button"
-                            tabIndex={0}
-                            aria-expanded={active}
-                            aria-label={`Subtitle line ${index + 1}`}
-                            onClick={() => selectCue(cue)}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter" || event.key === " ") {
-                                event.preventDefault();
-                                selectCue(cue);
-                              }
-                            }}
-                            className="min-w-0 flex-1 cursor-default rounded-sm px-1 py-0.5 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40"
-                          >
-                            <div className="flex items-center gap-1.5 text-[11px] tabular-nums text-muted-foreground">
-                              <span className="font-mono">
-                                <TimeFlow value={cue.start} tenths />
-                                <span aria-hidden> → </span>
-                                <TimeFlow value={cue.end} tenths />
-                              </span>
-                              <span className="text-muted-foreground/50">·</span>
-                              <NumberFlow
-                                value={cue.end - cue.start}
-                                suffix="s"
-                                format={{ maximumFractionDigits: 1 }}
-                              />
-                            </div>
-                            <p
-                              dir={cue.arabic ? "rtl" : undefined}
-                              className={cn(
-                                "mt-0.5 line-clamp-2 whitespace-pre-line text-sm leading-snug",
-                                cue.arabic
-                                  ? "font-arabic text-foreground/90"
-                                  : "text-muted-foreground/50",
-                              )}
-                            >
-                              {cue.arabic || L("No Arabic line")}
-                            </p>
-                            <p
-                              lang="th"
-                              className={cn(
-                                "line-clamp-2 text-xs leading-snug",
-                                cue.thai ? "text-foreground/90" : "text-muted-foreground/60",
-                              )}
-                            >
-                              {cue.thai.replace(/\n/g, " ") || L("No Thai line")}
-                            </p>
-                          </div>
-
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            aria-label={cue.reviewed ? "Mark as not checked" : "Mark as checked"}
-                            aria-pressed={cue.reviewed}
-                            disabled={!hasText(cue)}
-                            onClick={() => toggleReviewed(cue)}
-                            className={cn(
-                              "mt-0.5",
-                              cue.reviewed
-                                ? "text-foreground/80"
-                                : "text-muted-foreground/50",
-                            )}
-                          >
-                            {cue.reviewed ? (
-                              <CheckCircle2 className="size-4" />
-                            ) : (
-                              <Circle className="size-4" />
-                            )}
-                          </Button>
-                        </div>
-
-                        {active ? (
-                          <div className="space-y-2 border-t border-border/70 px-2.5 py-2">
-                            <Textarea
-                              value={cue.arabic}
-                              onChange={(event) =>
-                                handleCueChange(cue.id, "arabic", event.target.value)
-                              }
-                              onSelect={(event) => {
-                                caretRef.current = {
-                                  cueId: cue.id,
-                                  field: "arabic",
-                                  offset: event.currentTarget.selectionStart,
-                                };
-                              }}
-                              onKeyDown={(event) => {
-                                if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                                  event.preventDefault();
-                                  handleSplit(
-                                    cue.id,
-                                    "arabic",
-                                    event.currentTarget.selectionStart,
-                                  );
-                                }
-                              }}
-                              rows={2}
-                              dir="rtl"
-                              lang="ar"
-                              spellCheck={false}
-                              placeholder="Arabic Quran / Hadith line (optional)"
-                              className="resize-y text-right font-arabic text-base leading-relaxed"
-                            />
-                            <Textarea
-                              value={cue.thai}
-                              onChange={(event) =>
-                                handleCueChange(cue.id, "thai", event.target.value)
-                              }
-                              onBlur={() => handleCueBlur(cue.id, "thai")}
-                              onSelect={(event) => {
-                                caretRef.current = {
-                                  cueId: cue.id,
-                                  field: "thai",
-                                  offset: event.currentTarget.selectionStart,
-                                };
-                              }}
-                              onKeyDown={(event) => {
-                                if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                                  event.preventDefault();
-                                  handleSplit(cue.id, "thai", event.currentTarget.selectionStart);
-                                }
-                              }}
-                              rows={2}
-                              lang="th"
-                              placeholder="Thai explanation"
-                              className="resize-y text-sm leading-relaxed"
-                            />
-                            <div className="flex flex-wrap items-center gap-1">
-                              <Button
-                                size="xs"
-                                variant="outline"
-                                className="gap-1"
-                                disabled={!canPlay}
-                                onClick={() => playCue(cue)}
-                              >
-                                <Play className="size-3" />
-                                {L("Play")}
-                              </Button>
-                              {cue.arabic.trim() ? (
-                                <Button
-                                  size="xs"
-                                  variant="outline"
-                                  className="gap-1"
-                                  disabled={verifying === cue.id || Boolean(verifyAll)}
-                                  title="Verify Quran / Fix Arabic"
-                                  onClick={() => void handleVerify(cue)}
-                                >
-                                  {verifying === cue.id ? (
-                                    <Loader2 className="size-3 animate-spin" />
-                                  ) : (
-                                    <ShieldCheck className="size-3" />
-                                  )}
-                                  {L("Check Arabic")}
-                                </Button>
-                              ) : null}
-                              <Button
-                                size="icon-xs"
-                                variant="ghost"
-                                aria-label="Split line at the cursor"
-                                title="Split line at the cursor (Ctrl + Enter)"
-                                onClick={() => splitCue(cue)}
-                              >
-                                <Scissors className="size-3" />
-                              </Button>
-                              <Button
-                                size="icon-xs"
-                                variant="ghost"
-                                aria-label="Merge with the next line"
-                                title="Merge with the next line"
-                                disabled={!following}
-                                onClick={() => handleMerge(cue.id)}
-                              >
-                                <Merge className="size-3" />
-                              </Button>
-                              <Button
-                                size="icon-xs"
-                                variant="ghost"
-                                className="ml-auto text-destructive"
-                                title="Delete this line"
-                                aria-label={`Delete line ${index + 1}`}
-                                onClick={() => handleDelete(cue.id)}
-                              >
-                                <Trash2 className="size-3.5" />
-                              </Button>
-                            </div>
-                            <p className="text-xs leading-relaxed text-muted-foreground">
-                              Ctrl + Enter splits at the cursor · Space plays the line.
-                            </p>
-                          </div>
-                        ) : null}
-                      </div>
-                    );
-                  })
+                  visibleCues.map(({ cue, index }) => (
+                    <SubtitleCueRow
+                      key={cue.id}
+                      cue={cue}
+                      index={index}
+                      active={activeCue?.id === cue.id}
+                      hasFollowing={Boolean(cues[index + 1])}
+                      canPlay={canPlay}
+                      verifyingThis={verifying === cue.id}
+                      verifyAll={Boolean(verifyAll)}
+                      onPlayCue={playCue}
+                      onSelectCue={selectCue}
+                      onToggleReviewed={toggleReviewed}
+                      onCueChange={handleCueChange}
+                      onCueBlur={handleCueBlur}
+                      onSelectCaret={handleSelectCaret}
+                      onSplitAt={handleSplit}
+                      onVerify={handleVerify}
+                      onSplitCue={splitCue}
+                      onMerge={handleMerge}
+                      onDelete={handleDelete}
+                    />
+                  ))
                 )}
               </div>
             </div>

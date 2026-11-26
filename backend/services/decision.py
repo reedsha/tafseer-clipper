@@ -30,7 +30,9 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import threading
+import weakref
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -357,7 +359,7 @@ def _chat_completions_system_prompt(questions: dict[str, Question]) -> str:
         "You are a decision model. Answer each named question with a JSON object.",
         "Return ONLY a JSON object of the form {\"answers\": {<name>: <answer>}}.",
         "Each answer must include the fields appropriate to its type:",
-        "- noul: {\"probability\": <0..1>, \"confidence\": <0..1>}",
+        "- noul: {\"noul\": <0..1>, \"confidence\": <0..1>}",
         "- choice: {\"choice\": <label>, \"probabilities\": {<label>: <0..1>}, \"confidence\": <0..1>}",
         "- score: {\"score\": <level index 0..N-1>, \"confidence\": <0..1>}",
     ]
@@ -460,6 +462,8 @@ def _parse_answer(name: str, question: Question, entry: Any) -> Answer:
             implied_confidence = max(probabilities.values())
     elif expected == "noul":
         raw_noul = entry.get("noul")
+        if raw_noul is None and "probability" in entry:
+            raw_noul = entry.get("probability")
         if isinstance(raw_noul, bool):
             noul = raw_noul
             implied_confidence = 1.0
@@ -685,6 +689,36 @@ def _parse_decisions_answers(
 #: fixing the address or key in Settings must take effect on the next run.
 _detected_formats: dict[tuple[str, str], str] = {}
 _detected_lock = threading.Lock()
+_HTTP_CLIENTS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient] = (
+    weakref.WeakKeyDictionary()
+)
+_CODE_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
+
+
+def _strip_code_fences(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = _CODE_FENCE_RE.sub("", cleaned).strip()
+    return cleaned
+
+
+def _get_shared_client() -> httpx.AsyncClient:
+    loop = asyncio.get_running_loop()
+    client = _HTTP_CLIENTS.get(loop)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=32, max_keepalive_connections=16)
+        )
+        _HTTP_CLIENTS[loop] = client
+    return client
+
+
+async def close_http_client() -> None:
+    """Close any pooled client bound to the running event loop."""
+    loop = asyncio.get_running_loop()
+    client = _HTTP_CLIENTS.pop(loop, None)
+    if client is not None and not client.is_closed:
+        await client.aclose()
 
 
 def reset_format_cache() -> None:
@@ -707,28 +741,21 @@ def _probe_questions() -> dict[str, Question]:
     }
 
 
-async def detect_format(
+async def _detect_format_with_probe(
     provider: DecisionProviderConfig,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
-) -> str:
-    """Measure which wire shape a service answers, then remember it.
-
-    The probe question is sent in one format at a time - ``decisions`` first
-    (the forward-looking OpenAI shape), then ``systemone`` - and the first
-    parseable answer wins.  This is a measurement, not a hostname guess: a slot
-    left on "Detect automatically" works without the user knowing what a wire
-    format is, and an explicit format never pays for it.
-    """
+) -> tuple[str, Answer | None]:
+    """Measure which wire shape answers, returning the probe answer when newly measured."""
     key = (provider.endpoint_url or provider.base_url.rstrip("/"), provider.model)
     with _detected_lock:
         cached = _detected_formats.get(key)
     if cached:
-        return cached
+        return cached, None
     reasons: list[str] = []
     for candidate in (DECISIONS, SYSTEMONE, CHAT_COMPLETIONS):
         try:
-            await _ask(
+            answers = await _ask(
                 provider,
                 "This is a connection test.",
                 _probe_questions(),
@@ -740,11 +767,26 @@ async def detect_format(
             continue
         with _detected_lock:
             _detected_formats[key] = candidate
-        return candidate
+        return candidate, answers.get("reachable")
     raise DecisionError(
         "Could not detect how this service answers decision questions. "
         + " ".join(reasons)
     )
+
+
+async def detect_format(
+    provider: DecisionProviderConfig,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> str:
+    """Measure which wire shape a service answers, then remember it.
+
+    The probe question is sent in one format at a time - ``decisions`` first
+    (the forward-looking OpenAI shape), then ``systemone``, then ``chat_completions`` -
+    and the first parseable answer wins.
+    """
+    fmt, _answer = await _detect_format_with_probe(provider, transport=transport)
+    return fmt
 
 
 async def decide(
@@ -839,14 +881,20 @@ async def _ask(
     endpoint = provider.endpoint_for(wire_format)
 
     try:
-        async with httpx.AsyncClient(
-            timeout=provider.timeout, transport=transport
-        ) as client:
+        if transport is None:
+            client = _get_shared_client()
+            owned_client: httpx.AsyncClient | None = None
+        else:
+            owned_client = httpx.AsyncClient(
+                timeout=provider.timeout, transport=transport
+            )
+            client = owned_client
+        try:
             response: httpx.Response | None = None
             for attempt in range(2):
                 try:
                     response = await client.post(
-                        endpoint, headers=headers, json=payload
+                        endpoint, headers=headers, json=payload, timeout=provider.timeout
                     )
                 except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
                     if attempt == 0:
@@ -865,6 +913,9 @@ async def _ask(
                         _transport_message(provider, endpoint, exc)
                     ) from exc
                 break
+        finally:
+            if owned_client is not None:
+                await owned_client.aclose()
     except httpx.HTTPError as exc:
         raise DecisionError(_transport_message(provider, endpoint, exc)) from exc
 
@@ -892,7 +943,7 @@ async def _ask(
     if wire_format == DECISIONS:
         return _parse_decisions_answers(body, questions)
     if wire_format == CHAT_COMPLETIONS:
-        content = ""
+        content: Any = ""
         if isinstance(body, dict):
             choices = body.get("choices")
             if isinstance(choices, list) and choices:
@@ -908,19 +959,19 @@ async def _ask(
             parsed = content
         else:
             try:
-                parsed = json.loads(str(content))
+                parsed = json.loads(_strip_code_fences(str(content)))
             except (TypeError, ValueError) as exc:
                 raise DecisionError(
                     f"The decision provider returned invalid JSON: {str(content)[:400]}"
                 ) from exc
         if isinstance(parsed, dict) and "answers" in parsed:
-            payload = parsed
+            out_payload = parsed
         elif isinstance(parsed, dict):
-            payload = {"answers": parsed}
+            out_payload = {"answers": parsed}
         else:
             raise DecisionError("The decision provider returned a non-object reply.")
         # Reuse the systemone parser shape (answers keyed by name).
-        return _parse_answers(payload, questions)
+        return _parse_answers(out_payload, questions)
     return _parse_answers(body, questions)
 
 
@@ -932,11 +983,16 @@ async def probe(
     """One trivial question that proves the slot is reachable and compatible.
 
     Returns the format that answered, so Settings can remember it and the next
-    run needs no discovery.
+    run needs no discovery. Reuses the detection answer directly on ``auto``
+    instead of sending a second identical test request.
     """
     fmt = normalize_wire_format(provider.wire_format)
     if fmt == AUTO_FORMAT:
-        fmt = await detect_format(provider, transport=transport)
+        fmt, detected_answer = await _detect_format_with_probe(
+            provider, transport=transport
+        )
+        if detected_answer is not None:
+            return fmt, detected_answer
     answers = await _ask(
         provider,
         "This is a connection test.",

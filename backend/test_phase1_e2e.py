@@ -1168,11 +1168,11 @@ def run_http_checks(
         )
         verify_body = verify.json() if verify.status_code == 200 else {}
         check(
-            "POST /verify-arabic: round trip through OpenAI-compatible provider",
+            "POST /verify-arabic: offline mode marks non-corpus line as unmatched, text unchanged",
             verify.status_code == 200
             and verify_body.get("verified_text") == PLAIN_ARABIC
             and verify_body.get("correction_applied") is False
-            and verify_body.get("source") == "needs_model"
+            and verify_body.get("source") == "unmatched"
             and verify_body.get("model") == "",
             f"{verify.status_code} corrected={verify_body.get('correction_applied')} "
             f"source={verify_body.get('source')}",
@@ -1283,6 +1283,152 @@ def run_http_checks(
             f"{no_source.status_code}",
         )
 
+        # ---- 8. content-negotiated SSE progress for Steps 1 and 2 ---------- #
+        def _parse_sse_text(raw: str) -> list[dict[str, Any]]:
+            events: list[dict[str, Any]] = []
+            for block in raw.replace("\r\n", "\n").split("\n\n"):
+                block = block.strip()
+                if not block or block.startswith(":"):
+                    continue
+                ev_name = "message"
+                data_lines: list[str] = []
+                for line in block.splitlines():
+                    if line.startswith("event:"):
+                        ev_name = line[6:].strip()
+                    elif line.startswith("data:"):
+                        data_lines.append(line[5:].strip())
+                if not data_lines:
+                    continue
+                payload = json.loads("\n".join(data_lines))
+                payload["_event"] = ev_name
+                events.append(payload)
+            return events
+
+        class _ProgressFakeEngine:
+            model_size = "tiny"
+            device = "cpu"
+            compute_type = "int8"
+            loaded = False
+
+            def transcribe(self, audio_path, **kwargs):  # noqa: ANN003, ARG002
+                cb = kwargs.get("on_progress")
+                if callable(cb):
+                    cb(0.5, "Transcribing speech (50%)…")
+                    cb(1.0, "Transcribing speech (100%)…")
+                return transcriber.TranscriptionResult(
+                    segments=[
+                        transcriber.Segment(
+                            id=0,
+                            start=4.0,
+                            end=28.0,
+                            text="ความอดทนเป็นครึ่งหนึ่งของความศรัทธา",
+                            language="th",
+                        )
+                    ],
+                    duration=60.0,
+                    language="th",
+                    language_probability=0.95,
+                    device="cpu",
+                    compute_type="int8",
+                    model="tiny",
+                    vram_unloaded=False,
+                )
+
+            def unload(self) -> bool:
+                return False
+
+        real_engine_for = sidecar_main._engine_for
+        sidecar_main._engine_for = lambda _body: _ProgressFakeEngine()
+        sse_transcript_id = ""
+        try:
+            async def _call_sse_transcribe() -> httpx.Response:
+                transport = httpx.ASGITransport(
+                    app=sidecar_main.app, raise_app_exceptions=False
+                )
+                async with httpx.AsyncClient(
+                    transport=transport, base_url="http://sidecar"
+                ) as async_client:
+                    return await async_client.post(
+                        "/extract-and-transcribe",
+                        json={
+                            "file_path": str(source),
+                            "use_local_whisper": True,
+                            "detect_arabic": False,
+                            "group_sentences": False,
+                            "auto_unload": False,
+                        },
+                        headers={"Accept": "text/event-stream, application/json"},
+                    )
+
+            sse_tr_res = asyncio.run(_call_sse_transcribe())
+        finally:
+            sidecar_main._engine_for = real_engine_for
+
+        sse_tr_events = (
+            _parse_sse_text(sse_tr_res.text)
+            if sse_tr_res.status_code == 200
+            and "text/event-stream" in sse_tr_res.headers.get("content-type", "").lower()
+            else []
+        )
+        sse_tr_done = next((e for e in sse_tr_events if e.get("_event") == "done"), {})
+        sse_transcript_id = str(sse_tr_done.get("transcript_id") or "")
+        check(
+            "POST /extract-and-transcribe: Accept: text/event-stream emits start/progress/done",
+            sse_tr_res.status_code == 200
+            and any(e.get("_event") == "start" for e in sse_tr_events)
+            and any(
+                e.get("_event") == "progress" and float(e.get("progress", 0.0)) > 0.0
+                for e in sse_tr_events
+            )
+            and bool(sse_transcript_id)
+            and len(sse_tr_done.get("segments") or []) == 1,
+            f"status={sse_tr_res.status_code} events={[e.get('_event') for e in sse_tr_events]}",
+        )
+
+        if sse_transcript_id:
+            async def _call_sse_discover() -> httpx.Response:
+                transport = httpx.ASGITransport(
+                    app=sidecar_main.app, raise_app_exceptions=False
+                )
+                async with httpx.AsyncClient(
+                    transport=transport, base_url="http://sidecar"
+                ) as async_client:
+                    return await async_client.post(
+                        "/discover-clips",
+                        json={
+                            "transcript_id": sse_transcript_id,
+                            "provider": {
+                                "base_url": mock_base_url,
+                                "model": "mock-reasoning",
+                            },
+                        },
+                        headers={"Accept": "text/event-stream, application/json"},
+                    )
+
+            sse_disc_res = asyncio.run(_call_sse_discover())
+            sse_disc_events = (
+                _parse_sse_text(sse_disc_res.text)
+                if sse_disc_res.status_code == 200
+                and "text/event-stream" in sse_disc_res.headers.get("content-type", "").lower()
+                else []
+            )
+        else:
+            sse_disc_res = None
+            sse_disc_events = []
+        sse_disc_done = next(
+            (e for e in sse_disc_events if e.get("_event") == "done"), {}
+        )
+        check(
+            "POST /discover-clips: Accept: text/event-stream emits start/progress/done",
+            sse_disc_res is not None
+            and sse_disc_res.status_code == 200
+            and any(e.get("_event") == "start" for e in sse_disc_events)
+            and any(e.get("_event") == "progress" for e in sse_disc_events)
+            and len(sse_disc_done.get("clips") or []) == 2,
+            f"status={getattr(sse_disc_res, 'status_code', None)} "
+            f"events={[e.get('_event') for e in sse_disc_events]}",
+        )
+
 
 # --------------------------------------------------------------------------- #
 # Unit checks
@@ -1365,7 +1511,7 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         f"{srt.count('-->')} blocks",
     )
 
-    # ---- renderer graph ---------------------------------------------------- #
+    # ---- renderer graph + atomic staging ---------------------------------- #
     graph = renderer.build_filtergraph(
         resolution="1080x1920",
         framing="blur-fill",
@@ -1381,6 +1527,45 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         and "fontsdir=" in graph
         and "\\:" in graph,
         graph[:110] + "...",
+    )
+    atomic_target = work / "atomic_preserved.mp4"
+    atomic_target.write_bytes(b"EXISTING_VALID_MP4")
+    dummy_ass = work / "atomic_dummy.ass"
+    subtitle_gen.write_ass(
+        dummy_ass,
+        cues=[subtitle_gen.Cue(0.0, 1.0, thai=THAI_TEXT)],
+        resolution="1080x1920",
+        clip_duration=1.0,
+    )
+    atomic_err: Exception | None = None
+    try:
+        for _ in renderer._run_once(
+            renderer.RenderJob(
+                source=work / "does_not_exist.mp4",
+                output=atomic_target,
+                start=0.0,
+                duration=1.0,
+                resolution="1080x1920",
+                framing="blur-fill",
+                ass_path=dummy_ass,
+                fonts_dir=fonts_dir,
+                use_nvenc=False,
+            ),
+            "libx264",
+            ffmpeg_bin(),
+        ):
+            pass
+    except renderer.RenderError as exc:
+        atomic_err = exc
+    staging_leftovers = list(work.glob("*.rendering.*"))
+    check(
+        "renderer: atomic staging cleans temp file and preserves existing MP4 on failure",
+        atomic_err is not None
+        and atomic_target.is_file()
+        and atomic_target.read_bytes() == b"EXISTING_VALID_MP4"
+        and not staging_leftovers,
+        f"err={type(atomic_err).__name__ if atomic_err else None} "
+        f"leftovers={staging_leftovers}",
     )
 
     # ---- fontsdir really resolves the imported family --------------------- #
@@ -3111,11 +3296,11 @@ def run_decision_checks(work: Path, source: Path) -> None:
         "decision: auto measures the format once, caches it and never guesses by host",
         fmt == decision.SYSTEMONE
         and fmt_again == decision.SYSTEMONE
-        # Detection sends one rejected probe to /decisions, one accepted probe
-        # to /systemone, then the Test question itself; a second detection adds
-        # no request because the measured format is cached.
+        # Detection sends one rejected probe to /decisions and one accepted probe
+        # to /systemone (probe() reuses the detection reply); a second detection
+        # adds no request because the measured format is cached.
         and probed
-        == ["/v1/decisions", "/v1/systemone", "/v1/systemone"],
+        == ["/v1/decisions", "/v1/systemone"],
         f"fmt={fmt} probed={probed}",
     )
     decision.reset_format_cache()
@@ -3372,7 +3557,7 @@ def run_decision_checks(work: Path, source: Path) -> None:
         f"source={gated.lines[0].source if gated.lines else 'none'}",
     )
 
-    # D: non-corpus lines are reported honestly as needs_model, text unchanged.
+    # D: non-corpus lines are reported honestly as unmatched, text unchanged.
     skipped = asyncio.run(
         verify_service.verify_lines(
             [
@@ -3386,9 +3571,9 @@ def run_decision_checks(work: Path, source: Path) -> None:
         )
     )
     check(
-        "verify: non-corpus lines report needs_model, text unchanged",
+        "verify: non-corpus lines report unmatched, text unchanged",
         len(skipped.lines) == 40
-        and all(line.source == "needs_model" for line in skipped.lines)
+        and all(line.source == "unmatched" for line in skipped.lines)
         and all(
             line.verified_text == f"{not_a_verse} {index}"
             for index, line in enumerate(skipped.lines)
@@ -3399,7 +3584,7 @@ def run_decision_checks(work: Path, source: Path) -> None:
         f"proof={skipped.proofread_lines}",
     )
 
-    # A non-corpus line with no model reports needs_model, text unchanged.
+    # A non-corpus line with no model reports unmatched, text unchanged.
     missing = asyncio.run(
         verify_service.verify_lines(
             [verify_service.VerifyLine(arabic_text=not_a_verse, cue_id="cue-x")],
@@ -3408,9 +3593,9 @@ def run_decision_checks(work: Path, source: Path) -> None:
         )
     )
     check(
-        "verify: a non-corpus line with no model reports needs_model, text unchanged",
+        "verify: a non-corpus line with no model reports unmatched, text unchanged",
         len(missing.lines) == 1
-        and missing.lines[0].source == "needs_model"
+        and missing.lines[0].source == "unmatched"
         and missing.lines[0].verified_text == not_a_verse
         and missing.lines[0].correction_applied is False
         and missing.lines[0].cue_id == "cue-x"
@@ -3465,9 +3650,9 @@ def run_decision_checks(work: Path, source: Path) -> None:
         f"reference={corpus_body.get('reference')}",
     )
     check(
-        "POST /verify-arabic: a non-corpus line with no model reports needs_model, text unchanged",
+        "POST /verify-arabic: a non-corpus line with no model reports unmatched, text unchanged",
         plain_only.status_code == 200
-        and plain_body.get("source") == "needs_model"
+        and plain_body.get("source") == "unmatched"
         and plain_body.get("verified_text") == PLAIN_ARABIC
         and plain_body.get("correction_applied") is False
         and bool(plain_body.get("notes")),
@@ -3475,11 +3660,11 @@ def run_decision_checks(work: Path, source: Path) -> None:
         f"proof=0",
     )
     check(
-        "POST /verify-arabic: a mixed batch completes offline (quran + needs_model)",
+        "POST /verify-arabic: a mixed batch completes offline (quran + unmatched)",
         mixed.status_code == 200
         and len(mixed_lines) == 2
         and mixed_by_cue.get("cue-quran", {}).get("source") == "quran"
-        and mixed_by_cue.get("cue-plain", {}).get("source") == "needs_model"
+        and mixed_by_cue.get("cue-plain", {}).get("source") == "unmatched"
         and mixed_by_cue.get("cue-plain", {}).get("verified_text") == PLAIN_ARABIC,
         f"{mixed.status_code} sources={[line.get('source') for line in mixed_lines]}",
     )
@@ -3727,6 +3912,380 @@ def run_decision_checks(work: Path, source: Path) -> None:
     finally:
         analyzer.group_sentences = real_group
         analyzer.decide = real_analyzer_decide
+
+    # ---- H. Waves 1-5 regressions (R-05) ---------------------------------- #
+    # Wave 1: waqf/dagger-alef/span Qur'an accuracy & bounded latency.
+    verse_checks = [
+        ("ذلك الكتاب لا ريب فيه", "2:2"),
+        ("وإذ قال موسى لقومه يا قوم إنكم ظلمتم أنفسكم", "2:54"),
+        (
+            "يا أيها الذين آمنوا كتب عليكم الصيام كما كتب على الذين من قبلكم لعلكم تتقون",
+            "2:183",
+        ),
+        ("لا يكلف الله نفسا إلا وسعها", "2:286"),
+        ("الله لا إله إلا هو الحى القيوم لا تأخذه سنه ولا نوم", "2:255"),
+    ]
+    verse_results = [(expected, quran.match_text(txt)) for txt, expected in verse_checks]
+    check(
+        "quran: dagger-alef / waqf / typo matches exact references (2:2..2:286)",
+        all(m is not None and m.reference == expected for expected, m in verse_results),
+        str([(exp, getattr(m, "reference", None)) for exp, m in verse_results]),
+    )
+    t_miss_start = time.perf_counter()
+    miss_span = quran.match_text(
+        "هذا كلام عربي عادي ليس من القران الكريم في شيء ابدا"
+    )
+    miss_elapsed = time.perf_counter() - t_miss_start
+    check(
+        "quran: 10-word non-Quranic query returns None rapidly",
+        miss_span is None and miss_elapsed < 0.15,
+        f"miss={miss_span} elapsed={miss_elapsed:.4f}s",
+    )
+
+    # Wave 1: straddling start+end recovery preserves trimmed text on both sides.
+    wave_path = work / "straddle.wav"
+    with wave.open(str(wave_path), "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(16_000)
+        writer.writeframes(b"\x00\x00" * (16_000 * 5))
+
+    async def _fake_straddle_arabic(_path: Path) -> transcriber.TranscriptionResult:
+        return transcriber.TranscriptionResult(
+            segments=[
+                transcriber.Segment(
+                    id=0, start=0.0, end=2.4, text="بسم الله الرحمن الرحيم", language="ar"
+                )
+            ],
+            duration=2.4,
+            language="ar",
+            language_probability=1.0,
+            device="cloud",
+            compute_type="cloud",
+            model="mock",
+            vram_unloaded=False,
+        )
+
+    straddle_segs = [
+        transcriber.Segment(id=0, start=0.0, end=2.0, text="นำหน้า บิสมิลลาฮิ", language="th"),
+        transcriber.Segment(id=1, start=2.0, end=4.0, text="เราะฮีม ปิดท้าย", language="th"),
+    ]
+    raw_span = {"start": 0.8, "end": 3.2, "kind": "quran", "reference": "1:1", "confidence": 0.9}
+    raw_span_keys = set(raw_span.keys())
+    straddle_merged = asyncio.run(
+        recitation.recover_arabic(
+            wav_path=wave_path,
+            segments=straddle_segs,
+            spans=[raw_span],
+            transcribe_span=_fake_straddle_arabic,
+        )
+    )
+    check(
+        "recitation: straddling span trims both lead and tail without mutating span",
+        len(straddle_merged) == 3
+        and straddle_merged[0].text == "นำหน้า"
+        and straddle_merged[1].language == "ar"
+        and straddle_merged[2].text == "ปิดท้าย"
+        and set(raw_span.keys()) == raw_span_keys,
+        str([(s.language, s.text) for s in straddle_merged]),
+    )
+
+    # Wave 1: offline Phase B splits mixed Thai+Arabic Qur'an text without LLM.
+    mixed_seg_in = [
+        transcriber.Segment(
+            id=0,
+            start=0.0,
+            end=5.0,
+            text="คำนำก่อนอ่าน بسم الله الرحمن الرحيم คำอธิบายต่อท้าย",
+            language="th",
+        )
+    ]
+    mixed_out, mixed_resolved = sidecar_main._apply_phase_b_corpus_short_circuit(mixed_seg_in)
+    check(
+        "recitation: offline Phase B splits mixed Thai+Arabic into th/ar/th segments",
+        len(mixed_out) == 3
+        and [(s.language, s.source) for s in mixed_out]
+        == [("th", None), ("ar", "quran"), ("th", None)]
+        and mixed_out[1].reference == "1:1"
+        and mixed_resolved == {1},
+        str([(s.language, s.source, s.reference) for s in mixed_out]),
+    )
+
+    # Wave 2: chat_completions adapter handles code fences + noul key.
+    fence_transport = httpx.MockTransport(
+        lambda _req: httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": '```json\n{"answers": {"ok": {"noul": 0.88, "confidence": 0.88}}}\n```'
+                        }
+                    }
+                ]
+            },
+        )
+    )
+    cc_provider = decision.DecisionProviderConfig(
+        base_url="http://127.0.0.1:9999/v1",
+        api_key=None,
+        model="mock-chat-decision",
+        timeout=5.0,
+        wire_format="chat_completions",
+    )
+    cc_answers = asyncio.run(
+        decision.decide(
+            cc_provider,
+            "Sample text",
+            {"ok": decision.Question(type="noul", instructions="Is it ok?")},
+            transport=fence_transport,
+        )
+    )
+    check(
+        "decision: chat_completions strips code fences and parses noul probability",
+        cc_answers["ok"].noul is True and abs(cc_answers["ok"].confidence - 0.88) < 1e-6,
+        str(cc_answers["ok"]),
+    )
+
+    # Wave 3: prompt cache ordering, O(C) Pass-2 packing + tail excerpts, compact starts.
+    discover_msgs = analyzer.build_discover_messages(
+        segments=[{"start": 0.0, "end": 10.0, "text": "บทเรียนเรื่องความอดทน"}],
+        base_prompt="",
+        session_guide="ความอดทน",
+        refinement_note="focus on ending",
+        excluded_ranges=[{"start": 20.0, "end": 30.0}],
+        language="th",
+    )
+    discover_user = discover_msgs[-1]["content"]
+    check(
+        "analyzer: static TRANSCRIPT precedes dynamic EXCLUDED/REFINEMENT blocks",
+        discover_user.index("TRANSCRIPT:")
+        < discover_user.index("ALREADY APPROVED / EXCLUDED RANGES")
+        < discover_user.index("REFINEMENT NOTE"),
+        "static prefix before dynamic suffix",
+    )
+
+    long_seg_text = "หัวเรื่องเริ่มต้น " + ("กลางเรื่อง " * 35) + "สรุปจบสมบูรณ์"
+    long_segs = [
+        {"start": float(i), "end": float(i + 1), "text": f"ส่วนที่ {i} ความอดทน"}
+        for i in range(3000)
+    ]
+    long_segs[100] = {"start": 100.0, "end": 101.0, "text": long_seg_text}
+    excerpt_head_tail = analyzer._candidate_excerpt(long_segs, 100.0, 101.0)
+    many_cands = [
+        {
+            "start": float(i * 20),
+            "end": float(i * 20 + 25),
+            "title": f"หัวข้อ {i}",
+            "rationale": "อธิบายชัดเจน",
+        }
+        for i in range(120)
+    ]
+    t_pack = time.perf_counter()
+    packed_many = analyzer._plan_selection_batches(
+        many_cands, long_segs, "", "", "", 32_768
+    )
+    pack_elapsed = time.perf_counter() - t_pack
+    check(
+        "analyzer: _plan_selection_batches packs 120x3000 in <0.25s with tail excerpt",
+        len(packed_many) >= 1
+        and pack_elapsed < 0.25
+        and "หัวเรื่องเริ่มต้น" in excerpt_head_tail
+        and "…" in excerpt_head_tail
+        and "สรุปจบสมบูรณ์" in excerpt_head_tail
+        and len(excerpt_head_tail) <= analyzer.SYNTHESIS_EXCERPT_CHARS,
+        f"elapsed={pack_elapsed:.4f}s excerpt_len={len(excerpt_head_tail)}",
+    )
+
+    compact_segs = [
+        {"id": 0, "start": 0.0, "end": 1.0, "text": "ประโยคแรก"},
+        {"id": 1, "start": 1.0, "end": 2.0, "text": "ต่อจากนั้น"},
+        {"id": 2, "start": 2.0, "end": 3.0, "text": "ประโยคใหม่"},
+    ]
+    real_chat_fn = analyzer.chat
+
+    async def _fake_starts_chat(*_args, **_kwargs):
+        return '{"starts": [0, 2]}'
+
+    analyzer.chat = _fake_starts_chat
+    try:
+        starts_map = asyncio.run(
+            analyzer.group_sentences(
+                segments=compact_segs, provider=sentence_provider
+            )
+        )
+    finally:
+        analyzer.chat = real_chat_fn
+    check(
+        "analyzer: group_sentences parses compact starts payload",
+        starts_map == {0: 0, 1: 0, 2: 1},
+        str(starts_map),
+    )
+
+    # Wave 3: sticky verbose_json -> json fallback across multiple cloud chunks.
+    chunk_a = work / "cloud_a.wav"
+    chunk_b = work / "cloud_b.wav"
+    for p in (chunk_a, chunk_b):
+        p.write_bytes(wave_path.read_bytes())
+    formats_seen: list[str] = []
+
+    class _MockSttHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def do_POST(self):
+            length = int(self.headers.get("content-length") or 0)
+            body_text = self.rfile.read(length).decode("latin-1", errors="ignore")
+            fmt = "verbose_json" if "verbose_json" in body_text else "json"
+            formats_seen.append(fmt)
+            if fmt == "verbose_json":
+                payload = b"response_format verbose_json unsupported"
+                self.send_response(400)
+                self.send_header("content-type", "text/plain")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            payload = json.dumps({"text": "คำพูด"}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    stt_server = ThreadingHTTPServer(("127.0.0.1", 0), _MockSttHandler)
+    stt_thread = threading.Thread(target=stt_server.serve_forever, daemon=True)
+    stt_thread.start()
+    stt_port = int(stt_server.server_address[1])
+    real_prep = transcriber._prepare_cloud_upload
+    transcriber._prepare_cloud_upload = lambda *_a, **_kw: (
+        [
+            transcriber._CloudChunk(offset=0.0, duration=1.5, path=chunk_a, temporary=False),
+            transcriber._CloudChunk(offset=1.5, duration=1.5, path=chunk_b, temporary=False),
+        ],
+        [],
+    )
+    try:
+        cloud_res = asyncio.run(
+            transcriber.transcribe_cloud(
+                wave_path,
+                base_url=f"http://127.0.0.1:{stt_port}/v1",
+                api_key="k",
+                model="gpt-4o-mini-transcribe",
+            )
+        )
+    finally:
+        transcriber._prepare_cloud_upload = real_prep
+        stt_server.shutdown()
+        stt_server.server_close()
+    check(
+        "transcriber: cloud STT downgrades verbose_json -> json stickily across chunks",
+        formats_seen == ["verbose_json", "json", "json"] and len(cloud_res.segments) >= 2,
+        f"formats={formats_seen} segs={len(cloud_res.segments)}",
+    )
+
+    # Wave 4: shared subtitle_contract.json + BorderStyle=3 pixel transparency proof.
+    def_ar, def_th = subtitle_gen.default_styles("1080x1920")
+    thai_box_style = sidecar_main._style_from_spec(
+        def_th, sidecar_main.StyleSpec(box_opacity=0.15)
+    )
+    thai_nobox_style = sidecar_main._style_from_spec(
+        def_th, sidecar_main.StyleSpec(box_opacity=0.0)
+    )
+    ass_box = subtitle_gen.build_ass(
+        [subtitle_gen.Cue(0.0, 1.0, thai="กล่องโปร่งใส")],
+        resolution="1080x1920",
+        thai_style=thai_box_style,
+    ).content
+    box_style_line = next(
+        line for line in ass_box.splitlines() if line.startswith("Style: ThaiStyle,")
+    ).split(",")
+    check(
+        "subtitle_gen: loads subtitle_contract.json and writes BorderStyle=3 alpha in OutlineColour",
+        def_ar.margin_v == 252
+        and def_th.margin_v == 150
+        and thai_nobox_style.border_style == 1
+        and thai_box_style.border_style == 3
+        and box_style_line[5] == "&HD9000000"
+        and box_style_line[6] == "&HFF000000"
+        and box_style_line[17] == "0",
+        f"margin_v={def_th.margin_v} cols={box_style_line[5:7]} shadow={box_style_line[17]}",
+    )
+
+    bg_mp4 = work / "alpha_bg.mp4"
+    out_alpha_mp4 = work / "alpha_out.mp4"
+    alpha_ass_path = work / "alpha.ass"
+    subprocess.run(
+        [
+            str(ffmpeg_bin()),
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0xDCDCDC:s=640x360:r=10:d=0.6",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(bg_mp4),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    alpha_style = subtitle_gen.StyleConfig(
+        name="ThaiStyle",
+        font="Tahoma",
+        size=44,
+        primary_color="#FFFFFF",
+        outline_color="#0B0C0D",
+        back_color="#000000",
+        outline=14.0,
+        shadow=0.0,
+        margin_v=80,
+        margin_l=20,
+        margin_r=20,
+        border_style=3,
+        back_alpha="D9",
+    )
+    alpha_doc = subtitle_gen.build_ass(
+        [subtitle_gen.Cue(0.0, 0.6, thai="ทดสอบกล่องข้อความ")],
+        resolution="1920x1080",
+        thai_style=alpha_style,
+    )
+    alpha_ass_path.write_text(
+        alpha_doc.content.replace("PlayResX: 1920", "PlayResX: 640").replace(
+            "PlayResY: 1080", "PlayResY: 360"
+        ),
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            str(ffmpeg_bin()),
+            "-y",
+            "-i",
+            str(bg_mp4),
+            "-vf",
+            f"ass=filename={renderer.escape_filter_path(alpha_ass_path)}:fontsdir={renderer.escape_filter_path(ARTIFACTS / 'fonts')}",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(out_alpha_mp4),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    alpha_rgb = load_rgb(
+        extract_frame(ffmpeg_bin(), out_alpha_mp4, 0.3, work / "alpha_frame.png")
+    )
+    band_lum = alpha_rgb[230:290, 200:440].mean(axis=2)
+    tinted_box_px = band_lum[(band_lum > 140) & (band_lum < 205)]
+    solid_black_px = band_lum[band_lum <= 30]
+    check(
+        "FFmpeg BorderStyle=3: box_opacity=0.15 blends semi-transparently over bright frame",
+        len(tinted_box_px) > 1000 and len(solid_black_px) == 0,
+        f"tinted={len(tinted_box_px)} solid_black={len(solid_black_px)}",
+    )
 
     # ---- G. deferred unload (Phase 3.0) ----------------------------------- #
     class _UnloadProbeEngine(transcriber.WhisperTranscriber):
