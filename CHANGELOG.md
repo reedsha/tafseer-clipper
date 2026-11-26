@@ -11,6 +11,13 @@ Conventional Commit into `main`, and a `chore(release): vX.Y.Z` pull request
 appears that bumps every version anchor and regenerates this file. Merging that
 pull request creates the `vX.Y.Z` tag and starts the Windows release build.
 
+## [1.0.3](https://github.com/reedsha/tafseer-clipper/compare/v1.0.2...v1.0.3) (2026-11-26)
+
+
+### Features
+
+* **subtitles:** add undo/redo, Play clip toggle, subtitle reset, system fonts list, and reorder Step 1 config ([0322db1](https://github.com/reedsha/tafseer-clipper/commit/0322db1bf62778760298d029a66f3bd704134e87))
+
 ## [1.0.2](https://github.com/reedsha/tafseer-clipper/compare/v1.0.1...v1.0.2) (2026-11-26)
 
 
