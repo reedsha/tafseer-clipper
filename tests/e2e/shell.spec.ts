@@ -287,6 +287,89 @@ test.describe("app shell", () => {
 
     await expect(page.getByRole("heading", { name: "เพิ่มบทบรรยายของคุณ" })).toBeVisible();
   });
+
+  test("desktop titlebar, Step 1 dialog IPC, and HEAD-only media probing work together", async ({
+    page,
+  }) => {
+    const assetRequests: { method: string; range: string | null }[] = [];
+    await page.route("http://asset.localhost/**", async (route) => {
+      const request = route.request();
+      const method = request.method();
+      const range = request.headers()["range"] ?? null;
+      assetRequests.push({ method, range });
+      if (method === "HEAD") {
+        await route.fulfill({
+          status: 200,
+          headers: { "Content-Length": "4294967296" },
+          body: "",
+        });
+        return;
+      }
+      await route.fulfill({ status: 404, body: "" });
+    });
+
+    await page.addInitScript(() => {
+      const invoked: string[] = [];
+      const host = window as unknown as {
+        __TAURI_INVOKED__?: string[];
+        __TAURI_INTERNALS__?: Record<string, unknown>;
+      };
+      host.__TAURI_INVOKED__ = invoked;
+      host.__TAURI_INTERNALS__ = {
+        metadata: {
+          currentWindow: { label: "main" },
+          currentWebview: { label: "main", windowLabel: "main" },
+        },
+        convertFileSrc: (filePath: string, protocol = "asset") =>
+          `http://${protocol}.localhost/${encodeURIComponent(filePath)}`,
+        transformCallback: () => 1,
+        unregisterCallback: () => {},
+        invoke: async (cmd: string) => {
+          invoked.push(cmd);
+          if (cmd === "plugin:window|is_maximized") return false;
+          if (cmd === "plugin:event|listen") return 1;
+          if (cmd === "plugin:path|resolve_directory" || cmd === "plugin:path|join") {
+            return "C:/Users/Test/AppData/Local/Tafseer Clipper";
+          }
+          if (cmd === "plugin:fs|exists") return false;
+          return null;
+        },
+      };
+    });
+
+    await seedResumableProject(page);
+    await page.goto("/");
+
+    await page
+      .getByRole("main")
+      .getByRole("button", { name: new RegExp(PROJECT_NAME) })
+      .click();
+    await expect(page.getByRole("heading", { name: "Find clips" })).toBeVisible();
+
+    await expect
+      .poll(() => assetRequests.some((req) => req.method === "HEAD"))
+      .toBe(true);
+    expect(assetRequests.filter((req) => req.method === "GET" && !req.range)).toEqual([]);
+
+    await expect(page.locator('[data-tauri-drag-region="true"]')).toBeVisible();
+    await page.getByRole("button", { name: "Minimize", exact: true }).click();
+    await page.getByRole("button", { name: "Maximize", exact: true }).click();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+
+    await page
+      .getByRole("navigation", { name: "Wizard steps" })
+      .getByRole("button", { name: /1\. Upload/ })
+      .click();
+    await page.getByRole("button", { name: "Drop a lecture video or browse" }).click();
+
+    const invoked = await page.evaluate(
+      () => (window as unknown as { __TAURI_INVOKED__?: string[] }).__TAURI_INVOKED__ ?? [],
+    );
+    expect(invoked).toContain("plugin:window|minimize");
+    expect(invoked).toContain("plugin:window|toggle_maximize");
+    expect(invoked).toContain("plugin:window|close");
+    expect(invoked).toContain("plugin:dialog|open");
+  });
 });
 
 test.describe("no-session start screen", () => {

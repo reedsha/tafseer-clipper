@@ -100,22 +100,34 @@ export function TitleBar() {
         </span>
       </div>
 
-      <div className="flex items-stretch">
+      <div data-tauri-drag-region="false" className="flex items-stretch">
         <TitleBarButton
           label={L("Minimize")}
-          onClick={() => void appWindow.minimize().catch(() => {})}
+          onClick={() =>
+            void appWindow.minimize().catch((error) => {
+              console.error("TitleBar minimize failed", error);
+            })
+          }
         >
           <Minus className="size-3.5" />
         </TitleBarButton>
         <TitleBarButton
           label={maximized ? L("Restore down") : L("Maximize")}
-          onClick={() => void appWindow.toggleMaximize().catch(() => {})}
+          onClick={() =>
+            void appWindow.toggleMaximize().catch((error) => {
+              console.error("TitleBar toggleMaximize failed", error);
+            })
+          }
         >
           {maximized ? <Copy className="size-3" /> : <Square className="size-3" />}
         </TitleBarButton>
         <TitleBarButton
           label={L("Close")}
-          onClick={() => void appWindow.close().catch(() => {})}
+          onClick={() =>
+            void appWindow.close().catch((error) => {
+              console.error("TitleBar close failed", error);
+            })
+          }
           close
         >
           <X className="size-3.5" />

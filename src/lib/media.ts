@@ -76,26 +76,52 @@ export interface MediaProbe {
   size: number | null;
 }
 
+const PROBE_TIMEOUT_MS = 5_000;
+
+function parseContentRangeTotal(header: string | null): number | null {
+  if (!header) return null;
+  const match = /\/(\d+)\s*$/.exec(header);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 /**
- * Probe an asset-protocol URL for reachability and size without downloading the
- * body. Used to tell "file missing/moved" apart from "codec unsupported" when a
+ * Probe an asset-protocol URL for reachability and size without buffering the
+ * file. Used to tell "file missing/moved" apart from "codec unsupported" when a
  * preview fails, and to validate a re-linked lecture. Never throws.
+ *
+ * Uses `HEAD` (never an unbounded `GET`): Tauri's asset protocol reads the
+ * entire file into memory on plain `GET` before responding, which freezes the
+ * Windows UI/IPC thread for multi-GB lectures.
  */
 export async function probeMediaSrc(src: string): Promise<MediaProbe> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
   try {
-    const response = await fetch(src);
-    const header = response.headers.get("Content-Length");
-    const parsed = header === null ? NaN : Number(header);
-    // Only status + length are needed; drop the body immediately so a multi-GB
-    // lecture is never streamed into the renderer.
-    void response.body?.cancel().catch(() => {});
+    let response = await fetch(src, { method: "HEAD", signal: controller.signal });
+    let size: number | null = null;
+    if (response.status === 405) {
+      response = await fetch(src, {
+        headers: { Range: "bytes=0-0" },
+        signal: controller.signal,
+      });
+      size = parseContentRangeTotal(response.headers.get("Content-Range"));
+      void response.body?.cancel().catch(() => {});
+    } else {
+      const header = response.headers.get("Content-Length");
+      const parsed = header === null ? NaN : Number(header);
+      size = Number.isFinite(parsed) ? parsed : null;
+    }
     return {
       ok: response.ok,
       status: response.status,
-      size: Number.isFinite(parsed) ? parsed : null,
+      size,
     };
   } catch {
     return { ok: false, status: null, size: null };
+  } finally {
+    window.clearTimeout(timer);
   }
 }
 
@@ -203,7 +229,9 @@ export async function openLectureFile(): Promise<LecturePick> {
         reason:
           error instanceof Error
             ? error.message
-            : "The native file dialog is not available in this build.",
+            : typeof error === "string" && error.trim()
+              ? error
+              : "The native file dialog is not available in this build.",
       };
     }
   }
