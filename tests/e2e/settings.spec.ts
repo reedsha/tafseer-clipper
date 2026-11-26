@@ -854,3 +854,87 @@ test.describe("sessions sidebar", () => {
     await expect(sidebar.getByLabel("Session name")).toHaveCount(0);
   });
 });
+
+test.describe("stage configuration layout & fonts", () => {
+  test("Step 1 configuration orders Speech-to-text, Analysis model, then glossary", async ({
+    page,
+  }) => {
+    await goToWorkspace(page);
+    await openStepConfig(page, 1, "Upload");
+
+    const sttHeading = page.getByRole("heading", { name: "Speech-to-text" });
+    const analysisHeading = page.getByRole("heading", { name: "Analysis model" });
+    const glossaryHeading = page.getByRole("heading", {
+      name: "Thai–Arabic spelling glossary",
+    });
+
+    await expect(sttHeading).toBeVisible();
+    await expect(analysisHeading).toBeVisible();
+    await expect(glossaryHeading).toBeVisible();
+
+    const sttBox = await sttHeading.boundingBox();
+    const analysisBox = await analysisHeading.boundingBox();
+    const glossaryBox = await glossaryHeading.boundingBox();
+    if (!sttBox || !analysisBox || !glossaryBox) {
+      throw new Error("Expected Step 1 configuration headings to have bounding boxes");
+    }
+    expect(sttBox.y).toBeLessThan(analysisBox.y);
+    expect(analysisBox.y).toBeLessThan(glossaryBox.y);
+  });
+
+  test("Step 3 Fonts lists built-in system fonts as non-deletable alongside removable imported fonts", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      if (window.location.protocol !== "http:") return;
+      window.localStorage.setItem(
+        "tafseer.settings.v1",
+        JSON.stringify({
+          state: {
+            importedFonts: [
+              {
+                family: "Amiri",
+                style: "Regular",
+                path: "C:/fonts/Amiri.ttf",
+                format: "ttf",
+              },
+            ],
+          },
+          version: 2,
+        }),
+      );
+    });
+
+    await goToWorkspace(page);
+    await openStepConfig(page, 3, "Subtitles");
+
+    const fontList = page.getByRole("group", { name: "Available fonts" });
+    await expect(fontList).toBeVisible();
+    await expect(page.getByText("6 fonts available")).toBeVisible();
+
+    const systemFonts = [
+      "Leelawadee UI",
+      "Tahoma",
+      "Noto Naskh Arabic",
+      "Traditional Arabic",
+      "Segoe UI",
+    ];
+    for (const family of systemFonts) {
+      await expect(fontList.getByText(family, { exact: true })).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: new RegExp(`Remove ${family}`) }),
+      ).toHaveCount(0);
+    }
+
+    await expect(fontList.getByText("Amiri", { exact: true })).toBeVisible();
+    const removeImported = page.getByRole("button", { name: "Remove Amiri Regular" });
+    await expect(removeImported).toBeVisible();
+    await removeImported.click();
+
+    await expect(fontList.getByText("Amiri", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("5 fonts available")).toBeVisible();
+    for (const family of systemFonts) {
+      await expect(fontList.getByText(family, { exact: true })).toBeVisible();
+    }
+  });
+});

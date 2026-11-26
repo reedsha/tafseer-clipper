@@ -805,3 +805,388 @@ test.describe("batched Arabic check", () => {
     ).toHaveAttribute("aria-valuenow", String(beforeSize));
   });
 });
+
+test.describe("Step 3 undo/redo, continuous play, and reset", () => {
+  function makeStep3Project(id: string, name: string, withSubtitles = true) {
+    const now = Date.now();
+    return {
+      schemaVersion: 1,
+      id,
+      name,
+      sourcePath: withSubtitles ? "https://media.example/lecture.mp4" : null,
+      sourceFileName: "step3-test.mp4",
+      duration: 20,
+      step: 3,
+      transcriptId: `${id}-transcript`,
+      transcript: {
+        language: "th",
+        segments: [
+          { id: 0, start: 0, end: 3, text: "ประโยคแรกของบทเรียน", language: "th" },
+          { id: 1, start: 4, end: 7, text: "ประโยคที่สองของบทเรียน", language: "th" },
+        ],
+      },
+      audioPath: null,
+      basePrompt: "",
+      promptPresetId: null,
+      sessionGuide: "",
+      clips: [
+        {
+          id: `${id}-clip`,
+          title: "Clip one",
+          rationale: "",
+          start: 0,
+          end: 10,
+          speechStart: 0,
+          speechEnd: 10,
+          approved: true,
+          createdAt: now,
+        },
+      ],
+      selectedClipId: `${id}-clip`,
+      subtitles: withSubtitles
+        ? {
+            [`${id}-clip`]: [
+              { id: "cue-1", start: 0, end: 2, arabic: "", thai: "บรรทัดที่หนึ่ง" },
+              { id: "cue-2", start: 4, end: 6, arabic: "", thai: "บรรทัดที่สอง" },
+            ],
+          }
+        : {},
+      export: {
+        resolution: "1080x1920",
+        framing: "blur-fill",
+        useNvenc: true,
+        exportSrt: true,
+        filenameTemplate: "{LectureName}_Clip{01}_{Title}.mp4",
+        outputDir: null,
+      },
+      createdAt: now,
+      updatedAt: now,
+      lastActivityAt: now,
+    };
+  }
+
+  function cueTimesFromLabel(label: string | null): { start: number; end: number } {
+    const match = label
+      ? /Subtitle line (\d+):(\d+)\.(\d+) to (\d+):(\d+)\.(\d+)/.exec(label)
+      : null;
+    if (!match) throw new Error(`Unexpected cue label: ${label}`);
+    return {
+      start: Number(match[1]) * 60 + Number(match[2]) + Number(match[3]) / 10,
+      end: Number(match[4]) * 60 + Number(match[5]) + Number(match[6]) / 10,
+    };
+  }
+
+  test("undoes and redoes subtitle block moves and duration resizes", async ({ page }) => {
+    await seedProjectFile(page, makeStep3Project("e2e-undo-redo", "Undo redo lecture"));
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Undo redo lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    const undoButton = page.getByRole("button", { name: "Undo", exact: true });
+    const redoButton = page.getByRole("button", { name: "Redo", exact: true });
+    await expect(undoButton).toBeDisabled();
+    await expect(redoButton).toBeDisabled();
+
+    const track = page.getByRole("group", { name: "Subtitle track" });
+    const firstBlock = track.getByRole("button", { name: /^Subtitle line / }).first();
+    const trackBox = await track.boundingBox();
+    const blockBox = await firstBlock.boundingBox();
+    if (!trackBox || !blockBox) throw new Error("Cue ribbon did not render");
+
+    // 1. Move the first block right by ~1s (10% of the 10s track).
+    const moveStartX = blockBox.x + blockBox.width / 2;
+    const moveY = blockBox.y + blockBox.height / 2;
+    await page.mouse.move(moveStartX, moveY);
+    await page.mouse.down();
+    await page.mouse.move(moveStartX + trackBox.width * 0.1, moveY, { steps: 6 });
+    await page.mouse.up();
+
+    const afterMove = cueTimesFromLabel(await firstBlock.getAttribute("aria-label"));
+    expect(afterMove.start).toBeGreaterThan(0.5);
+    expect(afterMove.end).toBeGreaterThan(2.5);
+    await expect(undoButton).toBeEnabled();
+    await expect(redoButton).toBeDisabled();
+
+    // 2. Resize the first block's right edge wider by ~1s.
+    const movedBox = await firstBlock.boundingBox();
+    if (!movedBox) throw new Error("Moved cue block missing");
+    const edgeX = movedBox.x + movedBox.width - 2;
+    const edgeY = movedBox.y + movedBox.height / 2;
+    await page.mouse.move(edgeX, edgeY);
+    await page.mouse.down();
+    await page.mouse.move(edgeX + trackBox.width * 0.1, edgeY, { steps: 6 });
+    await page.mouse.up();
+
+    const afterResize = cueTimesFromLabel(await firstBlock.getAttribute("aria-label"));
+    expect(afterResize.end).toBeGreaterThan(afterMove.end + 0.5);
+
+    // Undo resize -> back to afterMove.
+    await undoButton.click();
+    const afterUndoResize = cueTimesFromLabel(await firstBlock.getAttribute("aria-label"));
+    expect(afterUndoResize).toEqual(afterMove);
+    await expect(redoButton).toBeEnabled();
+
+    // Undo move -> back to original 0:00.0 -> 0:02.0.
+    await undoButton.click();
+    const afterUndoMove = cueTimesFromLabel(await firstBlock.getAttribute("aria-label"));
+    expect(afterUndoMove).toEqual({ start: 0, end: 2 });
+    await expect(undoButton).toBeDisabled();
+
+    // Redo move and resize with buttons.
+    await redoButton.click();
+    expect(cueTimesFromLabel(await firstBlock.getAttribute("aria-label"))).toEqual(afterMove);
+    await redoButton.click();
+    expect(cueTimesFromLabel(await firstBlock.getAttribute("aria-label"))).toEqual(afterResize);
+    await expect(redoButton).toBeDisabled();
+
+    // Keyboard Ctrl+Z / Ctrl+Y also work when a ribbon block has focus.
+    await firstBlock.focus();
+    await page.keyboard.press("Control+z");
+    expect(cueTimesFromLabel(await firstBlock.getAttribute("aria-label"))).toEqual(afterMove);
+    await page.keyboard.press("Control+y");
+    expect(cueTimesFromLabel(await firstBlock.getAttribute("aria-label"))).toEqual(afterResize);
+  });
+
+  test("Play clip highlights to play continuously and stops at block end when un-highlighted", async ({
+    page,
+  }) => {
+    // Deterministic fake <video> driver so Chromium headless does not need a
+    // codec file to test continuous vs stop-at-block-end transport logic.
+    await page.addInitScript(() => {
+      type VideoState = {
+        src: string;
+        currentTime: number;
+        paused: boolean;
+        playbackRate: number;
+        timer: number | null;
+      };
+      const states = new WeakMap<HTMLMediaElement, VideoState>();
+      const getState = (el: HTMLMediaElement): VideoState => {
+        let s = states.get(el);
+        if (!s) {
+          s = { src: "", currentTime: 0, paused: true, playbackRate: 1, timer: null };
+          states.set(el, s);
+        }
+        return s;
+      };
+
+      const origSetAttr = Element.prototype.setAttribute;
+      Element.prototype.setAttribute = function (name: string, value: string) {
+        if (this instanceof HTMLVideoElement && name === "src") {
+          const s = getState(this);
+          s.src = value;
+          queueMicrotask(() => {
+            this.dispatchEvent(new Event("loadedmetadata"));
+            this.dispatchEvent(new Event("loadeddata"));
+          });
+          return;
+        }
+        return origSetAttr.call(this, name, value);
+      };
+
+      Object.defineProperties(HTMLMediaElement.prototype, {
+        src: {
+          configurable: true,
+          get() {
+            return getState(this).src;
+          },
+          set(val: string) {
+            const s = getState(this);
+            s.src = String(val);
+            queueMicrotask(() => {
+              this.dispatchEvent(new Event("loadedmetadata"));
+              this.dispatchEvent(new Event("loadeddata"));
+            });
+          },
+        },
+        readyState: {
+          configurable: true,
+          get() {
+            return 4;
+          },
+        },
+        duration: {
+          configurable: true,
+          get() {
+            return 20;
+          },
+        },
+        paused: {
+          configurable: true,
+          get() {
+            return getState(this).paused;
+          },
+        },
+        currentTime: {
+          configurable: true,
+          get() {
+            return getState(this).currentTime;
+          },
+          set(val: number) {
+            const s = getState(this);
+            s.currentTime = Number(val) || 0;
+            queueMicrotask(() => {
+              this.dispatchEvent(new Event("seeked"));
+            });
+          },
+        },
+        playbackRate: {
+          configurable: true,
+          get() {
+            return getState(this).playbackRate;
+          },
+          set(val: number) {
+            getState(this).playbackRate = Number(val) || 1;
+          },
+        },
+        play: {
+          configurable: true,
+          value() {
+            const s = getState(this);
+            if (!s.paused) return Promise.resolve();
+            s.paused = false;
+            this.dispatchEvent(new Event("play"));
+            if (s.timer !== null) window.clearInterval(s.timer);
+            s.timer = window.setInterval(() => {
+              if (s.paused) return;
+              s.currentTime += 0.15;
+              this.dispatchEvent(new Event("timeupdate"));
+            }, 40);
+            return Promise.resolve();
+          },
+        },
+        pause: {
+          configurable: true,
+          value() {
+            const s = getState(this);
+            if (s.timer !== null) {
+              window.clearInterval(s.timer);
+              s.timer = null;
+            }
+            if (s.paused) return;
+            s.paused = true;
+            this.dispatchEvent(new Event("pause"));
+          },
+        },
+      });
+    });
+
+    await page.route("https://media.example/**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { "content-length": "1024", "content-type": "video/mp4" },
+        body: "",
+      });
+    });
+
+    await seedProjectFile(page, makeStep3Project("e2e-play-clip", "Play clip lecture"));
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Play clip lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    const playClipButton = page.getByRole("button", { name: "Play clip", exact: true });
+    await expect(playClipButton).toHaveAttribute("aria-pressed", "false");
+    await expect(playClipButton).toHaveAttribute("data-variant", "outline");
+
+    // Without Play clip highlighted, playing cue 1 (0 -> 2s) stops at cue 1's end.
+    await page.getByRole("button", { name: "Play line 1" }).click();
+    await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeHidden({
+      timeout: 5_000,
+    });
+    const stoppedTime = await page.evaluate(
+      () => document.querySelector("video")?.currentTime ?? -1,
+    );
+    expect(stoppedTime).toBeGreaterThanOrEqual(1.9);
+    expect(stoppedTime).toBeLessThan(2.5);
+
+    // Clicking Play clip highlights it; playing now continues past block 1's end (2.0s).
+    await playClipButton.click();
+    await expect(playClipButton).toHaveAttribute("aria-pressed", "true");
+    await expect(playClipButton).toHaveAttribute("data-variant", "default");
+
+    await page.getByRole("button", { name: "Play line 1" }).click();
+    await expect
+      .poll(
+        () => page.evaluate(() => document.querySelector("video")?.currentTime ?? 0),
+        { timeout: 5_000 },
+      )
+      .toBeGreaterThan(3.0);
+    await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
+
+    // Pause, pick line 2 (4 -> 6s), start playing continuously, then click Play clip
+    // again (un-highlighted) so it stops at line 2's end (~6.0s).
+    await page.getByRole("button", { name: "Pause", exact: true }).click();
+    await page.getByRole("button", { name: "Play line 2" }).click();
+    await expect
+      .poll(
+        () => page.evaluate(() => document.querySelector("video")?.currentTime ?? 0),
+        { timeout: 5_000 },
+      )
+      .toBeGreaterThan(4.2);
+
+    await playClipButton.click();
+    await expect(playClipButton).toHaveAttribute("aria-pressed", "false");
+    await expect(playClipButton).toHaveAttribute("data-variant", "outline");
+
+    await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeHidden({
+      timeout: 5_000,
+    });
+    const stoppedAtBlock2End = await page.evaluate(
+      () => document.querySelector("video")?.currentTime ?? -1,
+    );
+    expect(stoppedAtBlock2End).toBeGreaterThanOrEqual(5.9);
+    expect(stoppedAtBlock2End).toBeLessThan(6.5);
+  });
+
+  test("Reset subtitles restores default transcript lines and is undoable", async ({ page }) => {
+    await seedProjectFile(
+      page,
+      makeStep3Project("e2e-reset-subtitles", "Reset subtitles lecture", false),
+    );
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Reset subtitles lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    const rows = page.locator("[data-cue-row]");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).toContainText("ประโยคแรกของบทเรียน");
+    await expect(rows.nth(1)).toContainText("ประโยคที่สองของบทเรียน");
+
+    // Edit the first line and delete the second line.
+    await rows.nth(0).getByRole("button", { name: "Subtitle line 1" }).click();
+    await page.locator('textarea[lang="th"]').fill("ข้อความที่แก้ไขแล้ว");
+    await rows.nth(1).getByRole("button", { name: "Subtitle line 2" }).click();
+    await page.getByRole("button", { name: "Delete line 2" }).click();
+    await expect(rows).toHaveCount(1);
+    await expect(rows.nth(0)).toContainText("ข้อความที่แก้ไขแล้ว");
+
+    // Reset subtitles back to default.
+    await page.getByRole("button", { name: "Reset subtitles", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByText("Reset subtitles to default?")).toBeVisible();
+    await dialog.getByRole("button", { name: "Reset subtitles", exact: true }).click();
+
+    await expect(page.getByText("Subtitles reset to default")).toBeVisible();
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).toContainText("ประโยคแรกของบทเรียน");
+    await expect(rows.nth(1)).toContainText("ประโยคที่สองของบทเรียน");
+
+    // The reset can also be undone.
+    await page.locator('button[aria-label="Undo"]').click();
+    await expect(rows).toHaveCount(1);
+    await expect(rows.nth(0)).toContainText("ข้อความที่แก้ไขแล้ว");
+  });
+});

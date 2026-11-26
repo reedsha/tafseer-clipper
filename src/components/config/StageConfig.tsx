@@ -326,6 +326,10 @@ function Stage1Config() {
 
       <Separator />
 
+      <JudgmentsSection />
+
+      <Separator />
+
       <Section
         title="Thai–Arabic spelling glossary"
         description="Applied automatically after transcription to fix common spelling variants."
@@ -387,10 +391,6 @@ function Stage1Config() {
           Add pair
         </Button>
       </Section>
-
-      <Separator />
-
-      <JudgmentsSection />
     </>
   );
 }
@@ -1357,6 +1357,8 @@ function Stage3Config() {
     }
   }
 
+  const totalFontCount = SYSTEM_FONTS.length + importedFonts.length;
+
   return (
     <>
       <div className="space-y-5">
@@ -1473,44 +1475,52 @@ function Stage3Config() {
                 {L("Import .TTF / .OTF")}
               </Button>
               <span className="text-[11px] text-muted-foreground">
-                {importedFonts.length} font
-                {importedFonts.length === 1 ? "" : "s"} available
+                {totalFontCount} font
+                {totalFontCount === 1 ? "" : "s"} available
               </span>
             </div>
 
-            {importedFonts.length > 0 ? (
-              <div className="flex flex-wrap gap-1.5">
-                {importedFonts.map((font) => {
-                  const key = `${font.family}::${font.style}`;
-                  return (
-                    <Badge
-                      key={key}
-                      variant="secondary"
-                      className="font-normal"
+            <div
+              role="group"
+              className="flex flex-wrap gap-1.5"
+              aria-label={L("Available fonts")}
+            >
+              {SYSTEM_FONTS.map((family) => (
+                <Badge
+                  key={`system::${family}`}
+                  variant="outline"
+                  className="font-normal"
+                >
+                  <span>{family}</span>
+                  <span className="text-muted-foreground">{L("System")}</span>
+                </Badge>
+              ))}
+              {importedFonts.map((font) => {
+                const key = `${font.family}::${font.style}`;
+                return (
+                  <Badge
+                    key={key}
+                    variant="secondary"
+                    className="font-normal"
+                  >
+                    <span>{font.family}</span>
+                    <span className="text-muted-foreground">{font.style}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      className="ml-0.5 size-4 rounded-sm p-0 text-muted-foreground hover:bg-transparent hover:text-foreground dark:hover:bg-transparent"
+                      aria-label={`Remove ${font.family} ${font.style}`}
+                      onClick={() =>
+                        useSettingsStore.getState().removeImportedFont(key)
+                      }
                     >
-                      {font.family}
-                      <span className="ml-1 text-muted-foreground">{font.style}</span>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        className="ml-1.5 size-4 rounded-sm p-0 text-muted-foreground hover:bg-transparent hover:text-foreground dark:hover:bg-transparent"
-                        aria-label={`Remove ${font.family} ${font.style}`}
-                        onClick={() =>
-                          useSettingsStore.getState().removeImportedFont(key)
-                        }
-                      >
-                        <Trash2 className="size-3" />
-                      </Button>
-                    </Badge>
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                {L("No fonts imported yet — system fonts are used until you import.")}
-              </p>
-            )}
+                      <Trash2 className="size-3" />
+                    </Button>
+                  </Badge>
+                );
+              })}
+            </div>
 
             {fontsDir ? (
               <p className="break-all font-mono text-[11px] text-muted-foreground">

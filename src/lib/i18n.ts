@@ -348,6 +348,21 @@ const TH_BY_EN: Record<string, string> = {
   "Arabic passages": "ข้อความภาษาอาหรับ",
   "No Arabic passages in this clip.": "ไม่มีข้อความภาษาอาหรับในคลิปนี้",
   "Restore Thai": "คืนภาษาไทย",
+  Undo: "เลิกทำ",
+  Redo: "ทำซ้ำ",
+  "Reset subtitles": "รีเซ็ตซับไตเติล",
+  "Reset subtitles to default": "รีเซ็ตซับไตเติลเป็นค่าเริ่มต้น",
+  "Reset subtitles to default?": "รีเซ็ตซับไตเติลเป็นค่าเริ่มต้น?",
+  "Subtitles reset to default": "รีเซ็ตซับไตเติลเป็นค่าเริ่มต้นแล้ว",
+  "Play continuously": "เล่นต่อเนื่อง",
+  "Continuous playback on — plays without stopping at subtitle block ends":
+    "เล่นต่อเนื่องเปิดอยู่ — เล่นโดยไม่หยุดที่ท้ายบล็อกซับไตเติล",
+  "Play continuously without stopping at the selected subtitle block's end":
+    "เล่นต่อเนื่องโดยไม่หยุดที่ท้ายบล็อกซับไตเติลที่เลือก",
+  "Undo / redo subtitle edits": "เลิกทำ / ทำซ้ำการแก้ไขซับไตเติล",
+  "Step 3 · Subtitle lines & track": "ขั้นตอนที่ 3 · บรรทัดและแทร็กซับไตเติล",
+  System: "ระบบ",
+  "Available fonts": "ฟอนต์ที่ใช้งานได้",
 
   // Step 4 · Export
   Export: "ส่งออก",

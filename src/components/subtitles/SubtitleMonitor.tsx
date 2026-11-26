@@ -26,7 +26,9 @@ import { ASS_RESOLUTIONS, type AssStyle, type SubtitleLine } from "@/lib/subtitl
 
 export interface SubtitleMonitorHandle {
   /** Play from `start` to `end` (absolute source seconds) and stop there. */
-  playRange: (start: number, end: number) => void;
+  playRange: (start: number, end: number, restart?: boolean) => void;
+  /** Adjust or clear the active range end while playing (null = unrestricted). */
+  setRangeEnd: (end: number | null) => void;
   pause: () => void;
   seekTo: (seconds: number) => void;
   seekBy: (delta: number, preserveRange?: boolean) => void;
@@ -197,14 +199,15 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
       foregroundRef.current?.pause();
     }, []);
 
-    const playRange = useCallback((start: number, end: number) => {
+    const playRange = useCallback((start: number, end: number, restart = false) => {
       const video = foregroundRef.current;
       if (!video || end - start <= 0) return;
       if (video.readyState < 2) {
         pendingRef.current = { start, end };
         return;
       }
-      const outside = video.currentTime < start - 0.05 || video.currentTime >= end - 0.05;
+      const outside =
+        restart || video.currentTime < start - 0.05 || video.currentTime >= end - 0.05;
       if (outside) {
         video.currentTime = start + 0.01;
       }
@@ -212,6 +215,21 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
       void video.play().catch(() => {
         /* Autoplay may be blocked until the user interacts with the window. */
       });
+    }, []);
+
+    const setRangeEnd = useCallback((end: number | null) => {
+      rangeEndRef.current = end;
+      const video = foregroundRef.current;
+      if (!video) return;
+      if (pendingRef.current && end != null) {
+        pendingRef.current = { ...pendingRef.current, end };
+      }
+      if (!video.paused && end != null && video.currentTime >= end - 0.02) {
+        rangeEndRef.current = null;
+        video.pause();
+        onTimeUpdateRef.current?.(video.currentTime);
+        setNow(video.currentTime);
+      }
     }, []);
 
     const seekBy = useCallback(
@@ -253,13 +271,14 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
       ref,
       () => ({
         playRange,
+        setRangeEnd,
         pause,
         seekTo,
         seekBy,
         getPlaybackRate,
         setPlaybackRate,
       }),
-      [getPlaybackRate, pause, playRange, seekBy, seekTo, setPlaybackRate],
+      [getPlaybackRate, pause, playRange, seekBy, seekTo, setPlaybackRate, setRangeEnd],
     );
 
     /* Park a freshly opened clip on its first frame. */

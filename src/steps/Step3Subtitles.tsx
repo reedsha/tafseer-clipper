@@ -19,7 +19,8 @@ import {
   Pause,
   Play,
   Plus,
-  RefreshCw,
+  Redo2,
+  RotateCcw,
   ScanText,
   Scissors,
   ShieldCheck,
@@ -27,6 +28,7 @@ import {
   Smartphone,
   Trash2,
   Type,
+  Undo2,
   Volume2,
   VolumeX,
   X,
@@ -92,6 +94,13 @@ type CueField = "arabic" | "thai";
 
 /** Playback-rate ladder for the J/K/L shuttle (1× = normal speed). */
 const SHUTTLE_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
+
+const MAX_UNDO_HISTORY = 100;
+const TEXT_EDIT_COALESCE_MS = 800;
+
+function cloneCues(list: SubtitleCue[]): SubtitleCue[] {
+  return list.map((cue) => ({ ...cue }));
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -415,19 +424,25 @@ export function Step3Subtitles() {
   const healedSeedRef = useRef<string | null>(null);
   const seekKeyRef = useRef<string | null>(null);
   const manualEditClipsRef = useRef<Set<string>>(new Set());
+  const historyRef = useRef<
+    Map<string, { past: SubtitleCue[][]; future: SubtitleCue[][] }>
+  >(new Map());
+  const lastTextEditRef = useRef<{ key: string; at: number } | null>(null);
 
+  const [historyRev, setHistoryRev] = useState(0);
   const [activeCueId, setActiveCueId] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "unchecked">("all");
   const [safeZone, setSafeZone] = useState(true);
   const [previewFocus, setPreviewFocus] = useState(false);
   const [styleOpen, setStyleOpen] = useState(false);
-  const [rebuildOpen, setRebuildOpen] = useState(false);
+  const [resetDialogMode, setResetDialogMode] = useState<"reset" | "rebuild" | null>(null);
   const [arabicReviewOpen, setArabicReviewOpen] = useState(false);
   const [rebuildHint, setRebuildHint] = useState(false);
   const [muted, setMuted] = useState(false);
   const [verifyingIds, setVerifyingIds] = useState<Set<string>>(() => new Set());
   const [playhead, setPlayhead] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [continuousPlay, setContinuousPlay] = useState(false);
   const [rate, setRate] = useState(1);
   const [overlayMode, setOverlayMode] = useState<"cue" | "playhead">("cue");
 
@@ -452,6 +467,96 @@ export function Step3Subtitles() {
   const clipStart = selectedClip?.start ?? 0;
   const clipDuration = selectedClip ? selectedClip.end - selectedClip.start : 0;
   const canPlay = Boolean(project?.sourcePath);
+
+  const historyKey = project?.id && selectedClipId ? `${project.id}:${selectedClipId}` : null;
+  const { canUndo, canRedo } = useMemo(() => {
+    void historyRev;
+    const entry = historyKey ? historyRef.current.get(historyKey) : undefined;
+    return {
+      canUndo: Boolean(entry && entry.past.length > 0),
+      canRedo: Boolean(entry && entry.future.length > 0),
+    };
+  }, [historyKey, historyRev]);
+
+  const pushHistory = useCallback(
+    (clipId: string, snapshot: SubtitleCue[], textCoalesceKey?: string) => {
+      const projectId = useProjectStore.getState().project?.id;
+      if (!projectId) return;
+      const key = `${projectId}:${clipId}`;
+      const now = Date.now();
+      if (textCoalesceKey) {
+        const last = lastTextEditRef.current;
+        if (last && last.key === textCoalesceKey && now - last.at < TEXT_EDIT_COALESCE_MS) {
+          last.at = now;
+          return;
+        }
+        lastTextEditRef.current = { key: textCoalesceKey, at: now };
+      } else {
+        lastTextEditRef.current = null;
+      }
+
+      let entry = historyRef.current.get(key);
+      if (!entry) {
+        entry = { past: [], future: [] };
+        historyRef.current.set(key, entry);
+      }
+      entry.past.push(cloneCues(snapshot));
+      if (entry.past.length > MAX_UNDO_HISTORY) {
+        entry.past.splice(0, entry.past.length - MAX_UNDO_HISTORY);
+      }
+      entry.future = [];
+      setHistoryRev((n) => n + 1);
+    },
+    [],
+  );
+
+  const applyHistorySnapshot = useCallback(
+    (clipId: string, target: SubtitleCue[]) => {
+      const cloned = cloneCues(target);
+      manualEditClipsRef.current.add(clipId);
+      setRebuildHint(false);
+      seekKeyRef.current = `${clipId}:${cloned[0]?.id ?? "empty"}`;
+      setSubtitles(clipId, cloned);
+      setActiveCueId((prev) =>
+        prev && cloned.some((cue) => cue.id === prev) ? prev : (cloned[0]?.id ?? null),
+      );
+      setPlayhead((current) => clamp(current, 0, Math.max(0, clipDuration)));
+      setHistoryRev((n) => n + 1);
+    },
+    [clipDuration, setSubtitles],
+  );
+
+  const handleUndo = useCallback(() => {
+    const projectNow = useProjectStore.getState().project;
+    if (!projectNow || !selectedClipId) return;
+    const key = `${projectNow.id}:${selectedClipId}`;
+    const entry = historyRef.current.get(key);
+    const previous = entry?.past.pop();
+    if (!entry || !previous) return;
+    lastTextEditRef.current = null;
+    const current = projectNow.subtitles[selectedClipId] ?? [];
+    entry.future.push(cloneCues(current));
+    if (entry.future.length > MAX_UNDO_HISTORY) {
+      entry.future.splice(0, entry.future.length - MAX_UNDO_HISTORY);
+    }
+    applyHistorySnapshot(selectedClipId, previous);
+  }, [applyHistorySnapshot, selectedClipId]);
+
+  const handleRedo = useCallback(() => {
+    const projectNow = useProjectStore.getState().project;
+    if (!projectNow || !selectedClipId) return;
+    const key = `${projectNow.id}:${selectedClipId}`;
+    const entry = historyRef.current.get(key);
+    const next = entry?.future.pop();
+    if (!entry || !next) return;
+    lastTextEditRef.current = null;
+    const current = projectNow.subtitles[selectedClipId] ?? [];
+    entry.past.push(cloneCues(current));
+    if (entry.past.length > MAX_UNDO_HISTORY) {
+      entry.past.splice(0, entry.past.length - MAX_UNDO_HISTORY);
+    }
+    applyHistorySnapshot(selectedClipId, next);
+  }, [applyHistorySnapshot, selectedClipId]);
 
   const arabicMaxCharsPerLine = Math.max(
     16,
@@ -635,35 +740,51 @@ export function Step3Subtitles() {
     selectedClipId,
   ]);
 
-  /** Explicit rebuild from the Rebuild banner (may overwrite manual edits). */
-  const handleRebuild = useCallback(() => {
-    if (!selectedClip) return;
-    const segments = project?.transcript?.segments ?? [];
-    if (!segments.length) return;
-    const rebuilt = buildCuesFromTranscript(segments, {
-      clipStart: selectedClip.start,
-      clipEnd: selectedClip.end,
+  /** Explicit reset/rebuild back to the transcript-derived default cues. */
+  const handleRebuild = useCallback(
+    (mode: "reset" | "rebuild" = "rebuild") => {
+      if (!selectedClip) return;
+      const segments = project?.transcript?.segments ?? [];
+      if (!segments.length) return;
+      const latest = useProjectStore.getState().project?.subtitles[selectedClip.id] ?? [];
+      const rebuilt = buildCuesFromTranscript(segments, {
+        clipStart: selectedClip.start,
+        clipEnd: selectedClip.end,
+        maxCharsPerLine,
+        maxLines,
+        arabicMaxCharsPerLine,
+      });
+      if (mode === "rebuild" && !rebuilt.length) return;
+      pushHistory(selectedClip.id, latest);
+      manualEditClipsRef.current.delete(selectedClip.id);
+      seekKeyRef.current = `${selectedClip.id}:${rebuilt[0]?.id ?? "empty"}`;
+      setSubtitles(selectedClip.id, rebuilt);
+      healedSeedRef.current = `${selectedClip.id}:${rebuilt.length}`;
+      setRebuildHint(false);
+      setActiveCueId(rebuilt[0]?.id ?? null);
+      monitorRef.current?.pause();
+      monitorRef.current?.seekTo(selectedClip.start + (rebuilt[0]?.start ?? 0) + 0.05);
+      setPlayhead(rebuilt[0]?.start ?? 0);
+      if (mode === "reset") {
+        toast.success(L("Subtitles reset to default"), {
+          description: `${rebuilt.length} line${rebuilt.length === 1 ? "" : "s"} restored from the transcript.`,
+        });
+      } else {
+        toast.success("Subtitle lines rebuilt", {
+          description: `${rebuilt.length} readable line${rebuilt.length === 1 ? "" : "s"} from the transcript.`,
+        });
+      }
+    },
+    [
+      arabicMaxCharsPerLine,
       maxCharsPerLine,
       maxLines,
-      arabicMaxCharsPerLine,
-    });
-    if (!rebuilt.length) return;
-    manualEditClipsRef.current.delete(selectedClip.id);
-    setSubtitles(selectedClip.id, rebuilt);
-    healedSeedRef.current = `${selectedClip.id}:${rebuilt.length}`;
-    setRebuildHint(false);
-    setActiveCueId(null);
-    toast.success("Subtitle lines rebuilt", {
-      description: `${rebuilt.length} readable line${rebuilt.length === 1 ? "" : "s"} from the transcript.`,
-    });
-  }, [
-    maxCharsPerLine,
-    maxLines,
-    arabicMaxCharsPerLine,
-    project?.transcript?.segments,
-    selectedClip,
-    setSubtitles,
-  ]);
+      project?.transcript?.segments,
+      pushHistory,
+      selectedClip,
+      setSubtitles,
+    ],
+  );
 
   /** Mark every corpus-verified Qur'an passage in this clip as reviewed. */
   const approveAllVerifiedArabic = () => {
@@ -671,6 +792,7 @@ export function Step3Subtitles() {
     const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
     const verified = latest.filter((cue) => cue.source === "quran" && !cue.reviewed);
     if (!verified.length) return;
+    pushHistory(selectedClipId, latest);
     setSubtitles(
       selectedClipId,
       latest.map((cue) =>
@@ -698,6 +820,7 @@ export function Step3Subtitles() {
       });
       return;
     }
+    pushHistory(selectedClipId, latest);
     manualEditClipsRef.current.add(selectedClipId);
     setRebuildHint(false);
     setSubtitles(
@@ -725,6 +848,7 @@ export function Step3Subtitles() {
 
   /* Reset the transport when the editor moves to another clip. */
   useEffect(() => {
+    lastTextEditRef.current = null;
     setActiveCueId(null);
     setPlayhead(0);
     setPlaying(false);
@@ -827,22 +951,38 @@ export function Step3Subtitles() {
     [clipDuration, clipStart],
   );
 
+  const playClipContinuous = useCallback(
+    (fromSeconds?: number, restart = false) => {
+      if (!selectedClip || clipDuration <= 0) return;
+      const base = fromSeconds ?? (playhead >= clipDuration - 0.05 ? 0 : playhead);
+      const from = clamp(base, 0, Math.max(0, clipDuration));
+      setOverlayMode("playhead");
+      monitorRef.current?.playRange(
+        selectedClip.start + from,
+        selectedClip.start + clipDuration,
+        restart,
+      );
+    },
+    [clipDuration, playhead, selectedClip],
+  );
+
   const playCue = useCallback(
     (cue: SubtitleCue) => {
       setActiveCueId(cue.id);
-      setOverlayMode("cue");
       if (!selectedClip) return;
+      if (continuousPlay) {
+        const resumeInside =
+          activeCue?.id === cue.id &&
+          playhead >= cue.start - 0.05 &&
+          playhead < cue.end - 0.05;
+        playClipContinuous(resumeInside ? playhead : cue.start, !resumeInside);
+        return;
+      }
+      setOverlayMode("cue");
       monitorRef.current?.playRange(selectedClip.start + cue.start, selectedClip.start + cue.end);
     },
-    [selectedClip],
+    [activeCue?.id, continuousPlay, playClipContinuous, playhead, selectedClip],
   );
-
-  const playClip = useCallback(() => {
-    if (!selectedClip) return;
-    const from = playhead >= clipDuration - 0.05 ? 0 : playhead;
-    setOverlayMode("playhead");
-    monitorRef.current?.playRange(selectedClip.start + from, selectedClip.start + clipDuration);
-  }, [clipDuration, playhead, selectedClip]);
 
   const selectCue = useCallback(
     (cue: SubtitleCue) => {
@@ -861,8 +1001,27 @@ export function Step3Subtitles() {
       monitorRef.current?.pause();
       return;
     }
+    if (continuousPlay) {
+      playClipContinuous();
+      return;
+    }
     if (activeCue) playCue(activeCue);
-  }, [activeCue, playCue, playing]);
+  }, [activeCue, continuousPlay, playClipContinuous, playCue, playing]);
+
+  const toggleContinuousPlay = useCallback(() => {
+    const next = !continuousPlay;
+    setContinuousPlay(next);
+    if (playing && selectedClip) {
+      if (next) {
+        setOverlayMode("playhead");
+        monitorRef.current?.setRangeEnd(selectedClip.start + clipDuration);
+      } else if (activeCue) {
+        monitorRef.current?.setRangeEnd(selectedClip.start + activeCue.end);
+      } else {
+        monitorRef.current?.pause();
+      }
+    }
+  }, [activeCue, clipDuration, continuousPlay, playing, selectedClip]);
 
   const applyRate = useCallback((next: number) => {
     setRate(next);
@@ -873,7 +1032,8 @@ export function Step3Subtitles() {
     (direction: -1 | 1) => {
       const current = monitorRef.current?.getPlaybackRate() ?? rate;
       if (direction === 1) {
-        if (activeCue) playCue(activeCue);
+        if (continuousPlay) playClipContinuous();
+        else if (activeCue) playCue(activeCue);
         const faster =
           SHUTTLE_RATES.find((entry) => entry > current + 0.001) ??
           SHUTTLE_RATES[SHUTTLE_RATES.length - 1];
@@ -885,10 +1045,11 @@ export function Step3Subtitles() {
         monitorRef.current?.seekBy(-2, true);
         return;
       }
-      if (activeCue) playCue(activeCue);
+      if (continuousPlay) playClipContinuous();
+      else if (activeCue) playCue(activeCue);
       applyRate(slower);
     },
-    [activeCue, applyRate, playCue, rate],
+    [activeCue, applyRate, continuousPlay, playClipContinuous, playCue, rate],
   );
 
   const pauseShuttle = useCallback(() => {
@@ -916,7 +1077,15 @@ export function Step3Subtitles() {
       setRebuildHint(false);
       // Store the raw value; Thai wraps on commit (blur/split), not on every
       // keystroke, so typing past the wrap width never jumps the caret.
-      const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
+      const projectNow = useProjectStore.getState().project;
+      const latest = projectNow?.subtitles[selectedClipId] ?? [];
+      const targetCue = latest.find((cue) => cue.id === cueId);
+      if (!targetCue || targetCue[field] === value) return;
+      pushHistory(
+        selectedClipId,
+        latest,
+        `${projectNow?.id ?? ""}:${selectedClipId}:${cueId}:${field}`,
+      );
       const next = latest.map((cue) => {
         if (cue.id !== cueId) return cue;
         if (field === "arabic" && value !== cue.arabic) {
@@ -934,23 +1103,29 @@ export function Step3Subtitles() {
       });
       setSubtitles(selectedClipId, next);
     },
-    [selectedClipId, setSubtitles],
+    [pushHistory, selectedClipId, setSubtitles],
   );
 
   const handleCueBlur = useCallback(
     (cueId: string, field: CueField) => {
+      lastTextEditRef.current = null;
       if (!selectedClipId) return;
       const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
+      let changed = false;
       const next = latest.map((cue) => {
         if (cue.id !== cueId) return cue;
         if (field === "thai") {
           const wrapped = wrapSubtitleText(cue.thai, maxCharsPerLine);
-          return wrapped === cue.thai ? cue : { ...cue, thai: wrapped };
+          if (wrapped === cue.thai) return cue;
+          changed = true;
+          return { ...cue, thai: wrapped };
         }
         const wrapped = wrapArabicText(cue.arabic, arabicMaxCharsPerLine);
-        return wrapped === cue.arabic ? cue : { ...cue, arabic: wrapped };
+        if (wrapped === cue.arabic) return cue;
+        changed = true;
+        return { ...cue, arabic: wrapped };
       });
-      setSubtitles(selectedClipId, next);
+      if (changed) setSubtitles(selectedClipId, next);
     },
     [arabicMaxCharsPerLine, maxCharsPerLine, selectedClipId, setSubtitles],
   );
@@ -967,12 +1142,15 @@ export function Step3Subtitles() {
       if (!selectedClipId) return;
       setRebuildHint(false);
       const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
+      const targetCue = latest.find((cue) => cue.id === cueId);
+      if (!targetCue || Boolean(targetCue.reviewed) === reviewed) return;
+      pushHistory(selectedClipId, latest);
       setSubtitles(
         selectedClipId,
         latest.map((cue) => (cue.id === cueId ? { ...cue, reviewed } : cue)),
       );
     },
-    [selectedClipId, setSubtitles],
+    [pushHistory, selectedClipId, setSubtitles],
   );
 
   /** The next line that still needs a proof-read, wrapping to the start. */
@@ -1012,13 +1190,18 @@ export function Step3Subtitles() {
     (cueId: string, start: number, end: number) => {
       if (!selectedClipId) return;
       const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
+      const targetCue = latest.find((cue) => cue.id === cueId);
+      if (!targetCue || (targetCue.start === start && targetCue.end === end)) return;
+      manualEditClipsRef.current.add(selectedClipId);
+      setRebuildHint(false);
+      pushHistory(selectedClipId, latest);
       setSubtitles(
         selectedClipId,
         latest.map((cue) => (cue.id === cueId ? { ...cue, start, end } : cue)),
       );
       setPlayhead((current) => clamp(current, 0, Math.max(0, clipDuration)));
     },
-    [clipDuration, selectedClipId, setSubtitles],
+    [clipDuration, pushHistory, selectedClipId, setSubtitles],
   );
 
   /**
@@ -1138,6 +1321,7 @@ export function Step3Subtitles() {
         // editing the split does not jump the monitor back to start.
         seekKeyRef.current = `${selectedClipId}:${next[0]?.id ?? "empty"}`;
       }
+      pushHistory(selectedClipId, latest);
       setSubtitles(selectedClipId, next);
       setActiveCueId(second.id);
       setOverlayMode("cue");
@@ -1147,7 +1331,7 @@ export function Step3Subtitles() {
         description: `Split at ${formatClock(clampedMid - cue.start, true)} into the line · ${editedFirst.length} / ${editedSecond.length} characters.`,
       });
     },
-    [arabicMaxCharsPerLine, maxCharsPerLine, selectedClip, selectedClipId, setSubtitles],
+    [arabicMaxCharsPerLine, maxCharsPerLine, pushHistory, selectedClip, selectedClipId, setSubtitles],
   );
 
   /** Split the active line at the last caret position, or at the midpoint. */
@@ -1204,13 +1388,14 @@ export function Step3Subtitles() {
       const next = latest
         .filter((item) => item.id !== following.id)
         .map((item) => (item.id === cue.id ? merged : item));
+      pushHistory(selectedClipId, latest);
       setSubtitles(selectedClipId, next);
       setActiveCueId(merged.id);
       toast.success("Lines merged", {
         description: `One line now covers ${formatClock(merged.end - merged.start, true)}.`,
       });
     },
-    [arabicMaxCharsPerLine, maxCharsPerLine, selectedClipId, setSubtitles],
+    [arabicMaxCharsPerLine, maxCharsPerLine, pushHistory, selectedClipId, setSubtitles],
   );
 
   const handleDelete = useCallback(
@@ -1226,10 +1411,12 @@ export function Step3Subtitles() {
       if (!removed) return;
 
       const next = latest.filter((cue) => cue.id !== cueId);
+      pushHistory(selectedClipId, latest);
       setSubtitles(selectedClipId, next);
       const fallback = next[Math.min(index, next.length - 1)] ?? null;
       setActiveCueId(fallback?.id ?? null);
 
+      const postDeleteIds = next.map((cue) => cue.id).join("\u0000");
       toast("Line deleted", {
         description: "The subtitle line was removed from this clip.",
         action: {
@@ -1239,6 +1426,19 @@ export function Step3Subtitles() {
             if (!owningProjectId || current?.id !== owningProjectId) return;
             const list = current.subtitles[selectedClipId] ?? [];
             if (list.some((cue) => cue.id === removed.id)) return;
+            const sameClipOpen =
+              (current.selectedClipId ?? approvedClips[0]?.id ?? null) === selectedClipId;
+            if (
+              sameClipOpen &&
+              list.map((cue) => cue.id).join("\u0000") === postDeleteIds
+            ) {
+              handleUndo();
+              setActiveCueId(removed.id);
+              return;
+            }
+            if (sameClipOpen) {
+              pushHistory(selectedClipId, list);
+            }
             useProjectStore
               .getState()
               .setSubtitles(
@@ -1250,7 +1450,7 @@ export function Step3Subtitles() {
         },
       });
     },
-    [selectedClipId, setSubtitles],
+    [approvedClips, handleUndo, pushHistory, selectedClipId, setSubtitles],
   );
 
   const handleAdd = useCallback(() => {
@@ -1298,12 +1498,13 @@ export function Step3Subtitles() {
       thai: "",
       reviewed: false,
     };
+    pushHistory(selectedClipId, latest);
     setSubtitles(
       selectedClipId,
       [...latest, cue].sort((a, b) => a.start - b.start),
     );
     setActiveCueId(cue.id);
-  }, [clipDuration, playhead, selectedClip, selectedClipId, setSubtitles]);
+  }, [clipDuration, playhead, pushHistory, selectedClip, selectedClipId, setSubtitles]);
 
   /* ---------------------------- verification --------------------------- */
 
@@ -1566,13 +1767,33 @@ export function Step3Subtitles() {
         return;
       }
       const target = event.target as HTMLElement | null;
+      const inTextInput = Boolean(
+        target &&
+          (target.isContentEditable ||
+            ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)),
+      );
+      if (inTextInput) return;
+
+      if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+        const key = event.key.toLowerCase();
+        if (key === "z" && !event.shiftKey) {
+          event.preventDefault();
+          handleUndo();
+          return;
+        }
+        if (key === "y" || (key === "z" && event.shiftKey)) {
+          event.preventDefault();
+          handleRedo();
+          return;
+        }
+        return;
+      }
+
       if (
         target &&
-        (target.isContentEditable ||
-          ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) ||
-          target.closest(
-            'button, a, summary, [role="button"], [role="slider"], [role="switch"], [role="tab"]',
-          ))
+        target.closest(
+          'button, a, summary, [role="button"], [role="slider"], [role="switch"], [role="tab"]',
+        )
       ) {
         return;
       }
@@ -1630,6 +1851,8 @@ export function Step3Subtitles() {
   }, [
     activeCue,
     configStep,
+    handleRedo,
+    handleUndo,
     moveCue,
     nextUnchecked,
     pauseShuttle,
@@ -1797,16 +2020,6 @@ export function Step3Subtitles() {
                 >
                   {L("To check")}
                 </Button>
-                <Button
-                  size="icon-xs"
-                  variant="ghost"
-                  aria-label={L("Rebuild lines from transcript")}
-                  title={L("Rebuild lines from transcript")}
-                  disabled={(project.transcript?.segments.length ?? 0) === 0}
-                  onClick={() => setRebuildOpen(true)}
-                >
-                  <RefreshCw className="size-3.5" />
-                </Button>
                 <Button size="xs" variant="outline" className="gap-1" onClick={handleAdd}>
                   <Plus className="size-3" />
                   {L("Add line")}
@@ -1847,7 +2060,7 @@ export function Step3Subtitles() {
                   size="xs"
                   variant="outline"
                   className="shrink-0"
-                  onClick={() => setRebuildOpen(true)}
+                  onClick={() => setResetDialogMode("rebuild")}
                 >
                   {L("Rebuild lines")}
                 </Button>
@@ -2060,6 +2273,45 @@ export function Step3Subtitles() {
               onTogglePlay={togglePlay}
             />
 
+            <div className="flex shrink-0 items-center justify-between gap-1">
+              <div className="flex items-center gap-0.5">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={L("Undo")}
+                  title={`${L("Undo")} (Ctrl+Z)`}
+                  disabled={!canUndo}
+                  onClick={handleUndo}
+                >
+                  <Undo2 className="size-3.5" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={L("Redo")}
+                  title={`${L("Redo")} (Ctrl+Y)`}
+                  disabled={!canRedo}
+                  onClick={handleRedo}
+                >
+                  <Redo2 className="size-3.5" />
+                </Button>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className="gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+                title={L("Reset subtitles to default")}
+                disabled={(project.transcript?.segments.length ?? 0) === 0}
+                onClick={() => setResetDialogMode("reset")}
+              >
+                <RotateCcw className="size-3" />
+                {L("Reset subtitles")}
+              </Button>
+            </div>
+
             <CueRibbon
               cues={cues}
               duration={clipDuration}
@@ -2082,20 +2334,32 @@ export function Step3Subtitles() {
               <Button
                 variant="ghost"
                 size="icon-sm"
-                aria-label={playing ? L("Pause") : "Play the selected line"}
-                disabled={!canPlay || !activeCue}
+                aria-label={
+                  playing
+                    ? L("Pause")
+                    : continuousPlay
+                      ? L("Play continuously")
+                      : "Play the selected line"
+                }
+                disabled={!canPlay || clipDuration <= 0 || (!continuousPlay && !activeCue)}
                 onClick={togglePlay}
               >
                 {playing ? <Pause className="size-4" /> : <Play className="size-4" />}
               </Button>
               <Button
-                variant="outline"
+                variant={continuousPlay ? "default" : "outline"}
                 size="xs"
+                aria-pressed={continuousPlay}
+                title={
+                  continuousPlay
+                    ? L("Continuous playback on — plays without stopping at subtitle block ends")
+                    : L("Play continuously without stopping at the selected subtitle block's end")
+                }
                 className="gap-1 text-[11px]"
-                disabled={!canPlay || clipDuration <= 0}
-                onClick={playClip}
+                disabled={clipDuration <= 0}
+                onClick={toggleContinuousPlay}
               >
-                <Play className="size-3" />
+                <Play className={cn("size-3", continuousPlay && "fill-current")} />
                 {L("Play clip")}
               </Button>
               <Button
@@ -2264,28 +2528,38 @@ export function Step3Subtitles() {
         </section>
       </div>
 
-      <Dialog open={rebuildOpen} onOpenChange={setRebuildOpen}>
+      <Dialog
+        open={resetDialogMode !== null}
+        onOpenChange={(open) => {
+          if (!open) setResetDialogMode(null);
+        }}
+      >
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>Rebuild subtitle lines?</DialogTitle>
+            <DialogTitle>
+              {resetDialogMode === "reset"
+                ? L("Reset subtitles to default?")
+                : "Rebuild subtitle lines?"}
+            </DialogTitle>
             <DialogDescription>
-              This replaces the {cues.length} line{cues.length === 1 ? "" : "s"} in this clip with
-              lines rebuilt from the transcript. Text edits and check marks in this clip will be
-              lost.
+              {resetDialogMode === "reset"
+                ? `This restores this clip's ${cues.length} subtitle line${cues.length === 1 ? "" : "s"} back to the default lines created when the clip was approved. You can undo this change.`
+                : `This replaces the ${cues.length} line${cues.length === 1 ? "" : "s"} in this clip with lines rebuilt from the transcript. Text edits and check marks in this clip will be lost.`}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="ghost" size="sm" onClick={() => setRebuildOpen(false)}>
+            <Button variant="ghost" size="sm" onClick={() => setResetDialogMode(null)}>
               Cancel
             </Button>
             <Button
               size="sm"
               onClick={() => {
-                setRebuildOpen(false);
-                handleRebuild();
+                const mode = resetDialogMode ?? "rebuild";
+                setResetDialogMode(null);
+                handleRebuild(mode);
               }}
             >
-              {L("Rebuild lines")}
+              {resetDialogMode === "reset" ? L("Reset subtitles") : L("Rebuild lines")}
             </Button>
           </DialogFooter>
         </DialogContent>
