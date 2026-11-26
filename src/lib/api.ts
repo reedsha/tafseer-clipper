@@ -130,6 +130,21 @@ interface RequestOptions {
   signal?: AbortSignal;
 }
 
+export interface TaskProgressEvent {
+  event: "start" | "progress";
+  stage: string;
+  /** 0..1 step completion. */
+  progress: number;
+  label: string;
+  done?: number;
+  total?: number;
+}
+
+export interface ProgressRequestOptions extends RequestOptions {
+  idleTimeoutMs?: number;
+  onProgress?: (event: TaskProgressEvent) => void;
+}
+
 function withTimeout(
   timeoutMs: number,
   external?: AbortSignal,
@@ -187,6 +202,177 @@ function jsonBody(body: unknown): RequestInit {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   };
+}
+
+/**
+ * Send a JSON POST preferring an SSE progress stream when the sidecar supports
+ * it (`Accept: text/event-stream, application/json`), while transparently
+ * decoding plain `application/json` responses from mocks or older sidecars.
+ */
+async function requestWithSseFallback<T>(
+  path: string,
+  body: unknown,
+  {
+    timeoutMs = 30 * 60_000,
+    idleTimeoutMs,
+    signal,
+    onProgress,
+  }: ProgressRequestOptions = {},
+): Promise<T> {
+  const effectiveIdleMs =
+    idleTimeoutMs ?? Math.max(90_000, Math.min(timeoutMs, 180_000));
+  const controller = new AbortController();
+  let abortReason: "external" | "timeout" | "idle" | null = null;
+
+  const overallTimer = window.setTimeout(() => {
+    abortReason = "timeout";
+    controller.abort();
+  }, timeoutMs);
+
+  let idleTimer: number | null = null;
+  const resetIdle = () => {
+    if (idleTimer !== null) window.clearTimeout(idleTimer);
+    idleTimer = window.setTimeout(() => {
+      abortReason = "idle";
+      controller.abort();
+    }, effectiveIdleMs);
+  };
+
+  const onExternalAbort = () => {
+    abortReason = "external";
+    controller.abort();
+  };
+  if (signal?.aborted) {
+    abortReason = "external";
+    controller.abort();
+  } else {
+    signal?.addEventListener("abort", onExternalAbort);
+  }
+  resetIdle();
+
+  try {
+    const response = await fetch(`${getSidecarUrl()}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream, application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw await errorFromResponse(response);
+
+    const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+    if (!contentType.includes("text/event-stream")) {
+      return (await response.json()) as T;
+    }
+    if (!response.body) {
+      throw new ApiError("The progress stream returned no body.", 0, "empty-stream");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let donePayload: T | undefined;
+    let streamError: ApiError | null = null;
+
+    const flushFrame = (frame: string) => {
+      let eventName = "progress";
+      const dataLines: string[] = [];
+      for (const rawLine of frame.split("\n")) {
+        if (rawLine.startsWith("event:")) eventName = rawLine.slice(6).trim();
+        else if (rawLine.startsWith("data:")) dataLines.push(rawLine.slice(5).trim());
+      }
+      if (!dataLines.length) return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(dataLines.join("\n"));
+      } catch {
+        return;
+      }
+      if (eventName === "start" || eventName === "progress") {
+        const rec = parsed as {
+          stage?: unknown;
+          progress?: unknown;
+          label?: unknown;
+          done?: unknown;
+          total?: unknown;
+        };
+        const progress =
+          typeof rec.progress === "number" && Number.isFinite(rec.progress)
+            ? Math.min(1, Math.max(0, rec.progress))
+            : 0;
+        onProgress?.({
+          event: eventName,
+          stage: typeof rec.stage === "string" ? rec.stage : "",
+          progress,
+          label: typeof rec.label === "string" ? rec.label : "",
+          ...(typeof rec.done === "number" ? { done: rec.done } : {}),
+          ...(typeof rec.total === "number" ? { total: rec.total } : {}),
+        });
+      } else if (eventName === "done") {
+        donePayload = parsed as T;
+      } else if (eventName === "error") {
+        const err = parsed as { status?: unknown; detail?: unknown };
+        const status = typeof err.status === "number" ? err.status : 500;
+        const detail =
+          typeof err.detail === "string" && err.detail.trim()
+            ? err.detail
+            : `Sidecar returned ${status}.`;
+        streamError = new ApiError(detail, status, detail);
+      }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      resetIdle();
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        flushFrame(buffer.slice(0, boundary));
+        buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+    const tail = decoder.decode().replace(/\r\n/g, "\n");
+    if (tail) buffer += tail;
+    if (buffer.trim()) flushFrame(buffer);
+
+    if (streamError) throw streamError;
+    if (donePayload === undefined) {
+      throw new ApiError(
+        "The sidecar closed the progress stream before finishing.",
+        0,
+        "incomplete-stream",
+      );
+    }
+    return donePayload;
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (error instanceof DOMException && error.name === "AbortError") {
+      if (abortReason === "external" || signal?.aborted) {
+        throw new ApiError("The request was cancelled.", 0, "cancelled");
+      }
+      if (abortReason === "idle") {
+        throw new ApiError(
+          `The sidecar stopped sending progress for ${Math.round(effectiveIdleMs / 1000)}s.`,
+          0,
+          "idle-timeout",
+        );
+      }
+      throw new ApiError(
+        `The sidecar did not finish within ${Math.round(timeoutMs / 1000)}s.`,
+        0,
+        "timeout",
+      );
+    }
+    throw toApiError(error);
+  } finally {
+    window.clearTimeout(overallTimer);
+    if (idleTimer !== null) window.clearTimeout(idleTimer);
+    signal?.removeEventListener("abort", onExternalAbort);
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -415,12 +601,11 @@ export interface TranscriptSegment {
 
 export function extractAndTranscribe(
   body: TranscribeRequest,
-  options?: RequestOptions,
+  options?: ProgressRequestOptions,
 ): Promise<TranscribeResponse> {
-  // Flagged: 30 min can be short for multi-hour lectures transcribed on the
-  // CPU; monitor before raising (it is also the user-facing ceiling for
-  // "stuck" requests when the sidecar never answers).
-  return request<TranscribeResponse>("/extract-and-transcribe", jsonBody(body), {
+  // Stream SSE stage progress + 10s keepalives when supported, while tolerating
+  // plain JSON responses from tests or older sidecars.
+  return requestWithSseFallback<TranscribeResponse>("/extract-and-transcribe", body, {
     timeoutMs: 30 * 60_000,
     ...options,
   });
@@ -442,7 +627,11 @@ export interface ProviderOverride {
   timeout?: number | null;
 }
 
-export type DecisionEndpointStyle = "auto" | "systemone" | "decisions";
+export type DecisionEndpointStyle =
+  | "auto"
+  | "systemone"
+  | "decisions"
+  | "chat_completions";
 
 /**
  * Optional decision slot sent with a request (additive). Absence means the
@@ -520,11 +709,11 @@ export function discoveryTimeoutMs(providerTimeoutSec?: number | null): number {
 
 export function discoverClips(
   body: DiscoverRequest,
-  options?: RequestOptions,
+  options?: ProgressRequestOptions,
 ): Promise<DiscoverResponse> {
   // The client budget derives from the real worst case (LLM calls × provider
-  // timeout) instead of a flat 5 min that false-times out long lectures.
-  return request<DiscoverResponse>("/discover-clips", jsonBody(body), {
+  // timeout) and rides SSE keepalives + stage progress when supported.
+  return requestWithSseFallback<DiscoverResponse>("/discover-clips", body, {
     timeoutMs: discoveryTimeoutMs(body.provider?.timeout),
     ...options,
   });
@@ -561,7 +750,7 @@ export interface VerifyArabicResponse {
   correction_applied: boolean;
   notes: string;
   model: string;
-  /** `quran` (corpus exact), `triage` (fast check passed), `proofread`, `needs_model`. */
+  /** `quran` (corpus match), `unmatched` (left unchanged), or legacy `needs_model`. */
   source?: string;
   reference?: string | null;
   /** Corpus-match score, when the sidecar reports one. */

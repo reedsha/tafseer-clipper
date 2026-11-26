@@ -14,11 +14,14 @@ agent framework, no tool loop.
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_right
+from collections.abc import Callable
 import json
 import logging
 import math
 import re
 import threading
+import weakref
 from dataclasses import dataclass
 from typing import Any
 
@@ -222,6 +225,34 @@ def _ollama_show_endpoint(base_url: str) -> str:
     return root + "/api/show"
 
 
+_HTTP_CLIENTS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient] = (
+    weakref.WeakKeyDictionary()
+)
+_DROPPED_KEYS_CACHE: dict[tuple[str, str], set[str]] = {}
+
+
+def _get_shared_client() -> httpx.AsyncClient:
+    """Per-event-loop pooled HTTP client for LLM chat and metadata calls."""
+    loop = asyncio.get_running_loop()
+    client = _HTTP_CLIENTS.get(loop)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10)
+        )
+        _HTTP_CLIENTS[loop] = client
+    return client
+
+
+async def close_http_client() -> None:
+    """Close pooled HTTP clients on sidecar shutdown."""
+    clients = list(_HTTP_CLIENTS.values())
+    _HTTP_CLIENTS.clear()
+    _DROPPED_KEYS_CACHE.clear()
+    for client in clients:
+        if not client.is_closed:
+            await client.aclose()
+
+
 async def resolve_context_tokens(
     provider: ProviderConfig, *, transport: httpx.AsyncBaseTransport | None = None
 ) -> int:
@@ -240,16 +271,25 @@ async def resolve_context_tokens(
     headers = {"Content-Type": "application/json"}
     if provider.api_key:
         headers["Authorization"] = f"Bearer {provider.api_key}"
+    timeout = min(provider.timeout, 10.0)
     try:
-        async with httpx.AsyncClient(
-            timeout=min(provider.timeout, 10.0), transport=transport
-        ) as client:
-            response = await client.post(
+        if transport is None:
+            response = await _get_shared_client().post(
                 _ollama_show_endpoint(provider.base_url),
                 headers=headers,
                 # Newer Ollama accepts "model"; older releases used "name".
                 json={"model": provider.model, "name": provider.model},
+                timeout=timeout,
             )
+        else:
+            async with httpx.AsyncClient(
+                timeout=timeout, transport=transport
+            ) as client:
+                response = await client.post(
+                    _ollama_show_endpoint(provider.base_url),
+                    headers=headers,
+                    json={"model": provider.model, "name": provider.model},
+                )
         if response.status_code >= 400:
             raise ValueError(f"model metadata returned {response.status_code}")
         payload = response.json()
@@ -282,6 +322,76 @@ async def resolve_context_tokens(
     return provider.context_tokens
 
 
+async def _post_chat_with_client(
+    client: httpx.AsyncClient,
+    provider: ProviderConfig,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    *,
+    cache_key: tuple[str, str] | None,
+) -> httpx.Response:
+    response: httpx.Response | None = None
+    for attempt in range(2):
+        try:
+            response = await client.post(
+                provider.endpoint,
+                headers=headers,
+                json=payload,
+                timeout=provider.timeout,
+            )
+        except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+            if attempt == 0:
+                # A transient connection drop is safe to retry; the
+                # provider never started generating.
+                await asyncio.sleep(0.6)
+                continue
+            raise LLMError(
+                "Could not connect to the AI service. Check the connection "
+                "in Settings, then try again."
+            ) from exc
+        except httpx.HTTPError as exc:
+            # Read timeouts are deliberately *not* retried: the provider
+            # accepted the request and is still generating, so a retry
+            # bills the same window twice and doubles the wait.
+            raise _transport_error(provider, exc) from exc
+        break
+
+    if response is None:
+        raise LLMError("Could not reach the AI service. Try again.")
+
+    # Compatibility with gateways that reject optional keys: a 400 happens
+    # before generation, so probing the supported shape is free and only
+    # runs until the provider accepts the payload.
+    for _ in range(4):
+        if response.status_code != 400:
+            break
+        before_keys = set(payload.keys())
+        if not _relax_payload(payload, response.text):
+            break
+        if cache_key is not None:
+            dropped = _DROPPED_KEYS_CACHE.setdefault(cache_key, set())
+            if "reasoning" in before_keys and "reasoning" not in payload:
+                dropped.add("reasoning")
+            if "response_format" in before_keys and "response_format" not in payload:
+                dropped.add("response_format")
+            if (
+                "max_completion_tokens" in payload
+                and "max_completion_tokens" not in before_keys
+            ):
+                dropped.add("max_completion_tokens")
+        try:
+            response = await client.post(
+                provider.endpoint,
+                headers=headers,
+                json=payload,
+                timeout=provider.timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise _transport_error(provider, exc) from exc
+
+    return response
+
+
 async def chat(
     provider: ProviderConfig,
     messages: list[dict[str, str]],
@@ -312,49 +422,35 @@ async def chat(
     elif disable_reasoning:
         payload["reasoning"] = dict(REASONING_OFF)
 
-    async with httpx.AsyncClient(
-        timeout=provider.timeout, transport=transport
-    ) as client:
-        response: httpx.Response | None = None
-        for attempt in range(2):
-            try:
-                response = await client.post(
-                    provider.endpoint, headers=headers, json=payload
-                )
-            except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
-                if attempt == 0:
-                    # A transient connection drop is safe to retry; the
-                    # provider never started generating.
-                    await asyncio.sleep(0.6)
-                    continue
-                raise LLMError(
-                    "Could not connect to the AI service. Check the connection "
-                    "in Settings, then try again."
-                ) from exc
-            except httpx.HTTPError as exc:
-                # Read timeouts are deliberately *not* retried: the provider
-                # accepted the request and is still generating, so a retry
-                # bills the same window twice and doubles the wait.
-                raise _transport_error(provider, exc) from exc
-            break
-
-        if response is None:
-            raise LLMError("Could not reach the AI service. Try again.")
-
-        # Compatibility with gateways that reject optional keys: a 400 happens
-        # before generation, so probing the supported shape is free and only
-        # runs until the provider accepts the payload.
-        for _ in range(4):
-            if response.status_code != 400:
-                break
-            if not _relax_payload(payload, response.text):
-                break
-            try:
-                response = await client.post(
-                    provider.endpoint, headers=headers, json=payload
-                )
-            except httpx.HTTPError as exc:
-                raise _transport_error(provider, exc) from exc
+    cache_key: tuple[str, str] | None = None
+    if transport is None:
+        cache_key = (provider.endpoint, provider.model)
+        dropped = _DROPPED_KEYS_CACHE.get(cache_key)
+        if dropped:
+            if "max_completion_tokens" in dropped and "max_tokens" in payload:
+                payload["max_completion_tokens"] = payload.pop("max_tokens")
+            if "reasoning" in dropped:
+                payload.pop("reasoning", None)
+            if "response_format" in dropped:
+                payload.pop("response_format", None)
+        response = await _post_chat_with_client(
+            _get_shared_client(),
+            provider,
+            headers,
+            payload,
+            cache_key=cache_key,
+        )
+    else:
+        async with httpx.AsyncClient(
+            timeout=provider.timeout, transport=transport
+        ) as client:
+            response = await _post_chat_with_client(
+                client,
+                provider,
+                headers,
+                payload,
+                cache_key=None,
+            )
 
     if response.status_code >= 400:
         raise LLMError(
@@ -660,23 +756,24 @@ def build_discover_messages(
         or "- (none)"
     )
 
+    # Static lecture context precedes dynamic re-roll exclusions/exemplars/notes
+    # so OpenAI-compatible prompt-prefix caches hit across Keep & Re-roll calls.
     user = f"""\
 SESSION TOPIC GUIDE (video specific notes):
 {session_guide.strip() or "(none)"}
 
-REFINEMENT NOTE (this re-roll only):
-{refinement_note.strip() or "(none)"}
+TRANSCRIPT:
+{_format_transcript(segments)}
 
 ALREADY APPROVED / EXCLUDED RANGES (never propose inside these):
 {excluded_text}
-
-TRANSCRIPT:
-{_format_transcript(segments)}
 """
     if exemplar_block.strip():
-        # Re-roll feedback rides after the transcript so the window text and its
-        # timestamps stay contiguously readable for the model.
         user += "\n" + exemplar_block.strip() + "\n"
+    user += f"""
+REFINEMENT NOTE (this re-roll only):
+{refinement_note.strip() or "(none)"}
+"""
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
@@ -687,32 +784,94 @@ TRANSCRIPT:
 SYNTHESIS_EXCERPT_CHARS = 200
 
 
-def _candidate_excerpt(
-    segments: list[dict[str, Any]],
-    start: float,
-    end: float,
-    *,
-    max_chars: int = SYNTHESIS_EXCERPT_CHARS,
-) -> str:
-    """A bounded slice of what the candidate actually says, for the editor pass."""
-    parts: list[str] = []
-    length = 0
+@dataclass(slots=True)
+class _SegmentIndex:
+    """Sorted segment spans with prefix max-ends for O(log S + K) range queries."""
+
+    starts: list[float]
+    ends: list[float]
+    texts: list[str]
+    prefix_max_end: list[float]
+
+
+def _build_segment_index(segments: list[dict[str, Any]]) -> _SegmentIndex:
+    entries: list[tuple[float, float, str]] = []
     for segment in segments:
         try:
             seg_start = float(segment.get("start", 0.0))
             seg_end = float(segment.get("end", 0.0))
         except (TypeError, ValueError):
             continue
-        if seg_end <= start or seg_start >= end:
-            continue
         text = str(segment.get("text", "")).strip()
         if not text:
             continue
-        parts.append(text)
-        length += len(text) + 1
-        if length >= max_chars:
-            break
-    return " ".join(parts)[:max_chars].strip()
+        entries.append((seg_start, seg_end, text))
+    entries.sort(key=lambda item: (item[0], item[1]))
+    starts: list[float] = []
+    ends: list[float] = []
+    texts: list[str] = []
+    prefix_max_end: list[float] = []
+    running_max = float("-inf")
+    for seg_start, seg_end, text in entries:
+        starts.append(seg_start)
+        ends.append(seg_end)
+        texts.append(text)
+        if seg_end > running_max:
+            running_max = seg_end
+        prefix_max_end.append(running_max)
+    return _SegmentIndex(
+        starts=starts, ends=ends, texts=texts, prefix_max_end=prefix_max_end
+    )
+
+
+def _format_head_tail_excerpt(parts: list[str], max_chars: int) -> str:
+    full = " ".join(parts).strip()
+    if not full or max_chars <= 0:
+        return ""
+    if len(full) <= max_chars:
+        return full
+    if max_chars <= 20:
+        return full[:max_chars].strip()
+    tail_budget = max(24, max_chars // 3)
+    head_budget = max(1, max_chars - tail_budget - 3)
+    head = full[:head_budget].rstrip()
+    tail = full[-tail_budget:].lstrip()
+    return f"{head} … {tail}"[:max_chars].strip()
+
+
+def _candidate_excerpt(
+    segments: list[dict[str, Any]],
+    start: float,
+    end: float,
+    *,
+    max_chars: int = SYNTHESIS_EXCERPT_CHARS,
+    index: _SegmentIndex | None = None,
+) -> str:
+    """Opening + closing excerpt of what the candidate says, bounded to ``max_chars``."""
+    seg_index = index if index is not None else _build_segment_index(segments)
+    n = len(seg_index.starts)
+    if n == 0 or end <= start:
+        return ""
+    pos = bisect_right(seg_index.prefix_max_end, start)
+    parts: list[str] = []
+    while pos < n and seg_index.starts[pos] < end:
+        if seg_index.ends[pos] > start:
+            parts.append(seg_index.texts[pos])
+        pos += 1
+    return _format_head_tail_excerpt(parts, max_chars)
+
+
+def _format_candidate_row(
+    index: int, candidate: dict[str, Any], excerpt: str
+) -> str:
+    start = float(candidate.get("start", 0.0))
+    end = float(candidate.get("end", 0.0))
+    title = str(candidate.get("title") or "").strip()[:90]
+    rationale = str(candidate.get("rationale") or "").strip()[:200]
+    return (
+        f"[{index}] {start:.1f}s .. {end:.1f}s | {title} | {rationale}\n"
+        f"    excerpt: {excerpt or '(none)'}"
+    )
 
 
 def build_synthesis_messages(
@@ -722,6 +881,7 @@ def build_synthesis_messages(
     base_prompt: str,
     session_guide: str,
     refinement_note: str,
+    segment_index: _SegmentIndex | None = None,
 ) -> list[dict[str, str]]:
     """Pass 2: the editorial call that decides the final, publishable set.
 
@@ -731,18 +891,14 @@ def build_synthesis_messages(
     the whole transcript.
     """
     system = f"{base_prompt.strip() or DEFAULT_BASE_PROMPT}\n\n{CLIP_SELECTION_RULES}"
+    seg_index = segment_index if segment_index is not None else _build_segment_index(segments)
 
     rows: list[str] = []
     for index, candidate in enumerate(candidates, start=1):
         start = float(candidate.get("start", 0.0))
         end = float(candidate.get("end", 0.0))
-        title = str(candidate.get("title") or "").strip()[:90]
-        rationale = str(candidate.get("rationale") or "").strip()[:200]
-        excerpt = _candidate_excerpt(segments, start, end)
-        rows.append(
-            f"[{index}] {start:.1f}s .. {end:.1f}s | {title} | {rationale}\n"
-            f"    excerpt: {excerpt or '(none)'}"
-        )
+        excerpt = _candidate_excerpt(segments, start, end, index=seg_index)
+        rows.append(_format_candidate_row(index, candidate, excerpt))
 
     user = f"""\
 SESSION TOPIC GUIDE (video specific notes):
@@ -937,6 +1093,8 @@ def _selection_request(
     base_prompt: str,
     session_guide: str,
     refinement_note: str,
+    *,
+    segment_index: _SegmentIndex | None = None,
 ) -> tuple[list[dict[str, str]], int]:
     messages = build_synthesis_messages(
         candidates=candidates,
@@ -944,6 +1102,7 @@ def _selection_request(
         base_prompt=base_prompt,
         session_guide=session_guide,
         refinement_note=refinement_note,
+        segment_index=segment_index,
     )
     budget = _reply_budget(
         len(candidates),
@@ -951,6 +1110,11 @@ def _selection_request(
         minimum=SELECTION_MIN_REPLY_TOKENS,
     )
     return messages, budget
+
+
+def _char_counts(text: str) -> tuple[int, int]:
+    ascii_chars = sum(ord(char) < 128 for char in text)
+    return ascii_chars, len(text) - ascii_chars
 
 
 def _plan_selection_batches(
@@ -961,16 +1125,73 @@ def _plan_selection_batches(
     refinement_note: str,
     context_tokens: int,
 ) -> list[list[dict[str, Any]]]:
-    """Pack every candidate into an editorial prompt that fits the model."""
+    """Pack every candidate in O(C + S log S) matching exact token limits."""
+    if not candidates:
+        return []
+    seg_index = _build_segment_index(segments)
+    excerpts = [
+        _candidate_excerpt(
+            segments,
+            float(candidate.get("start", 0.0)),
+            float(candidate.get("end", 0.0)),
+            index=seg_index,
+        )
+        for candidate in candidates
+    ]
+    # Precompute constant suffix character counts (excluding `[index]`).
+    suffix_counts: list[tuple[int, int]] = []
+    for candidate, excerpt in zip(candidates, excerpts):
+        start = float(candidate.get("start", 0.0))
+        end = float(candidate.get("end", 0.0))
+        title = str(candidate.get("title") or "").strip()[:90]
+        rationale = str(candidate.get("rationale") or "").strip()[:200]
+        suffix = (
+            f" {start:.1f}s .. {end:.1f}s | {title} | {rationale}\n"
+            f"    excerpt: {excerpt or '(none)'}"
+        )
+        suffix_counts.append(_char_counts(suffix))
+
+    empty_messages = build_synthesis_messages(
+        candidates=[],
+        segments=segments,
+        base_prompt=base_prompt,
+        session_guide=session_guide,
+        refinement_note=refinement_note,
+        segment_index=seg_index,
+    )
+    system_tokens = _estimate_tokens(empty_messages[0]["content"]) + 4
+    base_user_prefix = empty_messages[1]["content"].replace("CANDIDATES (0):", "CANDIDATES (")
+    base_ascii, base_non_ascii = _char_counts(base_user_prefix)
+
+    def fits_with(
+        row_ascii: int,
+        row_non_ascii: int,
+        count: int,
+    ) -> bool:
+        count_ascii = len(f"{count}):")  # always ASCII digits + "):"
+        total_ascii = base_ascii + count_ascii + row_ascii
+        total_non_ascii = base_non_ascii + row_non_ascii
+        user_tokens = max(1, math.ceil(total_ascii / 4 + total_non_ascii)) + 4
+        budget = _reply_budget(
+            count,
+            per_item=_SELECTION_TOKENS_PER_ITEM,
+            minimum=SELECTION_MIN_REPLY_TOKENS,
+        )
+        return system_tokens + user_tokens + budget + PROMPT_SAFETY_TOKENS <= context_tokens
+
     batches: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
-    for candidate in candidates:
-        trial = [*current, candidate]
-        messages, budget = _selection_request(
-            trial, segments, base_prompt, session_guide, refinement_note
-        )
-        if _messages_fit(messages, budget, context_tokens):
-            current = trial
+    cur_ascii = 0
+    cur_non_ascii = 0
+    for candidate, (cand_ascii, cand_non_ascii) in zip(candidates, suffix_counts):
+        next_index = len(current) + 1
+        prefix_len = len(f"[{next_index}]") + (1 if current else 0)
+        trial_ascii = cur_ascii + cand_ascii + prefix_len
+        trial_non_ascii = cur_non_ascii + cand_non_ascii
+        if fits_with(trial_ascii, trial_non_ascii, next_index):
+            current.append(candidate)
+            cur_ascii = trial_ascii
+            cur_non_ascii = trial_non_ascii
             continue
         if not current:
             raise LLMError(
@@ -980,10 +1201,10 @@ def _plan_selection_batches(
             )
         batches.append(current)
         current = [candidate]
-        messages, budget = _selection_request(
-            current, segments, base_prompt, session_guide, refinement_note
-        )
-        if not _messages_fit(messages, budget, context_tokens):
+        prefix_len = len("[1]")
+        cur_ascii = cand_ascii + prefix_len
+        cur_non_ascii = cand_non_ascii
+        if not fits_with(cur_ascii, cur_non_ascii, 1):
             raise LLMError(
                 "The selected AI model's context is too small for one clip "
                 "candidate. Shorten the clip brief or choose a model with a "
@@ -1003,6 +1224,7 @@ async def _select_with_prompts(
     refinement_note: str,
     provider: ProviderConfig,
     cancel_event: threading.Event | None,
+    segment_index: _SegmentIndex | None = None,
 ) -> list[dict[str, Any]]:
     """Pass 2: the model's editorial decision over the pooled candidates.
 
@@ -1011,7 +1233,12 @@ async def _select_with_prompts(
     """
     raise_if_cancelled(cancel_event)
     messages, budget = _selection_request(
-        candidates, segments, base_prompt, session_guide, refinement_note
+        candidates,
+        segments,
+        base_prompt,
+        session_guide,
+        refinement_note,
+        segment_index=segment_index,
     )
     try:
         reply = await chat(
@@ -1038,6 +1265,22 @@ async def _select_with_prompts(
     return [candidates[index] for index in keep]
 
 
+def _emit_discovery_progress(
+    on_progress: Callable[[str, float, str, int | None, int | None], None] | None,
+    stage: str,
+    ratio: float,
+    label: str,
+    done: int | None = None,
+    total: int | None = None,
+) -> None:
+    if on_progress is None:
+        return
+    try:
+        on_progress(stage, min(1.0, max(0.0, float(ratio))), label, done, total)
+    except Exception:  # pragma: no cover - callbacks must never fail discovery
+        logger.debug("Ignoring discovery progress callback failure", exc_info=True)
+
+
 async def _select_candidates(
     *,
     candidates: list[dict[str, Any]],
@@ -1048,6 +1291,7 @@ async def _select_candidates(
     provider: ProviderConfig,
     context_tokens: int,
     cancel_event: threading.Event | None,
+    on_progress: Callable[[str, float, str, int | None, int | None], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Run Pass 2 in context-sized batches, reconciling shrinking selections.
 
@@ -1077,8 +1321,19 @@ async def _select_candidates(
             )
             return current
 
+        segment_index = _build_segment_index(segments)
+        batch_total = max(1, len(batches))
+        if calls == 0:
+            _emit_discovery_progress(
+                on_progress,
+                "selecting",
+                0.78,
+                f"Comparing clip candidates ({len(current)})…",
+                0,
+                batch_total,
+            )
         next_round: list[dict[str, Any]] = []
-        for batch in batches:
+        for batch_index, batch in enumerate(batches, start=1):
             next_round.extend(
                 await _select_with_prompts(
                     candidates=batch,
@@ -1088,9 +1343,20 @@ async def _select_candidates(
                     refinement_note=refinement_note,
                     provider=provider,
                     cancel_event=cancel_event,
+                    segment_index=segment_index,
                 )
             )
             calls += 1
+            _emit_discovery_progress(
+                on_progress,
+                "selecting",
+                0.78 + 0.18 * (batch_index / batch_total),
+                f"Comparing candidates ({batch_index} of {batch_total})…"
+                if batch_total > 1
+                else "Comparing clip candidates…",
+                batch_index,
+                batch_total,
+            )
         if len(batches) == 1 or not next_round or len(next_round) == len(current):
             return next_round
         current = next_round
@@ -1208,6 +1474,113 @@ def _fit_discovery_windows(
     return windows
 
 
+#: Tail seconds of the preceding window overlapped into the next Pass-1 window
+#: so passages straddling a window split remain intact for the discovery model.
+DISCOVERY_WINDOW_OVERLAP_SECONDS = 60.0
+
+
+def _overlap_windows(
+    windows: list[list[dict[str, Any]]],
+    *,
+    base_prompt: str,
+    session_guide: str,
+    refinement_note: str,
+    excluded_ranges: list[dict[str, float]],
+    language: str,
+    exemplar_block: str,
+    context_tokens: int,
+) -> list[list[dict[str, Any]]]:
+    """Prepend up to 60 s of context from window[i-1] while still fitting context."""
+    overlapped: list[list[dict[str, Any]]] = []
+    for index, window in enumerate(windows):
+        if index == 0 or not window or not windows[index - 1]:
+            overlapped.append(window)
+            continue
+        prev = windows[index - 1]
+        cutoff = float(window[0].get("start", 0.0)) - DISCOVERY_WINDOW_OVERLAP_SECONDS
+        max_prefix = max(1, len(prev) // 2)
+        tail = [
+            seg
+            for seg in prev[-max_prefix:]
+            if float(seg.get("end", 0.0)) >= cutoff
+        ]
+        while tail:
+            candidate = [*tail, *window]
+            messages, budget = _window_request(
+                candidate,
+                base_prompt,
+                session_guide,
+                refinement_note,
+                excluded_ranges,
+                language,
+                exemplar_block,
+            )
+            if _messages_fit(messages, budget, context_tokens):
+                overlapped.append(candidate)
+                break
+            tail = tail[1:]
+        else:
+            overlapped.append(window)
+    return overlapped
+
+
+def _dedupe_overlap_proposals(
+    proposals: list[Any], *, iou_threshold: float = 0.75
+) -> list[Any]:
+    """Drop near-duplicate raw proposals emitted in the 60 s overlap zone."""
+    kept: list[Any] = []
+    intervals: list[tuple[float, float, int]] = []
+    for item in proposals:
+        if not isinstance(item, dict):
+            kept.append(item)
+            continue
+        try:
+            start = float(item.get("start"))
+            end = float(item.get("end"))
+        except (TypeError, ValueError):
+            kept.append(item)
+            continue
+        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+            kept.append(item)
+            continue
+        rationale_len = len(str(item.get("rationale") or "").strip())
+        replaced = False
+        duplicate = False
+        for idx, (k_start, k_end, k_rlen) in enumerate(intervals):
+            inter = max(0.0, min(end, k_end) - max(start, k_start))
+            if inter <= 0.0:
+                continue
+            union = max(end, k_end) - min(start, k_start)
+            if union > 0.0 and inter / union >= iou_threshold:
+                duplicate = True
+                if rationale_len > k_rlen:
+                    kept[idx] = item
+                    intervals[idx] = (start, end, rationale_len)
+                    replaced = True
+                break
+        if duplicate or replaced:
+            continue
+        intervals.append((start, end, rationale_len))
+        kept.append(item)
+    return kept
+
+
+def _is_transient_llm_error(exc: LLMError) -> bool:
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in (
+            "returned 429",
+            "returned 500",
+            "returned 502",
+            "returned 503",
+            "returned 504",
+            "did not answer within",
+            "could not connect",
+        )
+    )
+
+
 async def _discover_with_prompts(
     *,
     segments: list[dict[str, Any]],
@@ -1222,19 +1595,17 @@ async def _discover_with_prompts(
     approved_exemplars: list[dict[str, Any]] | None = None,
     rejected_exemplars: list[dict[str, Any]] | None = None,
     context_tokens: int = DEFAULT_OLLAMA_NUM_CTX,
+    on_progress: Callable[[str, float, str, int | None, int | None], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Find clips across the *whole* lecture with the writing model.
 
     The transcript is first packed into character-sized windows on segment
     boundaries, then split further until each prompt and its reserved output
-    fit ``context_tokens``. Pass 1 asks each window for every passage that
-    stands on its own - no count and no length target. The pooled candidates go
-    through context-sized editorial batches (Pass 2), with another round when
-    a batch round shrinks the pool. ``sanitize_clips`` applies safety guards.
-
-    ``approved_exemplars`` / ``rejected_exemplars`` are the editor's Keep &
-    Re-roll feedback; they are rendered once (bounded) and appended to every
-    Pass-1 window prompt so the writing model learns from earlier passes.
+    fit ``context_tokens``. Pass 1 asks each window (with up to 60 s boundary
+    overlap) for every passage that stands on its own - no count and no length
+    target. The pooled candidates go through context-sized editorial batches
+    (Pass 2), with another round when a batch round shrinks the pool.
+    ``sanitize_clips`` applies safety guards.
     """
     exemplar_block = format_exemplars(approved_exemplars, rejected_exemplars)
     windows = _fit_discovery_windows(
@@ -1247,62 +1618,152 @@ async def _discover_with_prompts(
         exemplar_block=exemplar_block,
         context_tokens=context_tokens,
     )
+    effective_windows = _overlap_windows(
+        windows,
+        base_prompt=base_prompt,
+        session_guide=session_guide,
+        refinement_note=refinement_note,
+        excluded_ranges=excluded_ranges,
+        language=language,
+        exemplar_block=exemplar_block,
+        context_tokens=context_tokens,
+    )
+
+    raise_if_cancelled(cancel_event)
+    total_windows = len(effective_windows)
+    _emit_discovery_progress(
+        on_progress,
+        "planning",
+        0.08,
+        f"Reading transcript ({total_windows} section{'s' if total_windows != 1 else ''})…",
+        0,
+        total_windows,
+    )
+    concurrency = 1 if is_ollama_endpoint(provider.base_url, provider.api_key) else 4
+    sem = asyncio.Semaphore(concurrency)
+    done_windows = 0
+
+    async def _run_window(
+        index: int, window: list[dict[str, Any]]
+    ) -> tuple[list[Any], LLMError | None, bool]:
+        nonlocal done_windows
+        async with sem:
+            raise_if_cancelled(cancel_event)
+            messages, budget = _window_request(
+                window,
+                base_prompt,
+                session_guide,
+                refinement_note,
+                excluded_ranges,
+                language,
+                exemplar_block,
+            )
+            reply: str | None = None
+            last_exc: LLMError | None = None
+            for attempt in range(2):
+                try:
+                    reply = await chat(
+                        provider,
+                        messages,
+                        temperature=0.3,
+                        max_tokens=budget,
+                    )
+                    break
+                except LLMError as exc:
+                    last_exc = exc
+                    if attempt == 0 and _is_transient_llm_error(exc):
+                        await asyncio.sleep(0.6)
+                        raise_if_cancelled(cancel_event)
+                        continue
+                    logger.warning("Clip window %d LLM call failed: %s", index, exc)
+                    done_windows += 1
+                    _emit_discovery_progress(
+                        on_progress,
+                        "discovering",
+                        0.10 + 0.65 * (done_windows / max(1, total_windows)),
+                        f"Scanning section {done_windows} of {total_windows}…",
+                        done_windows,
+                        total_windows,
+                    )
+                    return [], exc, False
+            if reply is None:
+                done_windows += 1
+                _emit_discovery_progress(
+                    on_progress,
+                    "discovering",
+                    0.10 + 0.65 * (done_windows / max(1, total_windows)),
+                    f"Scanning section {done_windows} of {total_windows}…",
+                    done_windows,
+                    total_windows,
+                )
+                return [], last_exc, False
+            try:
+                payload = extract_json(reply)
+                raw = payload.get("clips")
+                if not isinstance(raw, list):
+                    raise LLMError("The LLM reply is missing a 'clips' array.")
+            except LLMError as exc:
+                salvaged = _salvage_clip_objects(reply)
+                logger.warning(
+                    "Clip window %d reply was malformed (%s); salvaged %d proposal(s).",
+                    index,
+                    exc,
+                    len(salvaged),
+                )
+                if not salvaged:
+                    done_windows += 1
+                    _emit_discovery_progress(
+                        on_progress,
+                        "discovering",
+                        0.10 + 0.65 * (done_windows / max(1, total_windows)),
+                        f"Scanning section {done_windows} of {total_windows}…",
+                        done_windows,
+                        total_windows,
+                    )
+                    return [], None, False
+                raw = salvaged
+            done_windows += 1
+            _emit_discovery_progress(
+                on_progress,
+                "discovering",
+                0.10 + 0.65 * (done_windows / max(1, total_windows)),
+                f"Scanning section {done_windows} of {total_windows}…",
+                done_windows,
+                total_windows,
+            )
+            return raw, None, True
+
+    results = await asyncio.gather(
+        *(_run_window(index, window) for index, window in enumerate(effective_windows))
+    )
 
     proposals: list[Any] = []
     failed_windows = 0
     parsed_windows = 0
-    for index, window in enumerate(windows):
-        # Natural cancellation boundary: one LLM pass per window; a
-        # disconnected client stops before the next provider call.
-        raise_if_cancelled(cancel_event)
-        messages, budget = _window_request(
-            window,
-            base_prompt,
-            session_guide,
-            refinement_note,
-            excluded_ranges,
-            language,
-            exemplar_block,
-        )
-        reply = await chat(
-            provider,
-            messages,
-            temperature=0.3,
-            max_tokens=budget,
-        )
-        try:
-            payload = extract_json(reply)
-            raw = payload.get("clips")
-            if not isinstance(raw, list):
-                raise LLMError("The LLM reply is missing a 'clips' array.")
-        except LLMError as exc:
-            # A malformed reply must not lose the window: salvage every complete
-            # object that still carries start/end and let the rules table filter
-            # the rest. Only a window with nothing salvageable is skipped.
-            salvaged = _salvage_clip_objects(reply)
-            logger.warning(
-                "Clip window %d reply was malformed (%s); salvaged %d proposal(s).",
-                index,
-                exc,
-                len(salvaged),
-            )
-            if not salvaged:
-                failed_windows += 1
-                continue
-            raw = salvaged
+    last_chat_error: LLMError | None = None
+    for raw, chat_error, ok in results:
+        if not ok:
+            failed_windows += 1
+            if chat_error is not None:
+                last_chat_error = chat_error
+            continue
         proposals.extend(raw)
         parsed_windows += 1
 
     if parsed_windows == 0 and failed_windows:
+        if last_chat_error is not None:
+            raise last_chat_error
         raise LLMError(
             "The clip-finding model returned no usable JSON for any transcript "
             "window. Try a different model, or run it again."
         )
 
+    deduped_proposals = _dedupe_overlap_proposals(proposals)
+
     # Pool + deterministic guards before the editorial call. The pool ceiling is
     # a prompt-size guard only; the model decides the real final count.
     pool = sanitize_clips(
-        proposals,
+        deduped_proposals,
         duration=duration,
         excluded_ranges=excluded_ranges,
         max_clips=SAFETY_MAX_CANDIDATES,
@@ -1319,6 +1780,7 @@ async def _discover_with_prompts(
         provider=provider,
         context_tokens=context_tokens,
         cancel_event=cancel_event,
+        on_progress=on_progress,
     )
     return sanitize_clips(
         selected,
@@ -1547,6 +2009,7 @@ async def discover_clips(
     cancel_event: threading.Event | None = None,
     approved_exemplars: list[dict[str, Any]] | None = None,
     rejected_exemplars: list[dict[str, Any]] | None = None,
+    on_progress: Callable[[str, float, str, int | None, int | None], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Find clips across the whole transcript with the writing model.
 
@@ -1562,6 +2025,7 @@ async def discover_clips(
         logger.warning(
             "No clip-finding model configured; returning unscored candidate windows."
         )
+        _emit_discovery_progress(on_progress, "planning", 0.25, "Scanning transcript windows…")
         candidates = generate_clip_candidates(
             segments,
             duration=duration,
@@ -1580,6 +2044,7 @@ async def discover_clips(
                     "rationale": "",
                 }
             )
+        _emit_discovery_progress(on_progress, "selecting", 0.9, "Filtering candidate clips…")
         return sanitize_clips(
             records,
             duration=duration,
@@ -1600,82 +2065,8 @@ async def discover_clips(
         approved_exemplars=approved_exemplars,
         rejected_exemplars=rejected_exemplars,
         context_tokens=context_tokens,
+        on_progress=on_progress,
     )
-
-
-# --------------------------------------------------------------------------- #
-# Arabic verification
-# --------------------------------------------------------------------------- #
-ARABIC_SYSTEM_PROMPT = """\
-You are an Uthmani-script Quranic proofreader for a Thai Tafseer channel.
-You receive one Arabic subtitle line (Quranic verse, Hadith, or Islamic term)
-and the surrounding Thai explanation. Verify the Arabic spelling, the Uthmani
-orthography and the Harakat against authentic scripture.
-
-Return STRICT JSON only:
-{"verified_text": "<corrected Arabic, exactly one line>", "correction_applied": <true|false>, "notes": "<short reason, Thai or English>"}
-
-Rules:
-- Never translate, never add commentary inside verified_text.
-- Never "improve" wording of a Hadith or verse: only fix spelling/orthography.
-- If the line is already correct, return it unchanged with correction_applied=false.
-- Keep the Arabic RTL order and the diacritics exactly as authenticated.
-"""
-
-
-def _coerce_flag(value: Any) -> bool | None:
-    """Parse a provider boolean strictly; never ``bool("false") == True``."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        if value == 1:
-            return True
-        if value == 0:
-            return False
-        return None
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"true", "1", "yes"}:
-            return True
-        if normalized in {"false", "0", "no"}:
-            return False
-    return None
-
-
-async def verify_arabic(
-    *,
-    arabic_text: str,
-    context_thai: str,
-    provider: ProviderConfig,
-) -> dict[str, Any]:
-    messages = [
-        {"role": "system", "content": ARABIC_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"ARABIC LINE:\n{arabic_text}\n\n"
-                f"SURROUNDING THAI CONTEXT:\n{context_thai or '(none)'}"
-            ),
-        },
-    ]
-    reply = await chat(provider, messages, temperature=0.0)
-    payload = extract_json(reply)
-
-    verified = payload.get("verified_text")
-    if not isinstance(verified, str) or not verified.strip():
-        raise LLMError("The LLM reply is missing 'verified_text'.")
-
-    verified = verified.strip()
-    changed = bool(_coerce_flag(payload.get("correction_applied")))
-    if verified != arabic_text.strip():
-        changed = True
-
-    notes = payload.get("notes")
-    return {
-        "verified_text": verified,
-        "correction_applied": changed,
-        "notes": str(notes).strip() if notes else "",
-    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1717,14 +2108,14 @@ You group a Thai Tafseer transcript into complete sentences for subtitle lines.
 You do not rewrite, translate, or punctuate the text.
 
 Return STRICT JSON with this exact shape:
-{"groups":[[<segment id>,<segment id>,...], ...]}
+{"starts":[<segment id>, ...]}
 
 Rules:
-- Every input id appears exactly once, in order; groups are consecutive.
+- List the first `#<id>` of every complete sentence in ascending order (always begin with the first `#<id>` in the window).
 - Group by complete thoughts/sentences, not by a character limit.
 - A sentence may contain many short word/character segments.
 - Attach fillers and fragments to the sentence they belong to.
-- A very long sentence is still one group; subtitle wrapping happens later.
+- A very long sentence still starts only once; subtitle wrapping happens later.
 """
 
 
@@ -1736,6 +2127,46 @@ def _format_indexed_segments(segments: list[dict[str, Any]]) -> str:
             continue
         lines.append(f"#{int(segment['id'])} {text}")
     return "\n".join(lines)
+
+
+def _split_indexed_windows(
+    segments: list[dict[str, Any]],
+    *,
+    system_prompt: str,
+    context_tokens: int,
+    per_item_output_tokens: int,
+    min_reply_tokens: int = DEFAULT_MAX_TOKENS,
+) -> list[list[dict[str, Any]]]:
+    """Pack indexed transcript segments so every window fits ``context_tokens``."""
+    non_empty = [seg for seg in segments if str(seg.get("text", "")).strip()]
+    if not non_empty:
+        return []
+    sys_tokens = _estimate_tokens(system_prompt) + 4
+    overhead_tokens = sys_tokens + PROMPT_SAFETY_TOKENS + 32
+
+    windows: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    cur_tokens = 0
+    for segment in non_empty:
+        line = f"#{int(segment['id'])} {str(segment.get('text', '')).strip()}"
+        line_tokens = _estimate_tokens(line) + 1
+        next_count = len(current) + 1
+        budget = _reply_budget(
+            next_count, per_item=per_item_output_tokens, minimum=min_reply_tokens
+        )
+        if (
+            current
+            and overhead_tokens + cur_tokens + line_tokens + budget > context_tokens
+        ):
+            windows.append(current)
+            current = [segment]
+            cur_tokens = line_tokens
+        else:
+            current.append(segment)
+            cur_tokens += line_tokens
+    if current:
+        windows.append(current)
+    return windows
 
 
 def _segment_bounds(segments: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
@@ -1825,38 +2256,53 @@ async def audit_arabic(
     """Find candidate Arabic recitation spans with one LLM pass per window."""
     if not segments:
         return []
-    windows = split_transcript_windows(segments)
+    context_tokens = await resolve_context_tokens(provider)
+    windows = _split_indexed_windows(
+        segments,
+        system_prompt=ARABIC_AUDIT_SYSTEM,
+        context_tokens=context_tokens,
+        per_item_output_tokens=32,
+        min_reply_tokens=DEFAULT_MAX_TOKENS,
+    )
+    if not windows:
+        return []
     by_id = _segment_bounds(segments)
-    spans: list[dict[str, Any]] = []
-    for window in windows:
-        raise_if_cancelled(cancel_event)
-        if not window:
-            continue
-        window_ids = {int(segment["id"]) for segment in window}
-        messages = [
-            {"role": "system", "content": ARABIC_AUDIT_SYSTEM},
-            {
-                "role": "user",
-                "content": (
-                    "TRANSCRIPT WINDOW:\n"
-                    f"{_format_indexed_segments(window)}\n\n"
-                    "Return the JSON object only."
-                ),
-            },
-        ]
-        try:
-            reply = await chat(
-                provider,
-                messages,
-                temperature=0.0,
-                max_tokens=_reply_budget(len(window), per_item=32),
-            )
-            payload = extract_json(reply)
-        except LLMError as exc:
-            logger.warning("Arabic audit window failed: %s", exc)
-            continue
-        spans.extend(_sanitize_spans(payload, by_id, window_ids))
+    concurrency = 1 if is_ollama_endpoint(provider.base_url, provider.api_key) else 4
+    sem = asyncio.Semaphore(concurrency)
 
+    async def _run_audit_window(window: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        async with sem:
+            raise_if_cancelled(cancel_event)
+            window_ids = {int(segment["id"]) for segment in window}
+            messages = [
+                {"role": "system", "content": ARABIC_AUDIT_SYSTEM},
+                {
+                    "role": "user",
+                    "content": (
+                        "TRANSCRIPT WINDOW:\n"
+                        f"{_format_indexed_segments(window)}\n\n"
+                        "Return the JSON object only."
+                    ),
+                },
+            ]
+            try:
+                reply = await chat(
+                    provider,
+                    messages,
+                    temperature=0.0,
+                    max_tokens=_reply_budget(len(window), per_item=32),
+                )
+                payload = extract_json(reply)
+            except LLMError as exc:
+                logger.warning("Arabic audit window failed: %s", exc)
+                return []
+            return _sanitize_spans(payload, by_id, window_ids)
+
+    raise_if_cancelled(cancel_event)
+    per_window = await asyncio.gather(*(_run_audit_window(w) for w in windows))
+    spans: list[dict[str, Any]] = []
+    for chunk in per_window:
+        spans.extend(chunk)
     return merge_spans(spans)
 
 
@@ -1864,16 +2310,51 @@ def _sanitize_groups(
     payload: dict[str, Any],
     window_ids: list[int],
 ) -> list[list[int]] | None:
+    if "starts" in payload:
+        raw_starts = payload.get("starts")
+        if not isinstance(raw_starts, list):
+            return None
+        id_pos = {segment_id: idx for idx, segment_id in enumerate(window_ids)}
+        start_positions: list[int] = []
+        last_pos = -1
+        for value in raw_starts:
+            if isinstance(value, bool):
+                return None
+            try:
+                segment_id = int(value)
+            except (TypeError, ValueError):
+                return None
+            pos = id_pos.get(segment_id)
+            if pos is None or pos <= last_pos:
+                return None
+            start_positions.append(pos)
+            last_pos = pos
+        if not start_positions:
+            return [list(window_ids)] if window_ids else None
+        if start_positions[0] != 0:
+            start_positions.insert(0, 0)
+        groups: list[list[int]] = []
+        for idx, start_pos in enumerate(start_positions):
+            end_pos = (
+                start_positions[idx + 1]
+                if idx + 1 < len(start_positions)
+                else len(window_ids)
+            )
+            groups.append(window_ids[start_pos:end_pos])
+        return groups
+
     raw = payload.get("groups")
     if not isinstance(raw, list) or not raw:
         return None
-    groups: list[list[int]] = []
+    groups = []
     seen: list[int] = []
     for group in raw:
         if not isinstance(group, list):
             return None
         cleaned: list[int] = []
         for value in group:
+            if isinstance(value, bool):
+                return None
             try:
                 segment_id = int(value)
             except (TypeError, ValueError):
@@ -1903,39 +2384,58 @@ async def group_sentences(
     """
     if not segments:
         return {}
-    windows = split_transcript_windows(segments)
+    context_tokens = await resolve_context_tokens(provider)
+    windows = _split_indexed_windows(
+        segments,
+        system_prompt=SENTENCE_SYSTEM,
+        context_tokens=context_tokens,
+        per_item_output_tokens=6,
+        min_reply_tokens=512,
+    )
+    if not windows:
+        return {}
+    concurrency = 1 if is_ollama_endpoint(provider.base_url, provider.api_key) else 4
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _run_group_window(
+        window: list[dict[str, Any]],
+    ) -> list[list[int]] | None:
+        async with sem:
+            raise_if_cancelled(cancel_event)
+            window_ids = [int(segment["id"]) for segment in window]
+            messages = [
+                {"role": "system", "content": SENTENCE_SYSTEM},
+                {
+                    "role": "user",
+                    "content": (
+                        "TRANSCRIPT WINDOW:\n"
+                        f"{_format_indexed_segments(window)}\n\n"
+                        "Return the JSON object only."
+                    ),
+                },
+            ]
+            try:
+                reply = await chat(
+                    provider,
+                    messages,
+                    temperature=0.0,
+                    max_tokens=_reply_budget(len(window), per_item=6, minimum=512),
+                )
+                payload = extract_json(reply)
+            except LLMError as exc:
+                logger.warning("Sentence grouping window failed: %s", exc)
+                return None
+            groups = _sanitize_groups(payload, window_ids)
+            if groups is None:
+                logger.warning("Sentence grouping returned invalid ids; using fallback.")
+            return groups
+
+    raise_if_cancelled(cancel_event)
+    results = await asyncio.gather(*(_run_group_window(w) for w in windows))
     mapping: dict[int, int] = {}
     sentence_index = 0
-    for window in windows:
-        raise_if_cancelled(cancel_event)
-        if not window:
-            continue
-        window_ids = [int(segment["id"]) for segment in window]
-        messages = [
-            {"role": "system", "content": SENTENCE_SYSTEM},
-            {
-                "role": "user",
-                "content": (
-                    "TRANSCRIPT WINDOW:\n"
-                    f"{_format_indexed_segments(window)}\n\n"
-                    "Return the JSON object only."
-                ),
-            },
-        ]
-        try:
-            reply = await chat(
-                provider,
-                messages,
-                temperature=0.0,
-                max_tokens=_reply_budget(len(window), per_item=12),
-            )
-            payload = extract_json(reply)
-        except LLMError as exc:
-            logger.warning("Sentence grouping window failed: %s", exc)
-            continue
-        groups = _sanitize_groups(payload, window_ids)
-        if groups is None:
-            logger.warning("Sentence grouping returned invalid ids; using fallback.")
+    for groups in results:
+        if not groups:
             continue
         for group in groups:
             for segment_id in group:
@@ -1997,11 +2497,26 @@ async def audit_arabic_decision(
 
     if unsure and escalator is not None:
         try:
-            spans.extend(
-                await audit_arabic(
-                    segments=unsure, provider=escalator, cancel_event=cancel_event
+            unsure_ids = {int(segment["id"]) for segment in unsure}
+            position = {int(segment["id"]): idx for idx, segment in enumerate(usable)}
+            keep_indices: set[int] = set()
+            for segment_id in unsure_ids:
+                idx = position.get(segment_id)
+                if idx is None:
+                    continue
+                keep_indices.update(
+                    range(max(0, idx - 2), min(len(usable), idx + 3))
                 )
+            escalate_segments = [usable[idx] for idx in sorted(keep_indices)]
+            escalated_spans = await audit_arabic(
+                segments=escalate_segments,
+                provider=escalator,
+                cancel_event=cancel_event,
             )
+            for span in escalated_spans:
+                span_range = range(int(span["start_id"]), int(span["end_id"]) + 1)
+                if any(sid in unsure_ids for sid in span_range):
+                    spans.append(span)
         except LLMError as exc:
             logger.warning("Recitation escalator failed; keeping decision spans: %s", exc)
     elif unsure:
@@ -2146,7 +2661,11 @@ async def group_sentences_with_decision(
                 )
             return rebuild_sentence_map(segments, starts)
 
-        ordered = sorted(segments, key=lambda item: float(item.get("start", 0.0)))
+        ordered = [
+            segment
+            for segment in sorted(segments, key=lambda item: float(item.get("start", 0.0)))
+            if str(segment.get("text", "")).strip()
+        ]
         for left, right in zip(ordered, ordered[1:]):
             if int(left["id"]) in breaks:
                 starts.add(int(right["id"]))

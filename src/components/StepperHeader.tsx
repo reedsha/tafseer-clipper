@@ -1,5 +1,4 @@
 import { L } from "@/lib/i18n";
-import NumberFlow from "@number-flow/react";
 import { Check, History, Settings, Settings2 } from "lucide-react";
 import { cn } from "cn";
 
@@ -235,19 +234,6 @@ export function StepperHeader() {
                   </span>
                 ) : null}
                 <span>{acceleration.label}</span>
-                {acceleration.gpuName ? (
-                  <span className="text-muted-foreground">Detected: {acceleration.gpuName}</span>
-                ) : null}
-                {acceleration.gpuDetected ? (
-                  <span className="inline-flex items-baseline gap-1">
-                    <span>{L("GPU memory:")}</span>
-                    <NumberFlow
-                      value={sidecar.health.vram_mb}
-                      suffix=" MB"
-                      format={{ maximumFractionDigits: 0 }}
-                    />
-                  </span>
-                ) : null}
               </span>
             ) : (
               (sidecar.error ?? L("Click to check the processing engine again."))

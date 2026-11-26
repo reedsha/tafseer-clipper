@@ -666,6 +666,30 @@ export function Step4Export() {
               <CheckCircle2 className="size-3.5 shrink-0" />
               <NumberFlow value={job.rendered} format={{ maximumFractionDigits: 0 }} /> clip
               {job.rendered === 1 ? "" : "s"} rendered
+              {sidecarOutputDir || resolvedOutputDir ? (
+                <>
+                  <span className="text-muted-foreground/50">·</span>
+                  <span className="max-w-xs truncate" title={sidecarOutputDir ?? resolvedOutputDir ?? undefined}>
+                    {sidecarOutputDir ?? resolvedOutputDir}
+                  </span>
+                </>
+              ) : null}
+              <Button
+                variant="ghost"
+                size="xs"
+                disabled={!sidecarOutputDir && !resolvedOutputDir}
+                onClick={() => void openOutputFolder()}
+              >
+                {L("Open folder")}
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
+                disabled={!sidecarOutputDir && !resolvedOutputDir}
+                onClick={() => void copyOutputPath()}
+              >
+                {L("Copy path")}
+              </Button>
             </>
           ) : job.status === "error" ? (
             <>

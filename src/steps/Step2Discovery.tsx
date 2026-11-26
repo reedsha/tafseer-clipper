@@ -50,6 +50,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
@@ -289,6 +290,9 @@ export function Step2Discovery() {
         ? "error"
         : "idle";
   const error = discoveryJob?.status === "error" ? discoveryJob.error : null;
+  const discoveryPct = discoveryJob?.progress
+    ? Math.round((discoveryJob.progress.done / Math.max(1, discoveryJob.progress.total)) * 100)
+    : null;
   const [refinement, setRefinement] = useState("");
   const [importOpen, setImportOpen] = useState(false);
   const [replaceConfirmOpen, setReplaceConfirmOpen] = useState(false);
@@ -429,7 +433,7 @@ export function Step2Discovery() {
       kind: "discovery",
       projectId,
       label: replaceAll ? L("Starting over with new clips") : L("Finding clips"),
-      run: async (signal) => {
+      run: async (signal, hooks) => {
         const activityId = useAiActivityStore
           .getState()
           .start(aiRouteFor(settings, "clip-finding"));
@@ -438,16 +442,25 @@ export function Step2Discovery() {
             {
               transcript_id: transcriptId,
               base_prompt: current.basePrompt,
+              session_guide: current.sessionGuide.trim() || undefined,
               refinement_note: note.trim(),
               excluded_ranges: replaceAll ? [] : approvedRanges,
               language: settings.editor.language || "th",
-              provider: buildProviderFor(settings, "discovery"),
+              provider: buildProviderFor(settings),
               // A re-roll keeps approved clips out of the next search and feeds
               // the kept/passed clips back as feedback.
               approved_exemplars: replaceAll ? [] : approvedExemplarsFor(current),
               rejected_exemplars: replaceAll ? [] : rejectedExemplarsFor(current),
             },
-            { signal },
+            {
+              signal,
+              onProgress: (event) => {
+                hooks.setStage(event.label || null, {
+                  done: Math.round(event.progress * 100),
+                  total: 100,
+                });
+              },
+            },
           );
           // Report the writing model that produced the proposals.
           useAiActivityStore
@@ -861,11 +874,23 @@ export function Step2Discovery() {
             ) : null}
 
             {status === "running" && clips.length > 0 ? (
-              <div className="mb-2 space-y-1">
+              <div className="mb-2 space-y-1.5">
                 <p className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                   <Loader2 className="size-3 animate-spin" />
-                  {L("Looking for more moments…")}
+                  {discoveryJob?.stageLabel || L("Looking for more moments…")}
                 </p>
+                {discoveryPct !== null ? (
+                  <div className="flex items-center gap-2">
+                    <Progress value={discoveryPct} className="h-1" />
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                      <NumberFlow
+                        value={discoveryPct}
+                        suffix="%"
+                        format={{ maximumFractionDigits: 0 }}
+                      />
+                    </span>
+                  </div>
+                ) : null}
                 {activeDiscovery ? <AiActivityLine entry={activeDiscovery} /> : null}
               </div>
             ) : null}
@@ -879,8 +904,21 @@ export function Step2Discovery() {
                   />
                 ))}
                 <p className="pt-1 text-center text-[11px] text-muted-foreground">
-                  {L("Reading the transcript for self-contained moments…")}
+                  {discoveryJob?.stageLabel ||
+                    L("Reading the transcript for self-contained moments…")}
                 </p>
+                {discoveryPct !== null ? (
+                  <div className="mx-auto flex max-w-xs items-center gap-2">
+                    <Progress value={discoveryPct} className="h-1" />
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                      <NumberFlow
+                        value={discoveryPct}
+                        suffix="%"
+                        format={{ maximumFractionDigits: 0 }}
+                      />
+                    </span>
+                  </div>
+                ) : null}
                 {activeDiscovery ? (
                   <AiActivityLine entry={activeDiscovery} className="justify-center" />
                 ) : null}
@@ -1169,7 +1207,7 @@ export function Step2Discovery() {
                     <Slider
                       value={[bufferDraft]}
                       min={0}
-                      max={1}
+                      max={NUMERIC_LIMITS.cutBufferSeconds.max}
                       step={0.05}
                       onValueChange={([value]) => setBufferDraft(value)}
                       onValueCommit={(values) => {

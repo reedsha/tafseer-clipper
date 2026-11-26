@@ -478,11 +478,12 @@ export function ColorSwatchField({
         </PopoverTrigger>
         <PopoverContent align="end" className="w-48 p-1">
           {withCurrentColor(options, value).map((option) => (
-            <button
+            <Button
               key={option.value}
               type="button"
+              variant="ghost"
               onClick={() => onChange(option.value)}
-              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground"
+              className="h-auto w-full justify-start gap-2 rounded-sm px-2 py-1.5 text-left text-xs font-normal focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:ring-0"
             >
               <span
                 className="size-3 shrink-0 rounded-full border border-border"
@@ -492,7 +493,7 @@ export function ColorSwatchField({
               <span className="font-mono text-[10px] text-muted-foreground">
                 {option.value}
               </span>
-            </button>
+            </Button>
           ))}
         </PopoverContent>
       </Popover>
@@ -1013,11 +1014,12 @@ export function ModelSelect({
               }}
             >
               <PopoverTrigger asChild>
-                <button
+                <Button
                   type="button"
+                  variant="outline"
                   aria-label={label}
                   className={cn(
-                    "flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-transparent px-3 py-2 text-sm whitespace-nowrap shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50",
+                    "h-9 w-full justify-between gap-2 px-3 py-2 text-sm font-normal shadow-xs",
                     !value.trim() && "text-muted-foreground",
                   )}
                 >
@@ -1025,7 +1027,7 @@ export function ModelSelect({
                     {value.trim() || "Choose a model"}
                   </span>
                   <ChevronDownIcon className="size-4 shrink-0 opacity-50" />
-                </button>
+                </Button>
               </PopoverTrigger>
               <PopoverContent
                 align="start"
@@ -1068,9 +1070,10 @@ export function ModelSelect({
                         {mainMatches.length > 0 ? (
                           <div role="listbox" aria-label={label}>
                             {mainMatches.map((model) => (
-                              <button
+                              <Button
                                 key={model}
                                 type="button"
+                                variant="ghost"
                                 role="option"
                                 aria-selected={model === value}
                                 onClick={() => {
@@ -1079,7 +1082,7 @@ export function ModelSelect({
                                   setOpen(false);
                                 }}
                                 className={cn(
-                                  "flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground",
+                                  "h-auto w-full justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs font-normal focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:ring-0",
                                   model === value && "bg-accent/60",
                                 )}
                               >
@@ -1087,18 +1090,19 @@ export function ModelSelect({
                                 {model === value ? (
                                   <CheckIcon className="size-3.5 shrink-0" />
                                 ) : null}
-                              </button>
+                              </Button>
                             ))}
                           </div>
                         ) : null}
                         {unknown.length > 0 ? (
                           <>
-                            <button
+                            <Button
                               type="button"
+                              variant="ghost"
                               onClick={() => setShowOthers((current) => !current)}
                               aria-expanded={showOthers}
                               aria-label={`Other models (${unknown.length})`}
-                              className="mt-1 flex w-full items-center justify-between gap-2 rounded-sm border-t border-border px-2 py-1.5 text-left text-xs text-muted-foreground outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground"
+                              className="mt-1 h-auto w-full justify-between gap-2 rounded-sm border-t border-border px-2 py-1.5 text-left text-xs font-normal text-muted-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:ring-0"
                             >
                               <span>Other models ({unknown.length})</span>
                               <ChevronDownIcon
@@ -1107,7 +1111,7 @@ export function ModelSelect({
                                   showOthers && "rotate-180",
                                 )}
                               />
-                            </button>
+                            </Button>
                             {showOthers ? (
                               <div
                                 role="listbox"
@@ -1116,9 +1120,10 @@ export function ModelSelect({
                               >
                                 {otherMatches.length > 0 ? (
                                   otherMatches.map((model) => (
-                                    <button
+                                    <Button
                                       key={model}
                                       type="button"
+                                      variant="ghost"
                                       role="option"
                                       aria-selected={model === value}
                                       onClick={() => {
@@ -1127,7 +1132,7 @@ export function ModelSelect({
                                         setOpen(false);
                                       }}
                                       className={cn(
-                                        "flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground",
+                                        "h-auto w-full justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs font-normal focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:ring-0",
                                         model === value && "bg-accent/60",
                                       )}
                                     >
@@ -1135,7 +1140,7 @@ export function ModelSelect({
                                       {model === value ? (
                                         <CheckIcon className="size-3.5 shrink-0" />
                                       ) : null}
-                                    </button>
+                                    </Button>
                                   ))
                                 ) : (
                                   <p className="px-2 py-1.5 text-center text-[11px] text-muted-foreground">
@@ -1148,16 +1153,17 @@ export function ModelSelect({
                         ) : null}
                       </>
                     )}
-                    <button
+                    <Button
                       type="button"
+                      variant="ghost"
                       onClick={() => {
                         setCustom(true);
                         setOpen(false);
                       }}
-                      className="mt-1 flex w-full items-center gap-2 rounded-sm border-t border-border px-2 py-1.5 text-left text-xs text-muted-foreground outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground"
+                      className="mt-1 h-auto w-full justify-start gap-2 rounded-sm border-t border-border px-2 py-1.5 text-left text-xs font-normal text-muted-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:ring-0"
                     >
                       Custom model name…
-                    </button>
+                    </Button>
                   </div>
                 </div>
               </PopoverContent>

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import math
@@ -31,6 +32,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
@@ -167,6 +169,7 @@ class DecisionProvider(BaseModel):
         "auto",
         "systemone",
         "decisions",
+        "chat_completions",
         # Older settings that named a vendor instead of a wire format.
         "ollama",
         "openrouter",
@@ -176,8 +179,8 @@ class DecisionProvider(BaseModel):
     ] | None = Field(
         default=None,
         description=(
-            "Wire format: 'systemone' or 'decisions'. 'auto' measures it once "
-            "and remembers the answer; vendor names are legacy aliases."
+            "Wire format: 'systemone', 'decisions', or 'chat_completions'. "
+            "'auto' measures it once and remembers the answer; vendor names are legacy aliases."
         ),
     )
     endpoint_url: str | None = Field(
@@ -1010,6 +1013,8 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await prune_task
         await run_in_threadpool(_shutdown_cleanup)
+        await decision.close_http_client()
+        await analyzer.close_http_client()
 
 
 #: The WebView origin differs between dev (Vite on :1420), the Playwright E2E
@@ -1063,17 +1068,20 @@ async def _render_error(_: Request, exc: renderer.RenderError):
 # 1. GET /health
 # --------------------------------------------------------------------------- #
 _hardware_cache: tuple[float, dict] | None = None
+_hardware_lock = threading.Lock()
 _HARDWARE_TTL = 5.0
 
 
 def _hardware_snapshot() -> dict:
     global _hardware_cache
     now = time.monotonic()
-    if _hardware_cache and now - _hardware_cache[0] < _HARDWARE_TTL:
-        return _hardware_cache[1]
+    with _hardware_lock:
+        if _hardware_cache and now - _hardware_cache[0] < _HARDWARE_TTL:
+            return _hardware_cache[1]
     snapshot = transcriber.describe_environment()
     snapshot["nvenc_available"] = renderer.nvenc_available()
-    _hardware_cache = (now, snapshot)
+    with _hardware_lock:
+        _hardware_cache = (now, snapshot)
     return snapshot
 
 
@@ -1116,6 +1124,9 @@ OLLAMA_API_SHOW_TIMEOUT_SECONDS = OLLAMA_PROBE_TIMEOUT_SECONDS + 1.0
 _ollama_cache: tuple[float, str, OllamaProviderStatus] | None = None
 _ollama_lock = threading.Lock()
 _ollama_version_cache: tuple[float, str, str | None] | None = None
+#: Cache `/api/show` capability probes by `(root, model, digest)` so repeat
+#: `/health` refreshes skip HTTP round trips for unchanged Ollama models.
+_ollama_show_cache: dict[tuple[str, str, str], ModelDetail] = {}
 
 
 def _ollama_root_url(base_url: str | None) -> str:
@@ -1250,13 +1261,37 @@ def _probe_ollama(
         if response.status_code == 200:
             payload = response.json()
             entries = payload.get("models") if isinstance(payload, dict) else None
-            names: list[str] = []
+            digests: dict[str, str] = {}
             if isinstance(entries, list):
                 for entry in entries:
-                    name = entry.get("name") if isinstance(entry, dict) else None
+                    if not isinstance(entry, dict):
+                        continue
+                    name = entry.get("name")
                     if isinstance(name, str) and name and _is_chat_capable_model(name):
-                        names.append(name)
-            model_names = sorted(set(names))
+                        digests[name] = str(entry.get("digest") or "")
+            model_names = sorted(digests)
+            details_by_name: dict[str, ModelDetail] = {}
+            uncached: list[tuple[str, str]] = []
+            with _ollama_lock:
+                for name in model_names:
+                    digest = digests[name]
+                    cached = None if force else _ollama_show_cache.get((root, name, digest))
+                    if cached is not None:
+                        details_by_name[name] = cached
+                    else:
+                        uncached.append((name, digest))
+            if uncached:
+                if len(uncached) > 1:
+                    with ThreadPoolExecutor(max_workers=min(4, len(uncached))) as pool:
+                        fetched = list(
+                            pool.map(lambda item: _ollama_model_detail(item[0], root), uncached)
+                        )
+                else:
+                    fetched = [_ollama_model_detail(uncached[0][0], root)]
+                with _ollama_lock:
+                    for (name, digest), detail in zip(uncached, fetched):
+                        details_by_name[name] = detail
+                        _ollama_show_cache[(root, name, digest)] = detail
             status = OllamaProviderStatus(
                 detected=True,
                 url=root,
@@ -1264,10 +1299,7 @@ def _probe_ollama(
                 decision_models=sorted(
                     {name for name in model_names if _is_decision_model(name)}
                 ),
-                models_detail=sorted(
-                    (_ollama_model_detail(name, root) for name in model_names),
-                    key=lambda detail: detail.id,
-                ),
+                models_detail=[details_by_name[name] for name in model_names],
             )
     except Exception:  # noqa: BLE001 - detection must never fail /health
         pass
@@ -1342,14 +1374,25 @@ async def health(
     user starts a service); both parameters are optional and every older caller
     keeps the previous behaviour.
     """
-    global _whisper_cache
+    global _whisper_cache, _hardware_cache, _ollama_cache, _ollama_version_cache
     if refresh:
         with _whisper_lock:
             _whisper_cache = None
-    snapshot = await run_in_threadpool(_hardware_snapshot)
-    disk_cache_bytes = await run_in_threadpool(_disk_cache_bytes)
-    acceleration = await run_in_threadpool(accel.acceleration_report)
-    ollama = await run_in_threadpool(_probe_ollama, ollama_base_url, force=refresh)
+        with _hardware_lock:
+            _hardware_cache = None
+        with _ollama_lock:
+            _ollama_cache = None
+            _ollama_version_cache = None
+            _ollama_show_cache.clear()
+        accel.clear_cache()
+        renderer.clear_capability_cache()
+    snapshot, disk_cache_bytes, acceleration, ollama, whisper_local = await asyncio.gather(
+        run_in_threadpool(_hardware_snapshot),
+        run_in_threadpool(_disk_cache_bytes),
+        run_in_threadpool(accel.acceleration_report),
+        run_in_threadpool(_probe_ollama, ollama_base_url, force=refresh),
+        run_in_threadpool(_probe_whisper_cache),
+    )
     decision_endpoint: str | None = None
     if ollama.detected and ollama.url:
         version = await run_in_threadpool(
@@ -1378,7 +1421,7 @@ async def health(
         acceleration=AccelerationStatus.model_validate(acceleration),
         providers=ProvidersStatus(
             ollama=ollama,
-            whisper_local=_probe_whisper_cache(),
+            whisper_local=whisper_local,
             decision_endpoint=decision_endpoint,
         ),
         hardware=_hardware_tier(int(snapshot["vram_mb"])),
@@ -1474,6 +1517,7 @@ class ListModelRequest(BaseModel):
         "auto",
         "systemone",
         "decisions",
+        "chat_completions",
         "ollama",
         "openrouter",
         "perplexity",
@@ -1713,6 +1757,184 @@ _T = TypeVar("_T")
 
 #: How often the disconnect watcher polls an in-flight long job.
 DISCONNECT_POLL_SECONDS = 0.5
+#: Keepalive interval on SSE streams for Step 1 and Step 2 so clients can tell
+#: an active long job apart from a dead sidecar.
+SSE_KEEPALIVE_SECONDS = 10.0
+
+
+def _wants_sse(request: Request) -> bool:
+    accept = (request.headers.get("accept") or "").lower()
+    return "text/event-stream" in accept
+
+
+def _http_error_from_exception(exc: BaseException) -> tuple[int, str]:
+    if isinstance(exc, HTTPException):
+        detail = (
+            exc.detail
+            if isinstance(exc.detail, str)
+            else json.dumps(exc.detail, ensure_ascii=False)
+        )
+        return exc.status_code, detail
+    if isinstance(exc, transcriber.TranscriptionError):
+        return 503, str(exc)
+    if isinstance(exc, (analyzer.LLMError, decision.DecisionError)):
+        return 502, str(exc)
+    return 500, str(exc) or exc.__class__.__name__
+
+
+def _stream_async_job(
+    request: Request,
+    *,
+    stage: str,
+    label: str,
+    runner: Callable[
+        [threading.Event, Callable[[str, float, str, int | None, int | None], None]],
+        Awaitable[BaseModel],
+    ],
+    on_cancel: Callable[[], None] | None = None,
+) -> StreamingResponse:
+    """Run an async endpoint workflow while streaming SSE progress and keepalives."""
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    cancel_event = threading.Event()
+    last_emit = {"progress": 0.0}
+    cleanup_done = {"ran": False}
+
+    def run_cancel_cleanup() -> None:
+        if on_cancel is None or cleanup_done["ran"]:
+            return
+        cleanup_done["ran"] = True
+        on_cancel()
+
+    def emit(
+        event_stage: str,
+        progress: float,
+        event_label: str,
+        done: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        clamped = float(progress)
+        if not math.isfinite(clamped):
+            clamped = last_emit["progress"]
+        clamped = min(1.0, max(last_emit["progress"], clamped))
+        last_emit["progress"] = clamped
+        payload: dict[str, Any] = {
+            "stage": event_stage,
+            "progress": round(clamped, 4),
+            "label": event_label,
+        }
+        if done is not None:
+            payload["done"] = done
+        if total is not None:
+            payload["total"] = total
+
+        def _enqueue() -> None:
+            queue.put_nowait(("progress", payload))
+
+        if threading.current_thread() is threading.main_thread():
+            try:
+                if asyncio.get_running_loop() is loop:
+                    _enqueue()
+                    return
+            except RuntimeError:
+                pass
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(_enqueue)
+
+    async def driver() -> None:
+        async def _work() -> BaseModel:
+            return await runner(cancel_event, emit)
+
+        async def _watch_disconnect(target: asyncio.Task[BaseModel]) -> None:
+            while not target.done():
+                if await request.is_disconnected():
+                    cancel_event.set()
+                    target.cancel()
+                    return
+                await asyncio.sleep(DISCONNECT_POLL_SECONDS)
+
+        work_task = asyncio.create_task(_work())
+        watcher = asyncio.create_task(_watch_disconnect(work_task))
+        try:
+            model_result = await work_task
+            await queue.put(("done", model_result.model_dump()))
+        except JobCancelled:
+            run_cancel_cleanup()
+            await queue.put(("cancelled", None))
+        except asyncio.CancelledError:
+            if cancel_event.is_set():
+                run_cancel_cleanup()
+                await queue.put(("cancelled", None))
+            else:
+                await queue.put(("error", {"status": 500, "detail": "Request aborted."}))
+        except BaseException as exc:
+            if cancel_event.is_set():
+                run_cancel_cleanup()
+                await queue.put(("cancelled", None))
+            else:
+                status_code, detail = _http_error_from_exception(exc)
+                if status_code >= 500:
+                    logger.exception("SSE job failed (%s)", request.url.path)
+                await queue.put(("error", {"status": status_code, "detail": detail}))
+        finally:
+            watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watcher
+            if not work_task.done():
+                work_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await work_task
+
+    async def event_stream() -> AsyncIterator[str]:
+        driver_task = asyncio.create_task(driver())
+        finished_cleanly = False
+        yield _sse("start", {"stage": stage, "progress": 0.0, "label": label})
+        try:
+            while True:
+                if await request.is_disconnected():
+                    cancel_event.set()
+                    break
+                try:
+                    kind, payload = await asyncio.wait_for(
+                        queue.get(), timeout=SSE_KEEPALIVE_SECONDS
+                    )
+                except TimeoutError:
+                    if await request.is_disconnected():
+                        cancel_event.set()
+                        break
+                    yield ": keepalive\n\n"
+                    continue
+                if kind == "progress":
+                    yield _sse("progress", payload)
+                elif kind == "done":
+                    finished_cleanly = True
+                    yield _sse("done", payload)
+                    break
+                elif kind == "error":
+                    finished_cleanly = True
+                    yield _sse("error", payload)
+                    break
+                elif kind == "cancelled":
+                    break
+        finally:
+            if not finished_cleanly:
+                cancel_event.set()
+            if not driver_task.done():
+                driver_task.cancel()
+            with contextlib.suppress(BaseException):
+                await driver_task
+            if not finished_cleanly:
+                with contextlib.suppress(Exception):
+                    run_cancel_cleanup()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 async def _run_until_disconnected(
@@ -1766,6 +1988,98 @@ async def _run_until_disconnected(
                 await work_task
 
 
+def _apply_phase_b_corpus_short_circuit(
+    segments: list[transcriber.Segment],
+) -> tuple[list[transcriber.Segment], set[int]]:
+    """Canonicalize first-pass Arabic segments against the offline Qur'an corpus.
+
+    Mixed Thai+Arabic segments are split into separate sequential Thai and ``ar``
+    segments so downstream subtitle cue builders preserve both tracks cleanly.
+    Runs inside ``run_in_threadpool`` so corpus matching never blocks the loop.
+    """
+    updated: list[transcriber.Segment] = []
+    resolved_segments: list[transcriber.Segment] = []
+    changed = False
+
+    for segment in segments:
+        text = str(segment.text or "")
+        if not re.search(r"[\u0600-\u06FF]", text):
+            updated.append(segment)
+            continue
+        span = quran.match_span(text)
+        if span is None or span.tier != "auto":
+            updated.append(segment)
+            continue
+        changed = True
+        translation = str(span.candidate_thai or "").strip() or None
+        if recitation.has_thai_outside(text, span):
+            leading, canonical, trailing = recitation.split_mixed_slice(text, span)
+            pieces = recitation.split_mixed_segment(
+                segment,
+                span,
+                leading_text=leading,
+                canonical_text=canonical,
+                trailing_text=trailing,
+                source="quran",
+                reference=span.reference,
+                confidence=span.score_orthographic,
+                original_text=text,
+                translation=translation,
+            )
+            for piece in pieces:
+                updated.append(piece)
+                if piece.language == "ar":
+                    resolved_segments.append(piece)
+        else:
+            segment.text = recitation.replace_slice(text, span)
+            segment.language = "ar"
+            segment.source = "quran"
+            segment.reference = span.reference
+            segment.confidence = span.score_orthographic
+            segment.translation = translation
+            segment.original_text = text
+            updated.append(segment)
+            resolved_segments.append(segment)
+
+    if changed:
+        for index, seg in enumerate(updated):
+            seg.id = index
+    resolved_ids = {int(seg.id) for seg in resolved_segments}
+    return updated, resolved_ids
+
+
+def _trim_spans_around_resolved(
+    spans: list[dict[str, Any]],
+    resolved_segments: list[transcriber.Segment],
+) -> list[dict[str, Any]]:
+    """Subtract intervals already canonicalized by Phase B without dropping neighbors."""
+    if not resolved_segments:
+        return spans
+    blocked = sorted((seg.start, seg.end) for seg in resolved_segments)
+    filtered: list[dict[str, Any]] = []
+    for span in spans:
+        span_start = float(span.get("start") or 0.0)
+        span_end = float(span.get("end") or 0.0)
+        if span_end - span_start < 0.25:
+            continue
+        intervals = [(span_start, span_end)]
+        for b_start, b_end in blocked:
+            next_intervals: list[tuple[float, float]] = []
+            for a_start, a_end in intervals:
+                if min(a_end, b_end) - max(a_start, b_start) <= 0.15:
+                    next_intervals.append((a_start, a_end))
+                    continue
+                if a_start < b_start - 0.15:
+                    next_intervals.append((a_start, min(a_end, b_start)))
+                if a_end > b_end + 0.15:
+                    next_intervals.append((max(a_start, b_end), a_end))
+            intervals = next_intervals
+        for sub_start, sub_end in intervals:
+            if sub_end - sub_start >= 0.25:
+                filtered.append({**span, "start": sub_start, "end": sub_end})
+    return filtered
+
+
 def _engine_for(body: TranscribeRequest) -> transcriber.WhisperTranscriber:
     """Return the warm singleton, replacing it only when the config differs."""
     return transcriber.get_transcriber(body.model, body.device, body.compute_type)
@@ -1795,10 +2109,15 @@ async def _release_local_model(engine: transcriber.WhisperTranscriber) -> bool:
     response_model=TranscribeResponse,
     summary="Extract 16kHz WAV, transcribe (local int8 CUDA / cloud), apply glossary",
 )
-async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> TranscribeResponse:
+async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> Any:
     source = Path(body.file_path)
     if not source.is_file():
         raise HTTPException(status_code=400, detail=f"File not found: {source}")
+    if not body.use_local_whisper and body.cloud is None:
+        raise HTTPException(
+            status_code=400,
+            detail="'cloud' configuration is required when use_local_whisper is false.",
+        )
 
     wav_path = config.work_dir() / "audio" / f"{uuid.uuid4().hex}.wav"
     auto_unload = (
@@ -1806,13 +2125,46 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
         if body.auto_unload is None
         else body.auto_unload
     )
+    transcript_stored = False
 
-    async def run(cancel_event: threading.Event) -> tuple[transcriber.TranscriptionResult, list[float]]:
-        await run_in_threadpool(transcriber.extract_audio, source, wav_path)
-        # Optional UI sugar: a downsampled envelope for the Step-2 wavesurfer bar.
+    def cleanup_wav() -> None:
+        if not transcript_stored:
+            with contextlib.suppress(OSError):
+                wav_path.unlink(missing_ok=True)
+
+    async def execute(
+        cancel_event: threading.Event,
+        emit: Callable[[str, float, str, int | None, int | None], None] | None = None,
+    ) -> TranscribeResponse:
+        nonlocal transcript_stored
+
+        def report(
+            stage: str,
+            progress: float,
+            label: str,
+            done: int | None = None,
+            total: int | None = None,
+        ) -> None:
+            if emit is not None:
+                emit(stage, progress, label, done, total)
+
+        report("extracting", 0.04, "Extracting audio track…")
+        if "cancel_event" in inspect.signature(transcriber.extract_audio).parameters:
+            await run_in_threadpool(
+                transcriber.extract_audio, source, wav_path, cancel_event=cancel_event
+            )
+        else:
+            await run_in_threadpool(transcriber.extract_audio, source, wav_path)
+
+        report("waveform", 0.14, "Building waveform preview…")
         waveform_peaks = await run_in_threadpool(
             transcriber.compute_waveform_peaks, wav_path
         )
+
+        report("transcribing", 0.18, "Transcribing speech…")
+
+        def _stt_progress(ratio: float, label: str) -> None:
+            report("transcribing", 0.18 + 0.56 * min(1.0, max(0.0, ratio)), label)
 
         engine: transcriber.WhisperTranscriber | None = None
         if body.use_local_whisper:
@@ -1820,32 +2172,35 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
             # 3.0 - defer the unload until every enrichment pass (including the
             # isolated Arabic recitation spans that reuse this warm model) is
             # done.  Unloading here would only force an immediate reload.
+            transcribe_kwargs: dict[str, Any] = {
+                "initial_prompt": body.initial_prompt or transcriber.RECITATION_INTRO_PROMPT,
+                "language": body.language,
+                "vad_filter": body.vad_filter,
+                "glossary": body.glossary,
+                "auto_unload": False,
+                "cancel_event": cancel_event,
+            }
+            if "on_progress" in inspect.signature(engine.transcribe).parameters:
+                transcribe_kwargs["on_progress"] = _stt_progress
             result = await run_in_threadpool(
                 engine.transcribe,
                 wav_path,
-                initial_prompt=body.initial_prompt or transcriber.RECITATION_INTRO_PROMPT,
-                language=body.language,
-                vad_filter=body.vad_filter,
-                glossary=body.glossary,
-                auto_unload=False,
-                cancel_event=cancel_event,
+                **transcribe_kwargs,
             )
         else:
-            if body.cloud is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="'cloud' configuration is required when use_local_whisper is false.",
-                )
-            result = await transcriber.transcribe_cloud(
-                wav_path,
-                base_url=body.cloud.base_url,
-                api_key=body.cloud.api_key,
-                model=body.cloud.model,
-                language=body.cloud.language or body.language,
-                prompt=body.initial_prompt or transcriber.RECITATION_INTRO_PROMPT,
-                glossary=body.glossary,
-                cancel_event=cancel_event,
-            )
+            assert body.cloud is not None
+            cloud_kwargs: dict[str, Any] = {
+                "base_url": body.cloud.base_url,
+                "api_key": body.cloud.api_key,
+                "model": body.cloud.model,
+                "language": body.cloud.language or body.language,
+                "prompt": body.initial_prompt or transcriber.RECITATION_INTRO_PROMPT,
+                "glossary": body.glossary,
+                "cancel_event": cancel_event,
+            }
+            if "on_progress" in inspect.signature(transcriber.transcribe_cloud).parameters:
+                cloud_kwargs["on_progress"] = _stt_progress
+            result = await transcriber.transcribe_cloud(wav_path, **cloud_kwargs)
 
         try:
             # Step-1 enrichment: Arabic recitation recovery + sentence groups.
@@ -1862,27 +2217,16 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                     logger.warning("Step-1 AI enrichment skipped: %s", exc)
 
             resolved_ids: set[int] = set()
-            if body.detect_arabic and (provider is not None or decision_provider is not None):
-                # Phase B: short-circuit segments where first-pass STT already
-                # produced Arabic script that matches the corpus with high
-                # confidence.  Apply the canonical slice replacement in place
-                # and skip audio re-transcription for those spans.
-                for segment in result.segments:
-                    text = str(segment.text or "")
-                    if not re.search(r"[\u0600-\u06FF]", text):
-                        continue
-                    span = quran.match_span(text)
-                    if span is None or span.tier != "auto":
-                        continue
-                    new_text = recitation.replace_slice(text, span)
-                    has_thai_outside = recitation.has_thai_outside(text, span)
-                    segment.text = new_text
-                    if not has_thai_outside:
-                        segment.language = "ar"
-                    segment.reference = span.reference
-                    segment.confidence = span.score_orthographic
-                    resolved_ids.add(int(segment.id))
+            if body.detect_arabic:
+                report("corpus_check", 0.76, "Matching Qur'an passages…")
+                # Phase B (offline): canonicalize first-pass Arabic segments that
+                # already match the Qur'an corpus without requiring an LLM.
+                result.segments, resolved_ids = await run_in_threadpool(
+                    _apply_phase_b_corpus_short_circuit, result.segments
+                )
 
+            if body.detect_arabic and (provider is not None or decision_provider is not None):
+                report("arabic_audit", 0.80, "Checking Arabic recitation spans…")
                 audit_input = [
                     {
                         "id": segment.id,
@@ -1892,6 +2236,7 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                         "language": segment.language,
                     }
                     for segment in result.segments
+                    if int(segment.id) not in resolved_ids
                 ]
                 try:
                     if decision_provider is not None:
@@ -1910,29 +2255,21 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                 except analyzer.LLMError as exc:
                     logger.warning("Arabic audit failed; keeping the plain transcript: %s", exc)
                     spans = []
-                # Phase B: drop spans already resolved by the first-pass
-                # short-circuit so their audio is not re-transcribed.
-                if resolved_ids:
+                # Trim spans against segments already resolved in Phase B so only
+                # un-canonicalized sub-intervals go to isolated audio re-transcription.
+                if resolved_ids and spans:
                     resolved_segments = [
                         segment for segment in result.segments if int(segment.id) in resolved_ids
                     ]
-                    filtered: list[dict[str, Any]] = []
-                    for span in spans:
-                        span_start = float(span.get("start") or 0.0)
-                        span_end = float(span.get("end") or 0.0)
-                        start_id = int(span.get("start_id", -1))
-                        end_id = int(span.get("end_id", -1))
-                        if start_id in resolved_ids or end_id in resolved_ids:
-                            continue
-                        if any(
-                            max(0.0, min(seg.end, span_end) - max(seg.start, span_start)) > 0.15
-                            for seg in resolved_segments
-                        ):
-                            continue
-                        filtered.append(span)
-                    spans = filtered
+                    spans = _trim_spans_around_resolved(spans, resolved_segments)
 
                 if spans:
+                    report(
+                        "arabic_recover",
+                        0.86,
+                        f"Recovering Arabic recitation ({len(spans)})…",
+                    )
+
                     async def transcribe_span(
                         path: Path,
                     ) -> transcriber.TranscriptionResult:
@@ -1996,6 +2333,7 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                     )
 
             if body.group_sentences:
+                report("grouping", 0.93, "Grouping subtitle sentences…")
                 thai_segments = [
                     {
                         "id": segment.id,
@@ -2041,59 +2379,66 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
                 except Exception as exc:  # noqa: BLE001 - unload must not fail Step 1
                     logger.warning("Could not unload the transcription model: %s", exc)
 
-        return result, waveform_peaks
+        transcript_id = uuid.uuid4().hex
+        _store_transcript(
+            TranscriptRecord(
+                transcript_id=transcript_id,
+                source_path=str(source),
+                duration=result.duration,
+                language=result.language,
+                segments=result.segments,
+                created_at=time.time(),
+                waveform_peaks=waveform_peaks,
+            )
+        )
+        transcript_stored = True
 
-    try:
-        result, waveform_peaks = await _run_until_disconnected(request, run)
-    except HTTPException as exc:
-        if exc.status_code == 499:
-            # Client left mid-transcription: no transcript record was stored,
-            # so only the extracted WAV needs reclaiming.
-            with contextlib.suppress(OSError):
-                wav_path.unlink(missing_ok=True)
-        raise
-
-    transcript_id = uuid.uuid4().hex
-    _store_transcript(
-        TranscriptRecord(
+        return TranscribeResponse(
             transcript_id=transcript_id,
-            source_path=str(source),
-            duration=result.duration,
+            duration=round(result.duration, 3),
             language=result.language,
-            segments=result.segments,
-            created_at=time.time(),
+            language_probability=result.language_probability,
+            segments=[
+                TranscriptSegment(
+                    id=segment.id,
+                    start=round(segment.start, 3),
+                    end=round(segment.end, 3),
+                    text=segment.text,
+                    language=segment.language,
+                    sentence_id=segment.sentence_id,
+                    source=segment.source,
+                    reference=segment.reference,
+                    confidence=segment.confidence,
+                    original_text=segment.original_text,
+                    translation=segment.translation,
+                )
+                for segment in result.segments
+            ],
+            audio_path=str(wav_path),
+            model=result.model,
+            device=result.device,
+            compute_type=result.compute_type,
+            vram_unloaded=result.vram_unloaded,
             waveform_peaks=waveform_peaks,
         )
-    )
 
-    return TranscribeResponse(
-        transcript_id=transcript_id,
-        duration=round(result.duration, 3),
-        language=result.language,
-        language_probability=result.language_probability,
-        segments=[
-            TranscriptSegment(
-                id=segment.id,
-                start=round(segment.start, 3),
-                end=round(segment.end, 3),
-                text=segment.text,
-                language=segment.language,
-                sentence_id=segment.sentence_id,
-                source=segment.source,
-                reference=segment.reference,
-                confidence=segment.confidence,
-                original_text=segment.original_text,
-                translation=segment.translation,
-            )
-            for segment in result.segments
-        ],
-        audio_path=str(wav_path),
-        model=result.model,
-        device=result.device,
-        compute_type=result.compute_type,
-        vram_unloaded=result.vram_unloaded,
-        waveform_peaks=waveform_peaks,
-    )
+    if _wants_sse(request):
+        return _stream_async_job(
+            request,
+            stage="extracting",
+            label="Preparing transcription…",
+            runner=execute,
+            on_cancel=cleanup_wav,
+        )
+
+    try:
+        return await _run_until_disconnected(
+            request, lambda cancel_event: execute(cancel_event, None)
+        )
+    except HTTPException as exc:
+        if exc.status_code == 499:
+            cleanup_wav()
+        raise
 
 
 # --------------------------------------------------------------------------- #
@@ -2104,7 +2449,7 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> T
     response_model=DiscoverResponse,
     summary="Keep & Re-roll: propose clips, honouring approved exclusions",
 )
-async def discover_clips(body: DiscoverRequest, request: Request) -> DiscoverResponse:
+async def discover_clips(body: DiscoverRequest, request: Request) -> Any:
     record = _get_transcript(body.transcript_id)
     try:
         provider = analyzer.merge_provider(
@@ -2124,29 +2469,44 @@ async def discover_clips(body: DiscoverRequest, request: Request) -> DiscoverRes
     duration = record.duration or (
         max((segment.end for segment in record.segments), default=0.0)
     )
-
-    async def run(cancel_event: threading.Event) -> list[dict[str, Any]]:
-        return await analyzer.discover_clips(
-            segments=segments,
-            duration=duration,
-            base_prompt=body.base_prompt,
-            session_guide=body.session_guide,
-            refinement_note=body.refinement_note,
-            excluded_ranges=excluded,
-            provider=provider,
-            language=body.language,
-            cancel_event=cancel_event,
-            approved_exemplars=approved,
-            rejected_exemplars=rejected,
-        )
-
-    clips = await _run_until_disconnected(request, run)
     model = provider.model
 
-    return DiscoverResponse(
-        clips=[ClipProposal(**clip) for clip in clips],
-        model=model,
-        excluded_ranges_applied=len(excluded),
+    async def execute(
+        cancel_event: threading.Event,
+        emit: Callable[[str, float, str, int | None, int | None], None] | None = None,
+    ) -> DiscoverResponse:
+        discover_kwargs: dict[str, Any] = {
+            "segments": segments,
+            "duration": duration,
+            "base_prompt": body.base_prompt,
+            "session_guide": body.session_guide,
+            "refinement_note": body.refinement_note,
+            "excluded_ranges": excluded,
+            "provider": provider,
+            "language": body.language,
+            "cancel_event": cancel_event,
+            "approved_exemplars": approved,
+            "rejected_exemplars": rejected,
+        }
+        if emit is not None and "on_progress" in inspect.signature(analyzer.discover_clips).parameters:
+            discover_kwargs["on_progress"] = emit
+        clips = await analyzer.discover_clips(**discover_kwargs)
+        return DiscoverResponse(
+            clips=[ClipProposal(**clip) for clip in clips],
+            model=model,
+            excluded_ranges_applied=len(excluded),
+        )
+
+    if _wants_sse(request):
+        return _stream_async_job(
+            request,
+            stage="planning",
+            label="Preparing clip search…",
+            runner=execute,
+        )
+
+    return await _run_until_disconnected(
+        request, lambda cancel_event: execute(cancel_event, None)
     )
 
 
@@ -2156,21 +2516,9 @@ async def discover_clips(body: DiscoverRequest, request: Request) -> DiscoverRes
 @app.post(
     "/verify-arabic",
     response_model=VerifyArabicResponse,
-    summary="Uthmani spelling / Harakat verification (offline Qur'an gate + text model)",
+    summary="Uthmani spelling / Harakat verification (offline Qur'an corpus matching)",
 )
 async def verify_arabic(body: VerifyArabicRequest) -> VerifyArabicResponse:
-    decision_provider = _decision_provider(body.decision_provider)
-    provider = None
-    if body.provider is not None:
-        provider = analyzer.merge_provider("fast", body.provider.to_service())
-    else:
-        # A configured default is still preferred, but its absence is no longer
-        # an error: the offline Qur'an gate verifies known verses with no model.
-        try:
-            provider = analyzer.merge_provider("fast", None)
-        except analyzer.LLMError:
-            provider = None
-
     if body.lines is not None:
         batch = await verify_service.verify_lines(
             [
@@ -2181,8 +2529,6 @@ async def verify_arabic(body: VerifyArabicRequest) -> VerifyArabicResponse:
                 )
                 for line in body.lines
             ],
-            provider=provider,
-            decision_provider=decision_provider,
         )
         return VerifyArabicResponse(
             model=batch.model,
@@ -2192,44 +2538,12 @@ async def verify_arabic(body: VerifyArabicRequest) -> VerifyArabicResponse:
             ],
         )
 
-    # Per-line "Check Arabic": corpus gate first, then pure-algorithm span match.
-    gated = verify_service.corpus_gate(body.arabic_text)
-    if gated is not None:
-        return VerifyArabicResponse(
-            verified_text=gated.verified_text,
-            correction_applied=gated.correction_applied,
-            notes=gated.notes,
-            model="",
-            source=gated.source,
-            reference=gated.reference,
-        )
-    span = quran.match_span(body.arabic_text)
-    if span is not None and span.tier in ("auto", "rescue"):
-        verified = span.matched_canonical.strip() or body.arabic_text
-        if span.tier == "rescue":
-            span_len = span.end_word - span.start_word + 1
-            if span_len < 6:
-                outcome = verify_service.needs_model_outcome(
-                    verify_service.VerifyLine(arabic_text=body.arabic_text)
-                )
-                return VerifyArabicResponse(
-                    verified_text=outcome.verified_text,
-                    correction_applied=outcome.correction_applied,
-                    notes=outcome.notes,
-                    model="",
-                    source=outcome.source,
-                    reference=span.reference,
-                )
-        return VerifyArabicResponse(
-            verified_text=verified,
-            correction_applied=verified != body.arabic_text.strip(),
-            notes=f"Matches the Qur'an corpus ({span.reference}).",
-            model="",
-            source="quran",
-            reference=span.reference,
-        )
-    outcome = verify_service.needs_model_outcome(
-        verify_service.VerifyLine(arabic_text=body.arabic_text)
+    outcome, _exact = await run_in_threadpool(
+        verify_service.verify_line_sync,
+        verify_service.VerifyLine(
+            arabic_text=body.arabic_text,
+            context_thai=body.context_thai,
+        ),
     )
     return VerifyArabicResponse(
         verified_text=outcome.verified_text,
@@ -2237,6 +2551,7 @@ async def verify_arabic(body: VerifyArabicRequest) -> VerifyArabicResponse:
         notes=outcome.notes,
         model="",
         source=outcome.source,
+        reference=outcome.reference,
     )
 
 
@@ -2515,6 +2830,10 @@ def _style_from_spec(base: subtitle_gen.StyleConfig, spec: StyleSpec) -> subtitl
         back_color = "#000000"
         # ASS alpha is inverted: 00 = opaque, FF = fully transparent.
         back_alpha = f"{round((1.0 - min(1.0, spec.box_opacity)) * 255):02X}"
+    elif spec.box_opacity is not None:
+        border_style = 1
+        back_color = "#000000"
+        back_alpha = "80"
 
     return subtitle_gen.StyleConfig(
         name=base.name,

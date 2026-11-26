@@ -4,13 +4,11 @@ Windows desktop app for turning long-form Tafseer lectures (Thai + Classical
 Arabic) into short bilingual clips.
 
 - `src/` — React + TypeScript + Tailwind (shadcn/ui) wizard UI, Zustand stores.
-- `src-tauri/` — Tauri v2 Rust shell: window lifecycle, sidecar spawn, native
-  dialogs, scoped project-file access, auto-updater and Authenticode signing hook.
+- `src-tauri/` — Tauri v2 Rust shell: window lifecycle, Win32 Job Object sidecar spawn/cleanup, native
+  dialogs, atomic/scoped project-file access, DPAPI secret sealing, auto-updater and Authenticode signing hook.
 - `backend/` — Python FastAPI sidecar on a dynamic loopback port: transcription,
-  clip discovery, Arabic verification, font import and NVENC batch rendering.
+  clip discovery, offline Qur'an verification, font import, SSE progress streams, and NVENC/libx264 batch rendering.
 - `AGENTS.md` — binding UI/architecture contract.
-- `tafseer_clipper_master_plan.md` — authoritative specification.
-- `AUDIT_REPORT.md` — audit findings and remediation checklist.
 - `docs/RELEASING.md` — release runbook (build, signing, updater, secrets).
 - `docs/RELEASE_CHECKLIST.md` — packaged end-to-end release gate.
 

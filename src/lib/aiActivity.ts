@@ -49,7 +49,7 @@ export function aiTimeLabel(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-export type DecisionActivitySlot = "analysis" | "verify_triage";
+export type DecisionActivitySlot = "analysis";
 
 export interface DecisionActivitySlice {
   decisionSlots: Record<

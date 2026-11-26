@@ -289,11 +289,12 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
                               isSelected && "bg-accent/30",
                             )}
                           >
-                            <button
+                            <Button
                               type="button"
+                              variant="ghost"
                               onClick={() => handleSelectPreset(preset.id)}
                               aria-pressed={isSelected}
-                              className="flex min-w-0 flex-1 flex-col gap-0.5 px-3 py-2 text-left transition-colors hover:bg-accent/20 focus-visible:bg-accent/30 focus-visible:outline-none"
+                              className="h-auto min-w-0 flex-1 flex-col items-start justify-start gap-0.5 rounded-none px-3 py-2 text-left font-normal whitespace-normal hover:bg-accent/20 dark:hover:bg-accent/20 focus-visible:bg-accent/30 focus-visible:ring-0"
                             >
                               <span className="flex items-center gap-1.5">
                                 <span className="truncate text-xs font-medium text-foreground">
@@ -311,15 +312,17 @@ export function PromptDrawer({ open, onOpenChange }: PromptDrawerProps) {
                               <span className="line-clamp-1 text-[10px] leading-relaxed text-muted-foreground">
                                 {preset.prompt}
                               </span>
-                            </button>
-                            <button
+                            </Button>
+                            <Button
                               type="button"
+                              variant="ghost"
+                              size="icon-sm"
                               onClick={() => setPendingDeleteId(preset.id)}
                               aria-label={`${L("Delete preset")} ${preset.name}`}
-                              className="flex w-9 shrink-0 items-center justify-center text-muted-foreground transition-colors hover:bg-destructive/15 hover:text-destructive focus-visible:bg-destructive/15 focus-visible:text-destructive focus-visible:outline-none"
+                              className="h-auto w-9 shrink-0 rounded-none text-muted-foreground hover:bg-destructive/15 hover:text-destructive dark:hover:bg-destructive/15 focus-visible:bg-destructive/15 focus-visible:text-destructive focus-visible:ring-0"
                             >
                               <Trash2 className="size-3.5" />
-                            </button>
+                            </Button>
                           </li>
                         );
                       })}

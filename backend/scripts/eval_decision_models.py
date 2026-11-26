@@ -234,7 +234,6 @@ def build_fixtures() -> dict[str, Any]:
 
     files = {
         "recitation.jsonl": recitation_rows,
-        "verify_triage.jsonl": triage_rows,
     }
     counts: dict[str, int] = {}
     for name, rows in files.items():
@@ -257,10 +256,6 @@ def build_fixtures() -> dict[str, Any]:
                 "No real lecture transcript is stored in the repository, so Thai "
                 "explanation and Thai-script-Arabic rows are curated seeds; the "
                 "Qur'an rows are real corpus text. Treat Thai accuracy as indicative."
-            ),
-            "verify_triage": (
-                "Corruptions are synthetic (diacritics dropped, one letter swapped) "
-                "and ground truth is exact by construction."
             ),
         },
         "candidates": DEFAULT_CANDIDATES,
@@ -366,67 +361,13 @@ async def _predict_recitation(
     return predictions
 
 
-async def _predict_triage(
-    provider: decision.DecisionProviderConfig,
-    rows: list[dict[str, Any]],
-    transport: Any = None,
-) -> list[Prediction] | None:
-    predictions: list[Prediction] = []
-    batch_size = 32
-    for offset in range(0, len(rows), batch_size):
-        chunk = rows[offset : offset + batch_size]
-        state, questions = decision_tasks.verify_triage_request(chunk)
-        try:
-            answers = await decision.decide(
-                provider, state, questions, transport=transport
-            )
-        except decision.DecisionError:
-            return None
-        decisions = decision_tasks.triage_from_answers(answers, len(chunk))
-        for item in decisions:
-            predictions.append(Prediction(bool(item.proofread), item.confidence))
-    return predictions
-
-
-# --------------------------------------------------------------------------- #
-# Baselines (today's heuristics)
-# --------------------------------------------------------------------------- #
-_ARABIC_CHAR = re.compile(r"[\u0600-\u06FF]")
-
-
-def _recitation_baseline(row: dict[str, Any]) -> Any:
-    text = str(row["segment"]["text"])
-    if _ARABIC_CHAR.search(text):
-        return "quran"
-    if quran.normalize_arabic(text):
-        return "quran"
-    return "none"
-
-
-def _triage_baseline(row: dict[str, Any]) -> bool:
-    """Corpus-exact lines pass untouched; everything else is proofread."""
-    text = str(row["arabic_text"])
-    match = quran.match_text(text, min_score=0.99)
-    return not (
-        match is not None
-        and quran.normalize_arabic(match.arabic) == quran.normalize_arabic(text)
-    )
-
-
 def baseline_metrics() -> dict[str, Any]:
     recitation_rows = _load_rows("recitation.jsonl")
-    triage_rows = _load_rows("verify_triage.jsonl")
     return {
         "recitation": _metric_block(
             [
                 (_recitation_baseline(row), row["label"], 1.0)
                 for row in recitation_rows
-            ]
-        ),
-        "verify_triage": _metric_block(
-            [
-                (_triage_baseline(row), bool(row["label"]), 1.0)
-                for row in triage_rows
             ]
         ),
     }
@@ -498,7 +439,6 @@ async def evaluate_candidate(
 
     tasks = {
         "recitation": ("recitation.jsonl", _predict_recitation),
-        "verify_triage": ("verify_triage.jsonl", _predict_triage),
     }
     for task, (file_name, predictor) in tasks.items():
         rows = _load_rows(file_name)
@@ -565,9 +505,6 @@ def write_report(evaluation: dict[str, Any]) -> dict[str, Any]:
     candidates = evaluation["candidates"]
     recommendations = [
         recommend("analysis", candidates, baselines["recitation"], task="recitation"),
-        recommend(
-            "verify_triage", candidates, baselines["verify_triage"], task="verify_triage"
-        ),
     ]
     report = {
         "generatedAt": datetime.datetime.now().isoformat(timespec="seconds"),

@@ -428,6 +428,9 @@ export const useProjectStore = create<ProjectState>()(
           for (const prev of state.project.clips) {
             const next = clips.find((clip) => clip.id === prev.id);
             subtitles = rebaseCuesForMovedClip(subtitles, prev, next);
+            if (next) {
+              subtitles = clampCuesToDuration(subtitles, prev.id, next.end - next.start);
+            }
           }
           const selectedClipId = state.project.selectedClipId;
           return {

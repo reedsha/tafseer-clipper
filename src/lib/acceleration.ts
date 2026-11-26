@@ -352,6 +352,25 @@ export function describeAcceleration(
 
   const base = { transcription, encoding, gpuDetected, gpuName, cudaRuntime, packInstalled, reason };
 
+  if (
+    gpuDetected &&
+    transcription !== "gpu" &&
+    (reason === "cuda-runtime-missing" || !packInstalled)
+  ) {
+    return {
+      ...base,
+      state: "gpu-detected-needs-runtime",
+      label:
+        encoding === "gpu"
+          ? "GPU encoding ready — runtime not installed"
+          : "GPU detected — runtime not installed",
+      description:
+        encoding === "gpu"
+          ? "Encoding uses the GPU, but the acceleration runtime is not installed for transcription. CPU transcription still works (slower)."
+          : "A GPU is available but its acceleration runtime is not installed. Everything still works on the CPU (slower).",
+    };
+  }
+
   if (transcription === "gpu" || encoding === "gpu") {
     return {
       ...base,

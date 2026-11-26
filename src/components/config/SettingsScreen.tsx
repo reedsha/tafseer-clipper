@@ -421,7 +421,6 @@ export function JudgmentsSection() {
   const ollama = useSettingsStore((state) => state.ollama);
   const [probes, setProbes] = useState<Record<DecisionSlotId, ProbeState>>({
     analysis: { status: "idle", detail: "" },
-    verify_triage: { status: "idle", detail: "" },
   });
 
   const setProbe = (id: DecisionSlotId, next: ProbeState) =>

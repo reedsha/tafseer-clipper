@@ -24,11 +24,13 @@ function projectName(id: string | null, recents: { id: string; name: string }[])
 function TaskRow({
   label,
   project,
+  stageLabel,
   progress,
   onCancel,
 }: {
   label: string;
   project: string;
+  stageLabel?: string | null;
   /** 0..1, or `null` for an indeterminate task. */
   progress: number | null;
   onCancel: () => void;
@@ -49,6 +51,9 @@ function TaskRow({
         </Button>
       </div>
       <p className="truncate text-[11px] text-muted-foreground">{project}</p>
+      {stageLabel ? (
+        <p className="truncate text-[10px] text-muted-foreground/85">{stageLabel}</p>
+      ) : null}
       {progress !== null ? (
         <div className="mt-1 flex items-center gap-2">
           <Progress value={Math.round(progress * 100)} className="h-1" />
@@ -101,6 +106,7 @@ export function TaskCenter() {
               key={job.id}
               label={job.label}
               project={projectName(job.projectId, recents)}
+              stageLabel={job.stageLabel}
               progress={progressOf(job)}
               onCancel={() => cancelJob(job.id)}
             />

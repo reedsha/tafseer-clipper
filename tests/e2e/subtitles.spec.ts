@@ -366,28 +366,34 @@ test.describe("batched Arabic check", () => {
           verified_text: "",
           correction_applied: false,
           notes: "",
-          model: "mock-model",
+          model: "",
           lines: [
             {
               cue_id: "cue-a",
               verified_text: "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ",
               correction_applied: true,
-              notes: "Added the missing Uthmani tail.",
-              source: "proofread",
+              notes: "Matched the Qur'an corpus (1:1).",
+              source: "quran",
+              reference: "1:1",
+              confidence: 1,
             },
             {
               cue_id: "cue-b",
               verified_text: "الْحَمْدُ لِلَّهِ",
               correction_applied: false,
-              notes: "The fast check suggests this line is already correct.",
-              source: "triage",
+              notes: "Matched the Qur'an corpus (1:2).",
+              source: "quran",
+              reference: "1:2",
+              confidence: 1,
             },
             {
               cue_id: "cue-c",
               verified_text: "الرَّحْمَٰنِ",
               correction_applied: false,
-              notes: "The fast check suggests this line is already correct.",
-              source: "triage",
+              notes: "Matched the Qur'an corpus (1:3).",
+              source: "quran",
+              reference: "1:3",
+              confidence: 1,
             },
           ],
         }),
@@ -405,13 +411,14 @@ test.describe("batched Arabic check", () => {
     await page.getByRole("button", { name: "Check 3 Arabic" }).click();
 
     await expect(page.getByText("Arabic checked")).toBeVisible();
-    await expect(page.getByText("3 lines · 1 corrected.")).toBeVisible();
+    await expect(page.getByText("3 Qur'an matches · 1 corrected.")).toBeVisible();
 
-    // One round-trip for the whole clip (docs/DECISION_MODELS_PLAN.md §5).
+    // One offline round-trip for the whole clip; Step 3 never sends an LLM provider.
     expect(requests).toHaveLength(1);
     const body = requests[0] as {
       lines: { arabic_text: string; cue_id: string; context_thai: string }[];
       provider?: unknown;
+      decision_provider?: unknown;
     };
     expect(body.lines.map((line) => line.cue_id)).toEqual(["cue-a", "cue-b", "cue-c"]);
     expect(body.lines[0]).toMatchObject({
@@ -419,18 +426,18 @@ test.describe("batched Arabic check", () => {
       cue_id: "cue-a",
       context_thai: "ด้วยพระนาม",
     });
-    expect(body.provider).toBeTruthy();
+    expect(body.provider).toBeNull();
+    expect(body.decision_provider).toBeNull();
 
     // The corrected line replaced only its own cue.
     await expect(page.locator("[data-cue-row]").first()).toContainText("الرَّحِيمِ");
     await expect(page.locator("[data-cue-row]").nth(1)).not.toContainText("الرَّحِيمِ");
   });
 
-  test("offline check sends no provider and reports the lines that need a model", async ({
+  test("offline check sends no provider and reports unmatched lines", async ({
     page,
   }) => {
-    // Nothing is configured at all: the batch must still be sent with
-    // provider: null so the sidecar can gate exact Qur'an verses offline.
+    // Offline corpus gate handles Qur'an lines and marks non-corpus Arabic as unmatched.
     const now = Date.now();
     await seedProjectFile(page, {
       schemaVersion: 1,
@@ -511,8 +518,8 @@ test.describe("batched Arabic check", () => {
               cue_id: "cue-b",
               verified_text: "الْحَمْدُ لِلَّهِ",
               correction_applied: false,
-              notes: "A text model is required to proofread this line.",
-              source: "needs_model",
+              notes: "Only Qur'an verses are verified offline; review non-Qur'anic Arabic manually.",
+              source: "unmatched",
             },
           ],
         }),
@@ -529,8 +536,8 @@ test.describe("batched Arabic check", () => {
 
     await page.getByRole("button", { name: "Check 2 Arabic" }).click();
 
-    // One offline run: the corpus line counts, the prose line asks for a model.
-    await expect(page.getByText("Checked 1 of 2 lines offline")).toBeVisible();
+    // One offline run: the corpus line counts, the non-corpus line is left unmatched.
+    await expect(page.getByText("Matched 1 of 2 lines in the Qur'an corpus")).toBeVisible();
     expect(requests).toHaveLength(1);
     expect((requests[0] as { provider?: unknown }).provider).toBeNull();
 

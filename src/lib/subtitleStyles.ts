@@ -6,6 +6,7 @@
  * in sync with `subtitle_gen.default_styles()`.
  */
 
+import subtitleContract from "../../backend/data/subtitle_contract.json";
 import type { StyleSpec } from "@/lib/api";
 import type { Resolution } from "@/lib/projectTypes";
 
@@ -88,76 +89,10 @@ export function defaultAssStyles(resolution: Resolution): {
   arabic: AssStyle;
   thai: AssStyle;
 } {
-  if (resolution === "1920x1080") {
-    return {
-      arabic: style({
-        name: "ArabicStyle",
-        font: "Noto Naskh Arabic",
-        size: 54,
-        primaryColor: "#dcb46e",
-        outlineColor: "#0b0c0d",
-        backColor: "#000000",
-        boxOpacity: 0,
-        bold: false,
-        outline: 2,
-        shadow: 1,
-        marginV: 142,
-        marginL: 80,
-        marginR: 80,
-        lineHeightPad: 1.35,
-      }),
-      thai: style({
-        name: "ThaiStyle",
-        font: "Leelawadee UI",
-        size: 38,
-        primaryColor: "#f4f4f1",
-        outlineColor: "#0b0c0d",
-        backColor: "#000000",
-        boxOpacity: 0.15,
-        bold: false,
-        outline: 3,
-        shadow: 1,
-        marginV: 80,
-        marginL: 80,
-        marginR: 80,
-        lineHeightPad: 1.2,
-      }),
-    };
-  }
-
+  const entry = subtitleContract[resolution] ?? subtitleContract["1080x1920"];
   return {
-    arabic: style({
-      name: "ArabicStyle",
-      font: "Noto Naskh Arabic",
-      size: 64,
-      primaryColor: "#dcb46e",
-      outlineColor: "#0b0c0d",
-      backColor: "#000000",
-      boxOpacity: 0,
-      bold: false,
-      outline: 2,
-      shadow: 1,
-      marginV: 252,
-      marginL: 54,
-      marginR: 54,
-      lineHeightPad: 1.35,
-    }),
-    thai: style({
-      name: "ThaiStyle",
-      font: "Leelawadee UI",
-      size: 44,
-      primaryColor: "#f4f4f1",
-      outlineColor: "#0b0c0d",
-      backColor: "#000000",
-      boxOpacity: 0.15,
-      bold: false,
-      outline: 3,
-      shadow: 1,
-      marginV: 150,
-      marginL: 54,
-      marginR: 54,
-      lineHeightPad: 1.2,
-    }),
+    arabic: style({ ...entry.arabic }),
+    thai: style({ ...entry.thai }),
   };
 }
 

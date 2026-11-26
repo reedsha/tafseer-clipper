@@ -8,13 +8,16 @@ dictionaries that ``main.py`` forwards as Server-Sent Events.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
+import os
 import re
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -371,10 +374,16 @@ def _run_once(job: RenderJob, encoder: str, ffmpeg: str) -> Iterator[dict]:
         ass_path=job.ass_path,
         fonts_dir=job.fonts_dir,
     )
+    # Render into a hidden sibling file in the same directory so a failed,
+    # cancelled, or timed-out FFmpeg run never leaves a truncated target MP4 or
+    # destroys an existing output on re-render; os.replace promotes atomically.
+    staging = job.output.with_name(
+        f".{job.output.stem}.rendering.{uuid.uuid4().hex[:8]}{job.output.suffix}"
+    )
     args = build_ffmpeg_args(
         ffmpeg=ffmpeg,
         source=job.source,
-        output=job.output,
+        output=staging,
         filtergraph=graph,
         start=job.start,
         duration=job.duration,
@@ -467,15 +476,21 @@ def _run_once(job: RenderJob, encoder: str, ffmpeg: str) -> Iterator[dict]:
         returncode = process.wait()
         watchdog.join(timeout=5)
         reader.join(timeout=5)
-        if returncode == 0 and job.output.is_file():
-            completed = True
-        else:
-            # A killed or failed FFmpeg leaves a partial, unplayable MP4 in the
-            # exports folder; remove it (a fallback attempt rewrites the path).
+        if returncode == 0 and staging.is_file() and staging.stat().st_size > 0:
             try:
-                job.output.unlink(missing_ok=True)
+                os.replace(staging, job.output)
+                completed = True
             except OSError as exc:
-                logger.warning("Could not remove partial output %s: %s", job.output, exc)
+                logger.warning("Could not finalize rendered output %s: %s", job.output, exc)
+                with contextlib.suppress(OSError):
+                    staging.unlink(missing_ok=True)
+        else:
+            # A killed or failed FFmpeg leaves a partial, unplayable MP4;
+            # clean up only the staging file so any prior good output survives.
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Could not remove partial staging output %s: %s", staging, exc)
 
     if state.timed_out:
         detail = " | ".join(list(stderr_tail)[-3:]) or "no FFmpeg output"
@@ -484,7 +499,7 @@ def _run_once(job: RenderJob, encoder: str, ffmpeg: str) -> Iterator[dict]:
             f"terminated by the watchdog: {detail}"
         )
 
-    if returncode != 0 or not job.output.is_file():
+    if returncode != 0 or not completed or not job.output.is_file():
         detail = " | ".join(list(stderr_tail)[-3:]) or "unknown FFmpeg error"
         raise RenderError(f"{encoder} failed (exit {returncode}): {detail}")
 

@@ -31,13 +31,20 @@ export interface TaskJob {
   startedAt: number;
   endedAt: number | null;
   error: string | null;
-  /** Batch progress for verification; `null` when indeterminate. */
+  /** Human-readable current stage streamed from the sidecar, if reported. */
+  stageLabel: string | null;
+  /** Determinate progress (`done`/`total`); `null` when indeterminate. */
   progress: { done: number; total: number } | null;
 }
 
 export interface TaskHooks {
   /** Report determinate batch progress. */
   setProgress: (done: number, total: number) => void;
+  /** Update the current stage description (and optionally progress). */
+  setStage: (
+    stageLabel: string | null,
+    progress?: { done: number; total: number } | null,
+  ) => void;
   /** Apply a partial result to the open project immediately (no journal). */
   deliverPartial: (payload: TaskResultPayload) => void;
 }
@@ -121,6 +128,7 @@ export const useJobStore = create<JobState>()((set, get) => ({
           startedAt: Date.now(),
           endedAt: null,
           error: null,
+          stageLabel: null,
           progress: null,
         },
         ...state.jobs,
@@ -129,6 +137,11 @@ export const useJobStore = create<JobState>()((set, get) => ({
 
     const hooks: TaskHooks = {
       setProgress: (done, total) => update({ progress: { done, total } }),
+      setStage: (stageLabel, progress) =>
+        update({
+          stageLabel,
+          ...(progress !== undefined ? { progress } : {}),
+        }),
       deliverPartial: (payload) => deliverPartial(input.projectId, payload),
     };
 
@@ -136,21 +149,27 @@ export const useJobStore = create<JobState>()((set, get) => ({
       try {
         const payload = await input.run(controller.signal, hooks);
         if (controller.signal.aborted) {
-          update({ status: "cancelled", endedAt: Date.now() });
+          update({ status: "cancelled", endedAt: Date.now(), stageLabel: null });
           input.onCancel?.();
           return;
         }
-        update({ status: "done", endedAt: Date.now(), progress: null });
+        update({ status: "done", endedAt: Date.now(), stageLabel: null, progress: null });
         if (payload) deliverTaskResult(input.projectId, payload);
         input.onSuccess?.(payload);
       } catch (error) {
         if (controller.signal.aborted) {
-          update({ status: "cancelled", endedAt: Date.now() });
+          update({ status: "cancelled", endedAt: Date.now(), stageLabel: null });
           input.onCancel?.();
           return;
         }
         const message = error instanceof Error ? error.message : String(error);
-        update({ status: "error", endedAt: Date.now(), error: message, progress: null });
+        update({
+          status: "error",
+          endedAt: Date.now(),
+          error: message,
+          stageLabel: null,
+          progress: null,
+        });
         input.onError?.(message);
       } finally {
         controllers.delete(id);
@@ -165,7 +184,7 @@ export const useJobStore = create<JobState>()((set, get) => ({
     set((state) => ({
       jobs: state.jobs.map((job) =>
         job.id === jobId && job.status === "running"
-          ? { ...job, status: "cancelled", endedAt: Date.now() }
+          ? { ...job, status: "cancelled", endedAt: Date.now(), stageLabel: null }
           : job,
       ),
     }));

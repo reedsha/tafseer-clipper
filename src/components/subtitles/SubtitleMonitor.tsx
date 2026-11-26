@@ -87,7 +87,8 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
   ) {
     const hostRef = useRef<HTMLDivElement>(null);
     const foregroundRef = useRef<HTMLVideoElement>(null);
-    const backdropRef = useRef<HTMLVideoElement>(null);
+    const backdropCanvasRef = useRef<HTMLCanvasElement>(null);
+    const lastBackdropDrawRef = useRef(0);
     const rangeEndRef = useRef<number | null>(null);
     const pendingRef = useRef<{ start: number; end: number } | null>(null);
     const rateRef = useRef(1);
@@ -102,6 +103,25 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
     // Framing only changes the 9:16 canvas; a 16:9 export never letterboxes.
     const effectiveFraming: FramingMode = portrait ? framing : "center-crop";
     const mediaSrc = useMemo(() => toMediaSrc(sourcePath), [sourcePath]);
+
+    const drawBackdrop = useCallback(() => {
+      if (effectiveFraming !== "blur-fill") return;
+      const video = foregroundRef.current;
+      const canvas = backdropCanvasRef.current;
+      if (!video || !canvas || video.readyState < 2) return;
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (vw <= 0 || vh <= 0) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const cw = canvas.width;
+      const ch = canvas.height;
+      const scale = Math.max(cw / vw, ch / vh);
+      const dw = vw * scale;
+      const dh = vh * scale;
+      ctx.drawImage(video, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+      lastBackdropDrawRef.current = performance.now();
+    }, [effectiveFraming]);
 
     useEffect(() => {
       const host = hostRef.current;
@@ -126,17 +146,15 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
         foreground.muted = muted;
         foreground.playbackRate = rateRef.current;
       }
-      const backdrop = backdropRef.current;
-      if (backdrop) {
-        // The blurred copy is decorative: never let it add a second audio track.
-        backdrop.muted = true;
-        backdrop.playbackRate = rateRef.current;
-      }
     }, [muted]);
 
     useEffect(() => {
       applyMediaState();
     }, [applyMediaState]);
+
+    useEffect(() => {
+      drawBackdrop();
+    }, [drawBackdrop]);
 
     useEffect(() => {
       onTimeUpdateRef.current = onTimeUpdate;
@@ -152,21 +170,12 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
       }
       const upper = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : seconds;
       video.currentTime = clamp(seconds, 0, upper);
-      const backdrop = backdropRef.current;
-      if (backdrop) {
-        try {
-          backdrop.currentTime = video.currentTime;
-        } catch {
-          /* The blurred copy may not be seekable yet. */
-        }
-      }
       onTimeUpdateRef.current?.(video.currentTime);
       setNow(video.currentTime);
     }, []);
 
     const pause = useCallback(() => {
       foregroundRef.current?.pause();
-      backdropRef.current?.pause();
     }, []);
 
     const playRange = useCallback((start: number, end: number) => {
@@ -179,20 +188,11 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
       const outside = video.currentTime < start - 0.05 || video.currentTime >= end - 0.05;
       if (outside) {
         video.currentTime = start + 0.01;
-        const backdrop = backdropRef.current;
-        if (backdrop) {
-          try {
-            backdrop.currentTime = video.currentTime;
-          } catch {
-            /* Not seekable yet. */
-          }
-        }
       }
       rangeEndRef.current = end;
       void video.play().catch(() => {
         /* Autoplay may be blocked until the user interacts with the window. */
       });
-      void backdropRef.current?.play().catch(() => {});
     }, []);
 
     const seekBy = useCallback(
@@ -210,8 +210,8 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
       if (!Number.isFinite(rate)) return;
       const next = clamp(rate, 0.25, 4);
       rateRef.current = next;
-      for (const element of [foregroundRef.current, backdropRef.current]) {
-        if (element) element.playbackRate = next;
+      if (foregroundRef.current) {
+        foregroundRef.current.playbackRate = next;
       }
     }, []);
 
@@ -236,7 +236,7 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
     }, [mediaSrc, clipStart, seekTo]);
 
     /* Follow the video clock while playing so the overlay changes on the frame
-       it should, instead of waiting for the ~4 Hz `timeupdate` event. */
+       it should, and refresh the blurred canvas backdrop at ~15 fps. */
     useEffect(() => {
       if (!playing) return;
       let frame = 0;
@@ -249,12 +249,15 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
             last = current;
             setNow(current);
           }
+          if (performance.now() - lastBackdropDrawRef.current >= 66) {
+            drawBackdrop();
+          }
         }
         frame = requestAnimationFrame(tick);
       };
       frame = requestAnimationFrame(tick);
       return () => cancelAnimationFrame(frame);
-    }, [playing]);
+    }, [drawBackdrop, playing]);
 
     function handleForegroundMetadata() {
       applyMediaState();
@@ -267,47 +270,32 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
         if (pending.end - pending.start > 0) {
           rangeEndRef.current = pending.end;
           void video.play().catch(() => {});
-          void backdropRef.current?.play().catch(() => {});
         }
+        drawBackdrop();
         return;
       }
       if (Number.isFinite(video.duration) && video.duration > 0) {
         video.currentTime = clamp(video.currentTime, 0, video.duration);
       }
       setNow(video.currentTime);
-    }
-
-    function handleBackdropMetadata() {
-      applyMediaState();
-      const video = foregroundRef.current;
-      const backdrop = backdropRef.current;
-      if (!video || !backdrop) return;
-      try {
-        backdrop.currentTime = video.currentTime;
-      } catch {
-        /* Not seekable yet. */
-      }
+      drawBackdrop();
     }
 
     function handleTimeUpdate() {
       const video = foregroundRef.current;
       if (!video) return;
-      const backdrop = backdropRef.current;
-      if (backdrop && Math.abs(backdrop.currentTime - video.currentTime) > 0.4) {
-        try {
-          backdrop.currentTime = video.currentTime;
-        } catch {
-          /* Not seekable yet. */
-        }
-      }
       onTimeUpdateRef.current?.(video.currentTime);
       setNow(video.currentTime);
       const end = rangeEndRef.current;
       if (!video.paused && end != null && video.currentTime >= end - 0.02) {
         rangeEndRef.current = null;
         video.pause();
-        backdrop?.pause();
       }
+    }
+
+    function handleSeeked() {
+      handleTimeUpdate();
+      drawBackdrop();
     }
 
     function handlePlay() {
@@ -338,17 +326,12 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
           {mediaSrc ? (
             <>
               {effectiveFraming === "blur-fill" ? (
-                <video
-                  key={`${mediaSrc}-backdrop`}
-                  ref={backdropRef}
-                  src={mediaSrc}
+                <canvas
+                  ref={backdropCanvasRef}
+                  width={180}
+                  height={320}
                   aria-hidden
-                  muted
-                  playsInline
-                  preload="metadata"
-                  tabIndex={-1}
                   className="pointer-events-none absolute inset-0 size-full scale-110 object-cover blur-2xl"
-                  onLoadedMetadata={handleBackdropMetadata}
                 />
               ) : null}
               <video
@@ -364,8 +347,9 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
                 )}
                 onClick={() => onTogglePlay?.()}
                 onLoadedMetadata={handleForegroundMetadata}
+                onLoadedData={drawBackdrop}
                 onTimeUpdate={handleTimeUpdate}
-                onSeeked={handleTimeUpdate}
+                onSeeked={handleSeeked}
                 onPlay={handlePlay}
                 onPause={handlePause}
               />

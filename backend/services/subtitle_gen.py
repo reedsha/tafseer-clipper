@@ -12,8 +12,12 @@ Colour note: ASS stores colours as ``&HAABBGGRR`` (alpha first, BGR order).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
+
+import config
 
 
 # --------------------------------------------------------------------------- #
@@ -140,66 +144,47 @@ def escape_ass_text(text: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Default styles
+# Default styles (loaded from backend/data/subtitle_contract.json)
 # --------------------------------------------------------------------------- #
+_CONTRACT_PATH = config.RESOURCE_DIR / "data" / "subtitle_contract.json"
+
+
+@lru_cache(maxsize=1)
+def _load_style_contract() -> dict[str, dict[str, dict[str, object]]]:
+    return json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
+
+
+def _style_from_contract(raw: dict[str, object]) -> StyleConfig:
+    box_opacity = float(raw.get("boxOpacity") or 0.0)
+    border_style = 3 if box_opacity > 0 else 1
+    back_alpha = (
+        f"{round((1.0 - min(1.0, box_opacity)) * 255):02X}"
+        if box_opacity > 0
+        else "80"
+    )
+    return StyleConfig(
+        name=str(raw["name"]),
+        font=str(raw["font"]),
+        size=int(raw["size"]),
+        primary_color=str(raw["primaryColor"]),
+        outline_color=str(raw.get("outlineColor", "#000000")),
+        back_color=str(raw.get("backColor", "#000000")),
+        bold=bool(raw.get("bold", False)),
+        outline=float(raw.get("outline", 2.0)),
+        shadow=float(raw.get("shadow", 1.0)),
+        margin_v=int(raw["marginV"]),
+        margin_l=int(raw["marginL"]),
+        margin_r=int(raw["marginR"]),
+        border_style=border_style,
+        back_alpha=back_alpha,
+    )
+
+
 def default_styles(resolution: str) -> tuple[StyleConfig, StyleConfig]:
     """Plan defaults: warm gold Uthmani Arabic above crisp white Thai."""
-    width, height = parse_resolution(resolution)
-    portrait = height > width
-
-    if portrait:
-        arabic = StyleConfig(
-            name="ArabicStyle",
-            font="Noto Naskh Arabic",
-            size=64,
-            primary_color="#dcb46e",
-            margin_v=252,
-            margin_l=54,
-            margin_r=54,
-            outline=2.0,
-            shadow=1.0,
-        )
-        thai = StyleConfig(
-            name="ThaiStyle",
-            font="Leelawadee UI",
-            size=44,
-            primary_color="#f4f4f1",
-            margin_v=160,
-            margin_l=54,
-            margin_r=54,
-            outline=3.0,
-            shadow=1.0,
-            border_style=3,
-            back_color="#000000",
-            back_alpha="D8",
-        )
-    else:
-        arabic = StyleConfig(
-            name="ArabicStyle",
-            font="Noto Naskh Arabic",
-            size=54,
-            primary_color="#dcb46e",
-            margin_v=142,
-            margin_l=80,
-            margin_r=80,
-            outline=2.0,
-            shadow=1.0,
-        )
-        thai = StyleConfig(
-            name="ThaiStyle",
-            font="Leelawadee UI",
-            size=38,
-            primary_color="#f4f4f1",
-            margin_v=80,
-            margin_l=80,
-            margin_r=80,
-            outline=3.0,
-            shadow=1.0,
-            border_style=3,
-            back_color="#000000",
-            back_alpha="D8",
-        )
-    return arabic, thai
+    parse_resolution(resolution)
+    entry = _load_style_contract()[resolution]
+    return _style_from_contract(entry["arabic"]), _style_from_contract(entry["thai"])
 
 
 # --------------------------------------------------------------------------- #
@@ -207,6 +192,16 @@ def default_styles(resolution: str) -> tuple[StyleConfig, StyleConfig]:
 # --------------------------------------------------------------------------- #
 def _style_line(style: StyleConfig) -> str:
     bold = -1 if style.bold else 0
+    if style.border_style == 3:
+        # In libass BorderStyle=3 ("Opaque box"), OutlineColour paints the box
+        # fill and alpha; BackColour only paints a separate drop shadow if Shadow>0.
+        outline_colour = ass_color(style.back_color, alpha=style.back_alpha)
+        back_colour = "&HFF000000"
+        shadow_value = "0"
+    else:
+        outline_colour = ass_color(style.outline_color)
+        back_colour = ass_color(style.back_color, alpha=style.back_alpha)
+        shadow_value = f"{style.shadow:g}"
     return ",".join(
         [
             style.name,
@@ -214,8 +209,8 @@ def _style_line(style: StyleConfig) -> str:
             str(style.size),
             ass_color(style.primary_color),
             ass_color(style.primary_color),  # SecondaryColour (unused, karaoke)
-            ass_color(style.outline_color),
-            ass_color(style.back_color, alpha=style.back_alpha),  # shadow / box
+            outline_colour,
+            back_colour,
             str(bold),
             "0",  # Italic
             "0",  # Underline
@@ -226,7 +221,7 @@ def _style_line(style: StyleConfig) -> str:
             "0",  # Angle
             str(style.border_style),
             f"{style.outline:g}",
-            f"{style.shadow:g}",
+            shadow_value,
             "2",  # Alignment: bottom centre
             str(style.margin_l),
             str(style.margin_r),

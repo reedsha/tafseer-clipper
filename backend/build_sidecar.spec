@@ -32,7 +32,7 @@ Frozen path handling lives in ``backend/config.py`` (``RESOURCE_DIR`` vs
 import os
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 BACKEND_DIR = Path(SPECPATH)  # noqa: F821 - injected by PyInstaller
 
@@ -50,12 +50,18 @@ datas: list = []
 binaries: list = []
 hiddenimports: list = []
 
-# --- Bundled Qur'an corpus -------------------------------------------------- #
+# --- Bundled Qur'an corpus + subtitle contract ------------------------------- #
 _quran_corpus = BACKEND_DIR / "data" / "quran.json"
 if _quran_corpus.is_file():
     datas.append((str(_quran_corpus), "data"))
 else:
     print(f"[spec] WARNING: Qur'an corpus missing at {_quran_corpus}")
+
+_subtitle_contract = BACKEND_DIR / "data" / "subtitle_contract.json"
+if _subtitle_contract.is_file():
+    datas.append((str(_subtitle_contract), "data"))
+else:
+    print(f"[spec] WARNING: Subtitle contract missing at {_subtitle_contract}")
 
 # --- AI stack -------------------------------------------------------------- #
 for _package in ("faster_whisper", "ctranslate2", "av", "onnxruntime"):
@@ -63,19 +69,6 @@ for _package in ("faster_whisper", "ctranslate2", "av", "onnxruntime"):
     datas += _datas
     binaries += _binaries
     hiddenimports += _hidden
-
-# CUDA runtime DLLs installed by the ``nvidia-*-cu12`` wheels.  ctranslate2
-# loads cuBLAS/cuDNN at runtime, so they must sit next to the extracted libs.
-for _package in (
-    "nvidia.cublas",
-    "nvidia.cudnn",
-    "nvidia.cuda_nvrtc",
-    "nvidia.cuda_runtime",
-):
-    try:
-        binaries += list(collect_dynamic_libs(_package))
-    except Exception:
-        pass
 
 # --- Web layer ------------------------------------------------------------- #
 # uvicorn imports these by name (loop=auto, http=auto, lifespan=on).
@@ -108,6 +101,7 @@ except Exception:
 # only an optional VRAM-cleanup helper in services/transcriber.py and is
 # imported inside a try/except).
 EXCLUDES = [
+    "nvidia",
     "torch",
     "torchaudio",
     "torchvision",

@@ -321,6 +321,21 @@ export interface SaveTextOptions {
   mimeType: string;
 }
 
+async function writeProjectAtomicDesktop(filePath: string, contents: string): Promise<void> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("write_project_file_atomic", { path: filePath, contents });
+    return;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const missingCommand =
+      /command\s+write_project_file_atomic\s+not\s+found|unknown\s+command/i.test(message);
+    if (!missingCommand) throw error;
+  }
+  const fs = await import("@tauri-apps/plugin-fs");
+  await fs.writeTextFile(filePath, contents);
+}
+
 /**
  * Save a text file through the same chain as projects: desktop save dialog →
  * File System Access picker → anchor download. Returns `"saved"` or
@@ -333,13 +348,17 @@ export async function saveTextFile(
 ): Promise<"saved" | "cancelled"> {
   if (isDesktopRuntime()) {
     const { save } = await import("@tauri-apps/plugin-dialog");
-    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
     const selected = await save({
       defaultPath: fileName,
       filters: [{ name: options.filterName, extensions: [options.extension] }],
     });
     if (!selected) return "cancelled";
-    await writeTextFile(selected, text);
+    if (options.extension === "tafseer") {
+      await writeProjectAtomicDesktop(selected, text);
+    } else {
+      const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+      await writeTextFile(selected, text);
+    }
     return "saved";
   }
 
@@ -614,7 +633,7 @@ export async function writeAutosaveFile(
   const writeOnce = async (folder: string): Promise<string> => {
     await fs.mkdir(folder, { recursive: true });
     const filePath = await join(folder, diskAutosaveFileName(project));
-    await fs.writeTextFile(
+    await writeProjectAtomicDesktop(
       filePath,
       serializeProject({ ...project, updatedAt: Date.now() }, false),
     );
@@ -663,10 +682,14 @@ export async function readAutosaveFile(
       );
     }
     for (const filePath of candidates) {
-      if (!(await fs.exists(filePath))) continue;
-      const project = parseProjectFile(await fs.readTextFile(filePath));
-      rememberAutosavePath(projectId, filePath);
-      return project;
+      try {
+        if (!(await fs.exists(filePath))) continue;
+        const project = parseProjectFile(await fs.readTextFile(filePath));
+        rememberAutosavePath(projectId, filePath);
+        return project;
+      } catch {
+        /* Try the next candidate if one copy is missing or unreadable. */
+      }
     }
     return null;
   } catch {

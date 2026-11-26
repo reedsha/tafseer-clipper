@@ -16,6 +16,7 @@ Optional Cloud STT is supported through any OpenAI-compatible
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import gc
@@ -25,18 +26,20 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import wave
 from array import array
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
+from starlette.concurrency import run_in_threadpool
 
 import config
 from services import accel
-from services.cancel import raise_if_cancelled
+from services.cancel import JobCancelled, raise_if_cancelled
 
 logger = logging.getLogger("tafseer.transcriber")
 
@@ -205,8 +208,14 @@ def resolve_compute_type(device: str, requested: str | None) -> str:
 # --------------------------------------------------------------------------- #
 # Audio extraction
 # --------------------------------------------------------------------------- #
-def extract_audio(video_path: str | Path, out_wav: str | Path) -> Path:
-    """Extract a 16 kHz mono PCM WAV with FFmpeg (plan Section 6A.2)."""
+def extract_audio(
+    video_path: str | Path,
+    out_wav: str | Path,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> Path:
+    """Extract a 16 kHz mono PCM WAV with FFmpeg, supporting cooperative cancellation."""
+    raise_if_cancelled(cancel_event)
     ffmpeg = config.ffmpeg_path()
     if not ffmpeg:
         raise TranscriptionError(
@@ -245,26 +254,52 @@ def extract_audio(video_path: str | Path, out_wav: str | Path) -> Path:
         str(target),
     ]
     timeout = config.extract_audio_timeout()
+    deadline = time.monotonic() + timeout
     try:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             args,
-            capture_output=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            check=False,
-            timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise TranscriptionError(
-            f"FFmpeg did not finish extracting audio within {timeout:.0f}s; "
-            "the lecture may be corrupt or the file is on a stalled drive."
-        ) from exc
     except OSError as exc:
         raise TranscriptionError(f"Could not start FFmpeg: {exc}") from exc
-    if completed.returncode != 0 or not target.is_file():
-        detail = (completed.stderr or "").strip().splitlines()
+
+    stderr_text = ""
+    try:
+        while True:
+            ret = proc.poll()
+            if ret is not None:
+                break
+            if cancel_event is not None and cancel_event.is_set():
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=3)
+                with contextlib.suppress(OSError):
+                    target.unlink(missing_ok=True)
+                raise JobCancelled("The client disconnected; audio extraction cancelled.")
+            if time.monotonic() > deadline:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=3)
+                raise TranscriptionError(
+                    f"FFmpeg did not finish extracting audio within {timeout:.0f}s; "
+                    "the lecture may be corrupt or the file is on a stalled drive."
+                )
+            time.sleep(0.05)
+        if proc.stderr is not None:
+            stderr_text = proc.stderr.read()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=2)
+
+    if proc.returncode != 0 or not target.is_file():
+        detail = (stderr_text or "").strip().splitlines()
         raise TranscriptionError(
             "FFmpeg failed to extract audio: "
             + (" | ".join(detail[-3:]) if detail else "unknown error")
@@ -560,104 +595,114 @@ class WhisperTranscriber:
         glossary: dict[str, str] | None = None,
         auto_unload: bool = True,
         cancel_event: threading.Event | None = None,
+        on_progress: Callable[[float, str], None] | None = None,
     ) -> TranscriptionResult:
-        model = self._ensure_model()
+        with self._lock:
+            model = self._ensure_model()
 
-        try:
             try:
-                segments_iter, info = self._run_transcribe(
-                    model, audio_path, initial_prompt, language, vad_filter
-                )
-            except Exception as exc:
-                # A GPU runtime can pass the readiness probe and still fail at
-                # INFERENCE: cuBLAS/cuDNN are only first touched inside
-                # encode(), so a missing cublas64_12.dll surfaces here rather
-                # than at model load. This is the same "GPU is optional, the CPU
-                # always works" contract that _ensure_model already honours -
-                # without this retry the whole request 500s on an NVIDIA machine
-                # that has not installed the acceleration pack.
-                if self._device != "cuda":
-                    raise TranscriptionError(
-                        f"Transcription failed on {self._device}/"
-                        f"{self._compute_type}: {exc}"
-                    ) from exc
-
-                cpu_compute_type = resolve_compute_type("cpu", self.compute_request)
-                logger.warning(
-                    "GPU transcription failed at inference (%s); retrying on the "
-                    "CPU with compute_type=%s. Enable GPU acceleration in Settings "
-                    "to install the optional CUDA runtime.",
-                    exc,
-                    cpu_compute_type,
-                )
-                # Drop the CUDA model first so its VRAM pool is released before
-                # the CPU model is allocated.
-                self.unload()
                 try:
-                    from faster_whisper import WhisperModel  # type: ignore
-
-                    model = WhisperModel(
-                        self.model_size,
-                        device="cpu",
-                        compute_type=cpu_compute_type,
+                    segments_iter, info = self._run_transcribe(
+                        model, audio_path, initial_prompt, language, vad_filter
                     )
-                except Exception as cpu_exc:  # pragma: no cover - env dependent
-                    raise TranscriptionError(
-                        "Could not load faster-whisper "
-                        f"'{self.model_size}' on the CPU after the GPU failed: "
-                        f"{cpu_exc}. Switch Settings to Cloud STT and try again."
-                    ) from cpu_exc
+                except Exception as exc:
+                    if self._device != "cuda":
+                        raise TranscriptionError(
+                            f"Transcription failed on {self._device}/"
+                            f"{self._compute_type}: {exc}"
+                        ) from exc
 
-                self._model = model
-                self._device = "cpu"
-                self._compute_type = cpu_compute_type
-                segments_iter, info = self._run_transcribe(
-                    model, audio_path, initial_prompt, language, vad_filter
-                )
-
-            raw: list[Segment] = []
-            for index, item in enumerate(segments_iter):
-                # Natural cancellation boundary: faster-whisper yields segments
-                # progressively, so a disconnected client stops the work here
-                # instead of burning CPU/GPU to the end of the lecture.
-                raise_if_cancelled(cancel_event)
-                text = (item.text or "").strip()
-                if not text:
-                    continue
-                raw.append(
-                    Segment(
-                        id=index,
-                        start=float(item.start),
-                        end=float(item.end),
-                        text=text,
-                        language=getattr(info, "language", None),
+                    cpu_compute_type = resolve_compute_type("cpu", self.compute_request)
+                    logger.warning(
+                        "GPU transcription failed at inference (%s); retrying on the "
+                        "CPU with compute_type=%s. Enable GPU acceleration in Settings "
+                        "to install the optional CUDA runtime.",
+                        exc,
+                        cpu_compute_type,
                     )
-                )
+                    self.unload()
+                    try:
+                        from faster_whisper import WhisperModel  # type: ignore
 
-            segments = apply_glossary_to_segments(raw, glossary)
-            duration = float(getattr(info, "duration", 0.0) or 0.0)
-            if duration <= 0 and segments:
-                duration = max(segment.end for segment in segments)
-            language_detected = getattr(info, "language", None)
-            language_probability = getattr(info, "language_probability", None)
-        finally:
-            # Drop the last local reference before unload() so the CTranslate2
-            # engine is actually destroyed (and its CUDA pool freed) when the
-            # auto-unload toggle is on.
-            del model
+                        model = WhisperModel(
+                            self.model_size,
+                            device="cpu",
+                            compute_type=cpu_compute_type,
+                        )
+                    except Exception as cpu_exc:  # pragma: no cover - env dependent
+                        raise TranscriptionError(
+                            "Could not load faster-whisper "
+                            f"'{self.model_size}' on the CPU after the GPU failed: "
+                            f"{cpu_exc}. Switch Settings to Cloud STT and try again."
+                        ) from cpu_exc
 
-        unloaded = self.unload() if auto_unload else False
+                    self._model = model
+                    self._device = "cpu"
+                    self._compute_type = cpu_compute_type
+                    segments_iter, info = self._run_transcribe(
+                        model, audio_path, initial_prompt, language, vad_filter
+                    )
 
-        return TranscriptionResult(
-            segments=segments,
-            duration=duration,
-            language=language_detected,
-            language_probability=language_probability,
-            device=self._device,
-            compute_type=self._compute_type,
-            model=self.model_size,
-            vram_unloaded=unloaded,
-        )
+                raw: list[Segment] = []
+                est_duration = float(getattr(info, "duration", 0.0) or 0.0)
+                last_progress_at = 0.0
+                last_progress_ratio = -1.0
+                for index, item in enumerate(segments_iter):
+                    raise_if_cancelled(cancel_event)
+                    text = (item.text or "").strip()
+                    if not text:
+                        continue
+                    end_sec = float(item.end)
+                    raw.append(
+                        Segment(
+                            id=index,
+                            start=float(item.start),
+                            end=end_sec,
+                            text=text,
+                            language=getattr(info, "language", None),
+                        )
+                    )
+                    if on_progress is not None:
+                        now = time.monotonic()
+                        if est_duration > 0:
+                            ratio = min(0.99, max(0.0, end_sec / est_duration))
+                            if now - last_progress_at >= 0.5 or ratio >= last_progress_ratio + 0.02:
+                                last_progress_at = now
+                                last_progress_ratio = ratio
+                                _safe_progress(
+                                    on_progress,
+                                    ratio,
+                                    f"Transcribing speech ({int(round(ratio * 100))}%)…",
+                                )
+                        elif now - last_progress_at >= 0.5:
+                            last_progress_at = now
+                            _safe_progress(
+                                on_progress,
+                                0.0,
+                                f"Transcribing speech ({len(raw)} segments)…",
+                            )
+
+                segments = apply_glossary_to_segments(raw, glossary)
+                duration = float(getattr(info, "duration", 0.0) or 0.0)
+                if duration <= 0 and segments:
+                    duration = max(segment.end for segment in segments)
+                language_detected = getattr(info, "language", None)
+                language_probability = getattr(info, "language_probability", None)
+            finally:
+                del model
+
+            unloaded = self.unload() if auto_unload else False
+
+            return TranscriptionResult(
+                segments=segments,
+                duration=duration,
+                language=language_detected,
+                language_probability=language_probability,
+                device=self._device,
+                compute_type=self._compute_type,
+                model=self.model_size,
+                vram_unloaded=unloaded,
+            )
 
     @staticmethod
     def _run_transcribe(
@@ -894,6 +939,230 @@ def _cloud_status_error(
     return TranscriptionError(f"Cloud STT rejected the request ({status}): {body}")
 
 
+def _audio_mime_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".mp3":
+        return "audio/mpeg"
+    if suffix in {".ogg", ".opus"}:
+        return "audio/ogg"
+    return "audio/wav"
+
+
+_SILENCE_TIME_RE = re.compile(r"silence_(?:start|end):\s*([0-9]+(?:\.[0-9]+)?)")
+CLOUD_STT_COMPRESS_MIN_BYTES = 2 * 1024 * 1024
+CLOUD_STT_OVERLAP_SECONDS = 1.5
+
+
+def _detect_silences(ffmpeg: str, path: Path) -> list[float]:
+    """Return sorted silence midpoints (seconds) to guide cloud chunk splits."""
+    try:
+        completed = subprocess.run(
+            [
+                ffmpeg,
+                "-nostdin",
+                "-hide_banner",
+                "-i",
+                str(path),
+                "-af",
+                "silencedetect=noise=-35dB:d=0.4",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=20,
+            check=False,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    midpoints: list[float] = []
+    pending_start: float | None = None
+    for line in (completed.stderr or "").splitlines():
+        if "silence_start:" in line:
+            match = _SILENCE_TIME_RE.search(line)
+            if match:
+                pending_start = float(match.group(1))
+        elif "silence_end:" in line and pending_start is not None:
+            match = _SILENCE_TIME_RE.search(line)
+            if match:
+                end_t = float(match.group(1))
+                midpoints.append((pending_start + end_t) * 0.5)
+            pending_start = None
+    return sorted(midpoints)
+
+
+def _encode_mp3_slice(
+    ffmpeg: str,
+    wav_path: Path,
+    out_mp3: Path,
+    *,
+    start: float | None = None,
+    duration: float | None = None,
+    cancel_event: threading.Event | None = None,
+) -> bool:
+    """Transcode ``wav_path`` (or a time slice) to 48 kbps mono MP3 for Cloud STT."""
+    raise_if_cancelled(cancel_event)
+    args = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y"]
+    if start is not None and start > 0:
+        args.extend(["-ss", f"{start:.3f}"])
+    args.extend(["-i", str(wav_path)])
+    if duration is not None and duration > 0:
+        args.extend(["-t", f"{duration:.3f}"])
+    args.extend(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "48k", str(out_mp3)])
+    try:
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except OSError:
+        return False
+
+    deadline = time.monotonic() + 120.0
+    try:
+        while proc.poll() is None:
+            if cancel_event is not None and cancel_event.is_set():
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=2)
+                raise JobCancelled("The client disconnected; cloud audio encoding cancelled.")
+            if time.monotonic() > deadline:
+                proc.kill()
+                return False
+            time.sleep(0.05)
+        if proc.stderr is not None:
+            proc.stderr.read()
+        return proc.returncode == 0 and out_mp3.is_file() and out_mp3.stat().st_size > 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def _prepare_cloud_upload(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+    cancel_event: threading.Event | None = None,
+) -> tuple[list[_CloudChunk], list[Path]]:
+    """Compress real WAV audio to 48 kbps mono MP3 chunks aligned to silences when useful.
+
+    Tiny inputs and synthetic test budgets (<256 KB) skip FFmpeg transcoding and
+    stay on ``_split_wav_for_upload`` directly.
+    """
+    raise_if_cancelled(cancel_event)
+    budget = CLOUD_STT_MAX_UPLOAD_BYTES if max_bytes is None else max_bytes
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise TranscriptionError(
+            f"Could not read the extracted audio file {path}: {exc}"
+        ) from exc
+
+    ffmpeg = config.ffmpeg_path()
+    should_compress = (
+        bool(ffmpeg)
+        and path.suffix.lower() == ".wav"
+        and budget >= 256 * 1024
+        and (size > CLOUD_STT_COMPRESS_MIN_BYTES or size > budget)
+    )
+    if should_compress and ffmpeg:
+        duration = _wav_duration(path)
+        if duration > 0:
+            # 48 kbps MP3 = 6,000 bytes/sec; keep safe headroom under budget.
+            max_chunk_sec = max(
+                60.0, min(float(CLOUD_STT_MAX_CHUNK_SECONDS), (budget * 0.8) / 6_000.0)
+            )
+            silences = _detect_silences(ffmpeg, path) if duration > max_chunk_sec else []
+            ranges: list[tuple[float, float]] = []
+            cursor = 0.0
+            while cursor < duration - 0.05:
+                target = min(duration, cursor + max_chunk_sec)
+                if target >= duration - 0.5:
+                    ranges.append((cursor, duration))
+                    break
+                candidates = [s for s in silences if target - 25.0 <= s <= target + 5.0 and s > cursor + 20.0]
+                if candidates:
+                    split_at = min(candidates, key=lambda s: abs(s - target))
+                    ranges.append((cursor, split_at))
+                    cursor = split_at
+                else:
+                    # Hard cut when no pause was found: overlap 1.5 s to avoid severed words.
+                    chunk_end = min(duration, target + CLOUD_STT_OVERLAP_SECONDS)
+                    ranges.append((cursor, chunk_end))
+                    cursor = target
+
+            chunks: list[_CloudChunk] = []
+            temporary: list[Path] = []
+            ok = True
+            for index, (start_t, end_t) in enumerate(ranges):
+                out_mp3 = path.with_name(f"{path.stem}.cloud{index:03d}.mp3")
+                temporary.append(out_mp3)
+                if not _encode_mp3_slice(
+                    ffmpeg,
+                    path,
+                    out_mp3,
+                    start=start_t if len(ranges) > 1 or start_t > 0 else None,
+                    duration=(end_t - start_t) if len(ranges) > 1 else None,
+                    cancel_event=cancel_event,
+                ):
+                    ok = False
+                    break
+                if out_mp3.stat().st_size > budget:
+                    ok = False
+                    break
+                chunks.append(
+                    _CloudChunk(
+                        offset=start_t,
+                        duration=max(0.01, end_t - start_t),
+                        path=out_mp3,
+                        temporary=True,
+                    )
+                )
+            if ok and chunks:
+                return chunks, temporary
+            for created in temporary:
+                with contextlib.suppress(OSError):
+                    created.unlink(missing_ok=True)
+
+    return _split_wav_for_upload(path, max_bytes=max_bytes)
+
+
+def _merge_overlap_segments(
+    existing: list[Segment], incoming: list[Segment]
+) -> list[Segment]:
+    """Append ``incoming`` chunks while trimming overlap-zone duplicate segments."""
+    if not existing:
+        return list(incoming)
+    if not incoming:
+        return existing
+    tail_end = existing[-1].end
+    prev_tail_texts = {
+        re.sub(r"\s+", "", seg.text).strip().lower()
+        for seg in existing[-3:]
+        if seg.text.strip()
+    }
+    for seg in incoming:
+        if seg.start < tail_end - 0.05:
+            norm = re.sub(r"\s+", "", seg.text).strip().lower()
+            if norm and any(
+                norm == prev or (len(norm) >= 4 and (norm in prev or prev in norm))
+                for prev in prev_tail_texts
+            ):
+                continue
+        existing.append(seg)
+    return existing
+
+
+def _read_and_b64(path: Path) -> str:
+    return base64.b64encode(path.read_bytes()).decode("ascii")
+
+
 async def _post_audio_chunk(
     client: httpx.AsyncClient,
     endpoint: str,
@@ -901,13 +1170,9 @@ async def _post_audio_chunk(
     data: dict[str, str],
     chunk_path: Path,
 ) -> httpx.Response:
-    """POST one WAV chunk, retrying once without ``verbose_json``.
-
-    ``whisper-1``/``whisper-large-v3`` return segments only in ``verbose_json``;
-    the ``gpt-4o-*-transcribe`` family accepts just ``json``/``text`` and rejects
-    the request. One cheap retry keeps both families working.
-    """
+    """POST one audio chunk, retrying once without ``verbose_json`` and remembering it."""
     payload = dict(data)
+    mime = _audio_mime_type(chunk_path)
     response: httpx.Response | None = None
     for attempt in range(2):
         try:
@@ -916,7 +1181,7 @@ async def _post_audio_chunk(
                     endpoint,
                     headers=headers,
                     data=payload,
-                    files={"file": (chunk_path.name, handle, "audio/wav")},
+                    files={"file": (chunk_path.name, handle, mime)},
                 )
         except OSError as exc:
             raise TranscriptionError(
@@ -930,6 +1195,7 @@ async def _post_audio_chunk(
             body = (response.text or "").lower()
             if "response_format" in body or "verbose_json" in body:
                 payload["response_format"] = "json"
+                data["response_format"] = "json"
                 continue
         return response
     assert response is not None
@@ -943,14 +1209,9 @@ async def _post_gateway_chunk(
     model: str,
     chunk_path: Path,
 ) -> httpx.Response:
-    """POST one WAV chunk to the Vercel AI Gateway transcription protocol.
-
-    The gateway takes the audio base64-encoded in a JSON body and picks the
-    model with an ``ai-model-id`` header; its OpenAI-compatible surface covers
-    chat only, so the multipart route returns 404 there.
-    """
+    """POST one audio chunk to the Vercel AI Gateway transcription protocol."""
     try:
-        audio = base64.b64encode(chunk_path.read_bytes()).decode("ascii")
+        audio = await run_in_threadpool(_read_and_b64, chunk_path)
     except OSError as exc:
         raise TranscriptionError(
             f"Could not read the extracted audio file {chunk_path}: {exc}"
@@ -958,7 +1219,7 @@ async def _post_gateway_chunk(
     return await client.post(
         endpoint,
         headers={**headers, "ai-model-id": model},
-        json={"audio": audio, "mediaType": "audio/wav"},
+        json={"audio": audio, "mediaType": _audio_mime_type(chunk_path)},
     )
 
 
@@ -1018,6 +1279,19 @@ def _segments_from_gateway_payload(
     return segments, duration
 
 
+def _safe_progress(
+    on_progress: Callable[[float, str], None] | None,
+    ratio: float,
+    label: str,
+) -> None:
+    if on_progress is None:
+        return
+    try:
+        on_progress(min(1.0, max(0.0, float(ratio))), label)
+    except Exception:  # pragma: no cover - callbacks must never fail transcription
+        logger.debug("Ignoring transcription progress callback failure", exc_info=True)
+
+
 async def transcribe_cloud(
     audio_path: str | Path,
     *,
@@ -1029,6 +1303,7 @@ async def transcribe_cloud(
     glossary: dict[str, str] | None = None,
     timeout: float = 300.0,
     cancel_event: threading.Event | None = None,
+    on_progress: Callable[[float, str], None] | None = None,
 ) -> TranscriptionResult:
     """Transcribe through a cloud speech service.
 
@@ -1066,8 +1341,10 @@ async def transcribe_cloud(
     if not path.is_file():
         raise TranscriptionError(f"Audio file not found: {path}")
 
-    audio_duration = _wav_duration(path)
-    chunks, temporary = _split_wav_for_upload(path, max_bytes=max_bytes)
+    audio_duration = await run_in_threadpool(_wav_duration, path)
+    chunks, temporary = await run_in_threadpool(
+        _prepare_cloud_upload, path, max_bytes=max_bytes, cancel_event=cancel_event
+    )
     if len(chunks) > 1:
         logger.info(
             "Cloud STT: uploading %.1fs of audio as %d requests",
@@ -1078,54 +1355,101 @@ async def transcribe_cloud(
     segments: list[Segment] = []
     detected_language: str | None = None
     duration = 0.0
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            for index, chunk in enumerate(chunks):
-                # Natural cancellation boundary: one provider call per chunk.
-                raise_if_cancelled(cancel_event)
-                if index:
-                    logger.info(
-                        "Cloud STT: request %d/%d at %.1fs", index + 1, len(chunks), chunk.offset
-                    )
+    shared_data = dict(data)
+    sem = asyncio.Semaphore(3)
+    total_chunks = max(1, len(chunks))
+    completed_chunks = 0
+
+    async def _upload_one(
+        client: httpx.AsyncClient, index: int, chunk: _CloudChunk
+    ) -> tuple[int, _CloudChunk, list[Segment], float, str | None]:
+        nonlocal completed_chunks
+        async with sem:
+            raise_if_cancelled(cancel_event)
+            if index:
+                logger.info(
+                    "Cloud STT: request %d/%d at %.1fs",
+                    index + 1,
+                    len(chunks),
+                    chunk.offset,
+                )
+            if gateway:
+                response = await _post_gateway_chunk(
+                    client, endpoint, headers, model, chunk.path
+                )
+            else:
+                response = await _post_audio_chunk(
+                    client, endpoint, headers, shared_data, chunk.path
+                )
+            if response.status_code >= 400:
+                raise _cloud_status_error(
+                    response, endpoint, base_url, gateway=gateway
+                )
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise TranscriptionError(
+                    "Cloud STT returned a response that is not JSON: "
+                    f"{response.text[:400]}"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise TranscriptionError(
+                    f"Cloud STT returned an unexpected payload: {response.text[:400]}"
+                )
+            try:
                 if gateway:
-                    response = await _post_gateway_chunk(
-                        client, endpoint, headers, model, chunk.path
+                    part_segments, part_duration = _segments_from_gateway_payload(
+                        payload, offset=chunk.offset, duration_hint=chunk.duration
                     )
                 else:
-                    response = await _post_audio_chunk(
-                        client, endpoint, headers, data, chunk.path
+                    part_segments, part_duration = _segments_from_cloud_payload(
+                        payload, offset=chunk.offset, duration_hint=chunk.duration
                     )
-                if response.status_code >= 400:
-                    raise _cloud_status_error(
-                        response, endpoint, base_url, gateway=gateway
-                    )
-                try:
-                    payload = response.json()
-                except ValueError as exc:
-                    raise TranscriptionError(
-                        "Cloud STT returned a response that is not JSON: "
-                        f"{response.text[:400]}"
-                    ) from exc
-                if not isinstance(payload, dict):
-                    raise TranscriptionError(
-                        f"Cloud STT returned an unexpected payload: {response.text[:400]}"
-                    )
-                try:
-                    if gateway:
-                        part_segments, part_duration = _segments_from_gateway_payload(
-                            payload, offset=chunk.offset, duration_hint=chunk.duration
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise TranscriptionError(
+                    f"Cloud STT returned malformed segments: {exc}"
+                ) from exc
+            completed_chunks += 1
+            _safe_progress(
+                on_progress,
+                completed_chunks / total_chunks,
+                "Speech transcript received…"
+                if total_chunks == 1
+                else f"Transcribed chunk {completed_chunks} of {total_chunks}…",
+            )
+            return index, chunk, part_segments, part_duration, payload.get("language")
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+        ) as client:
+            if chunks:
+                _safe_progress(
+                    on_progress,
+                    0.0,
+                    "Uploading audio to speech service…"
+                    if len(chunks) == 1
+                    else f"Uploading audio ({len(chunks)} chunks)…",
+                )
+                # Send chunk 0 first so any verbose_json -> json fallback is learned
+                # before remaining chunks fan out concurrently.
+                first_res = await _upload_one(client, 0, chunks[0])
+                results = [first_res]
+                if len(chunks) > 1:
+                    rest = await asyncio.gather(
+                        *(
+                            _upload_one(client, idx, ch)
+                            for idx, ch in enumerate(chunks[1:], start=1)
                         )
-                    else:
-                        part_segments, part_duration = _segments_from_cloud_payload(
-                            payload, offset=chunk.offset, duration_hint=chunk.duration
-                        )
-                except (AttributeError, TypeError, ValueError) as exc:
-                    raise TranscriptionError(
-                        f"Cloud STT returned malformed segments: {exc}"
-                    ) from exc
-                segments.extend(part_segments)
-                detected_language = detected_language or payload.get("language")
-                duration = max(duration, chunk.offset + part_duration)
+                    )
+                    results.extend(rest)
+                for _idx, ch, part_segments, part_duration, lang in sorted(
+                    results, key=lambda r: r[0]
+                ):
+                    segments = _merge_overlap_segments(segments, part_segments)
+                    detected_language = detected_language or lang
+                    duration = max(duration, ch.offset + part_duration)
     except httpx.HTTPError as exc:
         raise TranscriptionError(
             f"Could not reach the Cloud STT endpoint at {endpoint}: {exc}"
