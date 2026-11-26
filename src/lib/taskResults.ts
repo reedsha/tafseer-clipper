@@ -13,7 +13,6 @@
  * can import it without a cycle.
  */
 
-import { rangesOverlap } from "@/lib/clipMath";
 import type {
   ProjectClip,
   ProjectData,
@@ -36,8 +35,6 @@ export type TaskResultPayload =
       /** Proposals built by the step; merged against the target project here. */
       proposals: ProjectClip[];
       replaceAll: boolean;
-      /** Reported by the sidecar; used only for the success toast. */
-      excludedRangesApplied?: number;
     }
   | {
       kind: "verify";
@@ -88,13 +85,11 @@ function applyDiscovery(
   payload: Extract<TaskResultPayload, { kind: "discovery" }>,
 ): ProjectData {
   const approved = payload.replaceAll ? [] : project.clips.filter((clip) => clip.approved);
-  // The proposal list may include ranges the editor has since approved; the
-  // merge is the single place that decides what survives, so it stays correct
-  // whether the job finished while open or while another session was visible.
-  const fresh = payload.proposals.filter(
-    (clip) =>
-      !approved.some((kept) => rangesOverlap(clip.start, clip.end, kept.start, kept.end)),
-  );
+  // Approved ranges were already excluded by the sidecar. A proposal can still
+  // collide after cut-buffer padding, or overlap a clip approved while the job
+  // was running. Keep it and let Step 2 label the collision: silently dropping
+  // it here loses valid adjacent clips and makes the success toast count lie.
+  const fresh = payload.proposals;
   // An empty re-roll means "nothing more was found", never "throw away the deck
   // the editor is reviewing". This also covers "Start over": a clean search
   // that returns nothing must not delete the kept clips and their hand-edited

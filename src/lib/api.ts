@@ -497,31 +497,32 @@ export interface DiscoverResponse {
 }
 
 /**
- * Mirrors `analyzer.MAX_DISCOVERY_WINDOWS` (`backend/services/analyzer.py`):
- * the sidecar runs at most this many sequential LLM windows, each bounded by
- * the provider timeout, so the client budget must cover the whole pass.
+ * Mirrors `analyzer.MAX_DISCOVERY_CALLS` (`backend/services/analyzer.py`):
+ * at most 16 context-sized Pass-1 windows plus 8 Pass-2 editorial calls. Each
+ * call is bounded by the provider timeout, so the client must cover them all.
  */
-const MAX_DISCOVERY_WINDOWS = 8;
+const MAX_DISCOVERY_CALLS = 24;
 /** Matches the sidecar's default provider timeout (`settings.cloud.timeout`). */
 const DEFAULT_PROVIDER_TIMEOUT_SEC = 120;
 
-/** Worst-case wall clock for `/discover-clips`, clamped to [5 min, 30 min]. */
+/**
+ * Worst-case wall clock for `/discover-clips`, with a five-minute floor.
+ * Deliberately no 30-minute ceiling: clamping below the backend's real work
+ * budget makes the client abort and cancel an otherwise valid long search.
+ */
 export function discoveryTimeoutMs(providerTimeoutSec?: number | null): number {
   const timeout =
     providerTimeoutSec && providerTimeoutSec > 0
       ? providerTimeoutSec
       : DEFAULT_PROVIDER_TIMEOUT_SEC;
-  return Math.min(
-    Math.max(timeout * 1000 * MAX_DISCOVERY_WINDOWS + 60_000, 5 * 60_000),
-    30 * 60_000,
-  );
+  return Math.max(timeout * 1000 * MAX_DISCOVERY_CALLS + 60_000, 5 * 60_000);
 }
 
 export function discoverClips(
   body: DiscoverRequest,
   options?: RequestOptions,
 ): Promise<DiscoverResponse> {
-  // The client budget derives from the real worst case (windows × provider
+  // The client budget derives from the real worst case (LLM calls × provider
   // timeout) instead of a flat 5 min that false-times out long lectures.
   return request<DiscoverResponse>("/discover-clips", jsonBody(body), {
     timeoutMs: discoveryTimeoutMs(body.provider?.timeout),

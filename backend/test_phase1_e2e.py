@@ -1804,33 +1804,58 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         json.dumps(selected, ensure_ascii=False)[:160],
     )
 
-    # A broken editorial reply must degrade to keeping every candidate.
-    malformed_keep_results: list[dict] = []
-    for mode in ("bad", "empty"):
-        MockLLMHandler.selection_mode = mode
-        try:
-            malformed_keep_results.append(
-                asyncio.run(
-                    analyzer.discover_clips(
-                        segments=[
-                            {"start": 0.0, "end": 60.0, "text": "เนื้อหาบทเรียนตัฟซีร"}
-                        ],
-                        duration=60.0,
-                        base_prompt="",
-                        session_guide="",
-                        refinement_note="",
-                        excluded_ranges=[],
-                        provider=provider,
-                    )
-                )[0]
+    # A broken editorial reply degrades to the candidate pool, but an explicit
+    # empty keep list is a valid editorial decision and returns no clips.
+    MockLLMHandler.selection_mode = "bad"
+    try:
+        unusable_keep = asyncio.run(
+            analyzer.discover_clips(
+                segments=[{"start": 0.0, "end": 60.0, "text": "เนื้อหาบทเรียนตัฟซีร"}],
+                duration=60.0,
+                base_prompt="",
+                session_guide="",
+                refinement_note="",
+                excluded_ranges=[],
+                provider=provider,
             )
-        finally:
-            MockLLMHandler.selection_mode = "all"
+        )
+    finally:
+        MockLLMHandler.selection_mode = "all"
     check(
         "analyzer: an unusable editorial reply degrades to the candidate pool",
-        len(malformed_keep_results) == 2
-        and all(clip["start"] == 4.0 for clip in malformed_keep_results),
-        json.dumps(malformed_keep_results, ensure_ascii=False)[:160],
+        len(unusable_keep) == 2
+        and [clip["start"] for clip in unusable_keep] == [4.0, 5.0],
+        json.dumps(unusable_keep, ensure_ascii=False)[:160],
+    )
+
+    MockLLMHandler.selection_mode = "empty"
+    try:
+        empty_keep = asyncio.run(
+            analyzer.discover_clips(
+                segments=[{"start": 0.0, "end": 60.0, "text": "เนื้อหาบทเรียนตัฟซีร"}],
+                duration=60.0,
+                base_prompt="",
+                session_guide="",
+                refinement_note="",
+                excluded_ranges=[],
+                provider=provider,
+            )
+        )
+    finally:
+        MockLLMHandler.selection_mode = "all"
+    check(
+        "analyzer: an explicit empty keep list selects no clips",
+        empty_keep == [],
+        json.dumps(empty_keep, ensure_ascii=False)[:160],
+    )
+    check(
+        "analyzer: editorial parser separates empty, invalid and partial keep lists",
+        analyzer._parse_keep_indices('{"keep": []}', 2) == []
+        and analyzer._parse_keep_indices("not json", 2) is None
+        and analyzer._parse_keep_indices('{"keep": [999]}', 2) is None
+        and analyzer._parse_keep_indices('{"keep": [true]}', 2) is None
+        and analyzer._parse_keep_indices('{"keep": [1, 999]}', 2) == [0],
+        "empty=[]; malformed/out-of-range=None; valid entries preserved",
     )
 
     # ---- Phase A.4: exemplars reach the standard discovery prompt ---------- #
@@ -1906,6 +1931,171 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         and not analyzer.is_ollama_endpoint("https://api.openai.com/v1", "sk-test"),
         f"ollama={ollama_payload.get('options')} "
         f"cloud_options={'options' in cloud_payload}",
+    )
+
+    # ---- Context-aware discovery planning --------------------------------- #
+    metadata_provider = analyzer.ProviderConfig(
+        base_url="http://localhost:11434/v1",
+        api_key=None,
+        model="mock-chat",
+        timeout=5.0,
+    )
+
+    def _show_context(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/show":
+            return httpx.Response(
+                200, json={"model_info": {"mock.context_length": 16_384}}
+            )
+        return _capture_chat(request)
+
+    metadata_transport = httpx.MockTransport(_show_context)
+    detected_context = asyncio.run(
+        analyzer.resolve_context_tokens(metadata_provider, transport=metadata_transport)
+    )
+    asyncio.run(
+        analyzer.chat(
+            metadata_provider,
+            [{"role": "user", "content": "hi"}],
+            transport=metadata_transport,
+        )
+    )
+    check(
+        "analyzer: Ollama context comes from /api/show and reaches num_ctx",
+        detected_context == 16_384
+        and metadata_provider.context_tokens == 16_384
+        and captured_chat["payload"].get("options", {}).get("num_ctx") == 16_384,
+        f"context={detected_context} payload={captured_chat['payload'].get('options')}",
+    )
+
+    context_segments = [
+        {"start": index * 20.0, "end": index * 20.0 + 15.0, "text": "ก" * 120}
+        for index in range(8)
+    ]
+    fit_windows = analyzer._fit_discovery_windows(
+        context_segments,
+        base_prompt="",
+        session_guide="",
+        refinement_note="",
+        excluded_ranges=[],
+        language="th",
+        exemplar_block="",
+        context_tokens=2400,
+    )
+    window_requests = [
+        analyzer._window_request(
+            window,
+            "",
+            "",
+            "",
+            [],
+            "th",
+            "",
+        )
+        for window in fit_windows
+    ]
+    check(
+        "analyzer: context-sized Pass-1 windows fit and cover every Thai segment",
+        len(fit_windows) > 1
+        and [segment for window in fit_windows for segment in window] == context_segments
+        and all(
+            analyzer._messages_fit(messages, budget, 2400)
+            for messages, budget in window_requests
+        ),
+        f"windows={len(fit_windows)}",
+    )
+
+    selection_candidates = [
+        {"start": 0.0, "end": 15.0, "title": "คลิป", "rationale": "ข" * 80}
+        for _ in range(12)
+    ]
+    selection_batches = analyzer._plan_selection_batches(
+        selection_candidates,
+        context_segments,
+        "",
+        "",
+        "",
+        2400,
+    )
+    selection_requests = [
+        analyzer._selection_request(batch, context_segments, "", "", "")
+        for batch in selection_batches
+    ]
+    check(
+        "analyzer: context-sized Pass-2 batches fit and consider every candidate",
+        len(selection_batches) > 1
+        and [candidate for batch in selection_batches for candidate in batch]
+        == selection_candidates
+        and all(
+            analyzer._messages_fit(messages, budget, 2400)
+            for messages, budget in selection_requests
+        ),
+        f"batches={len(selection_batches)}",
+    )
+
+    editorial_batch_sizes: list[int] = []
+    original_chat = analyzer.chat
+
+    async def _keep_first(_provider, messages, **_kwargs):
+        prompt = messages[-1]["content"]
+        count = int(prompt.split("CANDIDATES (", 1)[1].split(")", 1)[0])
+        editorial_batch_sizes.append(count)
+        return '{"keep": [1]}'
+
+    analyzer.chat = _keep_first
+    try:
+        reconciled = asyncio.run(
+            analyzer._select_candidates(
+                candidates=selection_candidates,
+                segments=context_segments,
+                base_prompt="",
+                session_guide="",
+                refinement_note="",
+                provider=provider,
+                context_tokens=2400,
+                cancel_event=None,
+            )
+        )
+    finally:
+        analyzer.chat = original_chat
+    check(
+        "analyzer: shrinking editorial batches reconcile into one final selection",
+        len(reconciled) == 1
+        and reconciled[0] is selection_candidates[0]
+        and editorial_batch_sizes == [5, 5, 2, 3],
+        f"batches={editorial_batch_sizes} selected={len(reconciled)}",
+    )
+
+    oversized_error = ""
+    try:
+        analyzer._fit_discovery_window(
+            context_segments[:1],
+            base_prompt="",
+            session_guide="",
+            refinement_note="",
+            excluded_ranges=[],
+            language="th",
+            exemplar_block="",
+            context_tokens=700,
+        )
+    except analyzer.LLMError as exc:
+        oversized_error = str(exc)
+    check(
+        "analyzer: an impossible prompt fails clearly instead of silently truncating",
+        "context is too small" in oversized_error,
+        oversized_error,
+    )
+
+    api_source = (BACKEND.parent / "src" / "lib" / "api.ts").read_text(
+        encoding="utf-8"
+    )
+    check(
+        "renderer parity: the discovery timeout covers the backend call ceiling",
+        analyzer.MAX_DISCOVERY_CALLS
+        == analyzer.MAX_DISCOVERY_WINDOWS + analyzer.MAX_EDITORIAL_CALLS
+        == 24
+        and "const MAX_DISCOVERY_CALLS = 24" in api_source
+        and "timeout * 1000 * MAX_DISCOVERY_CALLS + 60_000" in api_source,
+        f"backend_calls={analyzer.MAX_DISCOVERY_CALLS}",
     )
 
     # ---- Phase A.2: strict JSON calls stay bounded and reason-free -------- #
