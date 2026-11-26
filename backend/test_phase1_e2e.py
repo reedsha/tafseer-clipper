@@ -4265,7 +4265,7 @@ def run_decision_checks(work: Path, source: Path) -> None:
             "-i",
             str(bg_mp4),
             "-vf",
-            f"ass=filename={renderer.escape_filter_path(alpha_ass_path)}:fontsdir={renderer.escape_filter_path(ARTIFACTS / 'fonts')}",
+            f"ass=filename='{renderer.escape_filter_path(alpha_ass_path)}':fontsdir='{renderer.escape_filter_path(ARTIFACTS / 'fonts')}'",
             "-c:v",
             "libx264",
             "-pix_fmt",
