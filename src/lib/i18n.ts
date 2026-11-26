@@ -268,7 +268,9 @@ const TH_BY_EN: Record<string, string> = {
   "Start over": "เริ่มใหม่",
   "Additional instructions for this search": "คำแนะนำเพิ่มเติมสำหรับการค้นหาครั้งนี้",
   "Start over with new clips": "เริ่มใหม่ด้วยคลิปใหม่",
-  "Find more clips": "ค้นหาคลิปเพิ่ม",
+  "Search again (keeps approved)": "ค้นหาอีกครั้ง (เก็บคลิปที่อนุมัติไว้)",
+  "Replace unapproved clips?": "แทนที่คลิปที่ยังไม่อนุมัติ?",
+  "Search and replace": "ค้นหาและแทนที่",
   "Approve clips to keep them out of the next search.":
     "อนุมัติคลิปเพื่อไม่ให้รวมอยู่ในการค้นหาครั้งต่อไป",
   "No clip selected": "ยังไม่ได้เลือกคลิป",
@@ -287,7 +289,7 @@ const TH_BY_EN: Record<string, string> = {
   "No new clips": "ไม่มีคลิปใหม่",
   "Finding clips": "กำลังค้นหาคลิป",
   "Starting over with new clips": "กำลังเริ่มใหม่ด้วยคลิปใหม่",
-  "More clips found": "พบคลิปเพิ่มเติม",
+  "Search complete": "ค้นหาเสร็จแล้ว",
   "Clip proposals ready": "คลิปที่เสนอพร้อมแล้ว",
 
   // Step 3 · Subtitles

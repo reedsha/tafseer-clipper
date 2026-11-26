@@ -43,6 +43,8 @@ class ProviderConfig:
     api_key: str | None
     model: str
     timeout: float
+    #: Resolved once for discovery; ``None`` means "use the safe fallback".
+    context_tokens: int | None = None
 
     @property
     def endpoint(self) -> str:
@@ -99,6 +101,14 @@ class ProviderOverride:
 #: silently truncates a lecture-length prompt mid-sentence.  Its compat layer
 #: reads the native ``options`` block from the request body.
 DEFAULT_OLLAMA_NUM_CTX = 8192
+#: Unknown OpenAI-compatible gateways keep the previous roomy prompt sizes.
+#: Ollama is measured through /api/show and otherwise falls back to 8k.
+DEFAULT_CLOUD_CONTEXT_TOKENS = 32_768
+#: Reserve room for prompt-estimation error and provider chat-template tokens.
+PROMPT_SAFETY_TOKENS = 256
+#: Discovery replies need less reserved output than proofreading/grouping.
+DISCOVERY_MIN_REPLY_TOKENS = 1024
+SELECTION_MIN_REPLY_TOKENS = 512
 
 #: Every current caller asks for strict JSON, so the reply never needs to be
 #: unbounded.  A reasoning model left uncapped can spend minutes thinking,
@@ -113,15 +123,40 @@ DEFAULT_MAX_TOKENS = 4096
 REASONING_OFF = {"effort": "none"}
 
 
-def _reply_budget(items: int, *, per_item: int = 160) -> int:
+def _reply_budget(
+    items: int, *, per_item: int = 160, minimum: int = DEFAULT_MAX_TOKENS
+) -> int:
     """Token cap for a JSON reply with one entry per item.
 
     The floor keeps small calls from ever being cut short; the ceiling stops a
     runaway model from generating for minutes.  ``per_item`` is generous for a
     title + rationale or a handful of ids, so the cap never truncates a valid
-    reply at the documented request limits.
+    reply at the documented request limits. Discovery uses a smaller floor so
+    the output reservation cannot crowd the transcript out of an 8k context.
     """
-    return max(DEFAULT_MAX_TOKENS, min(16_384, 512 + max(0, items) * per_item))
+    return max(minimum, min(16_384, 512 + max(0, items) * per_item))
+
+
+def _estimate_tokens(text: str) -> int:
+    """Conservative prompt estimate without a provider-specific tokenizer.
+
+    ASCII is estimated at four characters per token. Non-ASCII text is counted
+    as one token per character: Thai tokenizers vary, so this deliberately
+    trades some context efficiency for never assuming an English-like ratio.
+    """
+    ascii_chars = sum(ord(char) < 128 for char in text)
+    non_ascii_chars = len(text) - ascii_chars
+    return max(1, math.ceil(ascii_chars / 4 + non_ascii_chars))
+
+
+def _messages_fit(
+    messages: list[dict[str, str]], max_tokens: int, context_tokens: int
+) -> bool:
+    """Whether prompt + reserved output + template slack fits the context."""
+    prompt_tokens = sum(
+        _estimate_tokens(message.get("content", "")) + 4 for message in messages
+    )
+    return prompt_tokens + max_tokens + PROMPT_SAFETY_TOKENS <= context_tokens
 
 
 def _relax_payload(payload: dict[str, Any], body: str) -> bool:
@@ -180,6 +215,73 @@ def is_ollama_endpoint(base_url: str, api_key: str | None) -> bool:
     return "ollama" in host and not api_key
 
 
+def _ollama_show_endpoint(base_url: str) -> str:
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3]
+    return root + "/api/show"
+
+
+async def resolve_context_tokens(
+    provider: ProviderConfig, *, transport: httpx.AsyncBaseTransport | None = None
+) -> int:
+    """Resolve the model context once, without guessing from the model name.
+
+    Ollama exposes the architecture's real context length through ``/api/show``.
+    Other OpenAI-compatible gateways have no standard equivalent, so they keep
+    a 32k planning fallback. A failed probe falls back to 8k for Ollama and is
+    cached on this provider instance for the rest of the discovery run.
+    """
+    if provider.context_tokens and provider.context_tokens > 0:
+        return provider.context_tokens
+    if not is_ollama_endpoint(provider.base_url, provider.api_key):
+        return DEFAULT_CLOUD_CONTEXT_TOKENS
+
+    headers = {"Content-Type": "application/json"}
+    if provider.api_key:
+        headers["Authorization"] = f"Bearer {provider.api_key}"
+    try:
+        async with httpx.AsyncClient(
+            timeout=min(provider.timeout, 10.0), transport=transport
+        ) as client:
+            response = await client.post(
+                _ollama_show_endpoint(provider.base_url),
+                headers=headers,
+                # Newer Ollama accepts "model"; older releases used "name".
+                json={"model": provider.model, "name": provider.model},
+            )
+        if response.status_code >= 400:
+            raise ValueError(f"model metadata returned {response.status_code}")
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("model metadata is not an object")
+        info = payload.get("model_info") or {}
+        if not isinstance(info, dict):
+            raise ValueError("model_info is not an object")
+        candidates: list[int] = []
+        for key, value in info.items():
+            if key != "context_length" and not key.endswith(".context_length"):
+                continue
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 512 <= parsed <= 1_048_576:
+                candidates.append(parsed)
+        if not candidates:
+            raise ValueError("model metadata has no usable context_length")
+        provider.context_tokens = max(candidates)
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        logger.info(
+            "Could not detect Ollama context for %s (%s); using %d tokens.",
+            provider.model,
+            exc,
+            DEFAULT_OLLAMA_NUM_CTX,
+        )
+        provider.context_tokens = DEFAULT_OLLAMA_NUM_CTX
+    return provider.context_tokens
+
+
 async def chat(
     provider: ProviderConfig,
     messages: list[dict[str, str]],
@@ -204,7 +306,9 @@ async def chat(
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
     if ollama:
-        payload["options"] = {"num_ctx": DEFAULT_OLLAMA_NUM_CTX}
+        payload["options"] = {
+            "num_ctx": provider.context_tokens or DEFAULT_OLLAMA_NUM_CTX
+        }
     elif disable_reasoning:
         payload["reasoning"] = dict(REASONING_OFF)
 
@@ -346,6 +450,7 @@ Hard rules:
 - Keep every candidate that clearly earns its place; drop every candidate that does not.
 - When two candidates cover the same moment or repeat the same point, keep only the stronger one.
 - There is no target count: do not pad the set to reach a number, and do not drop a strong moment to stay under one.
+- Return {"keep": []} when no candidate earns its place; an empty selection is a valid editorial decision.
 - Respect the refinement note and the session topic guide.
 - Never output a number that is not in the candidate list.
 """
@@ -382,13 +487,16 @@ def flood_ceiling(duration: float) -> int:
 _SELECTION_TOKENS_PER_ITEM = 24
 
 
-#: Discovery window budget.  A 1-3 h Tafseer lecture transcribes to roughly
-#: 40k-90k characters; 24k-character windows keep every segment in a single
-#: provider call, and the whole lecture is covered in at most 8 passes.  Longer
-#: transcripts fall back to fewer, proportionally larger windows (see
-#: :func:`split_transcript_windows`) rather than dropping their beginning.
+#: Initial discovery window budget. A 1-3 h Tafseer lecture transcribes to
+#: roughly 40k-90k characters. These are only initial groups: the context-aware
+#: planner splits any group whose prompt + reserved output does not fit, and
+#: never drops transcript coverage to stay within the character budget.
 TRANSCRIPT_WINDOW_CHARS = 24_000
-MAX_DISCOVERY_WINDOWS = 8
+#: Work bounds, not prompt-size targets. Windows/batches are split further when
+#: the model context requires it; exceeding either bound is an honest error.
+MAX_DISCOVERY_WINDOWS = 16
+MAX_EDITORIAL_CALLS = 8
+MAX_DISCOVERY_CALLS = MAX_DISCOVERY_WINDOWS + MAX_EDITORIAL_CALLS
 
 
 def _segment_line(segment: dict[str, Any]) -> str | None:
@@ -794,7 +902,8 @@ def _parse_keep_indices(reply: str, count: int) -> list[int] | None:
     """Map an editorial reply to zero-based candidate indices, or ``None``.
 
     ``None`` means "not usable" so the caller can degrade to keeping every
-    candidate instead of losing the window's discoveries.
+    candidate instead of losing the window's discoveries. A valid empty list
+    stays empty: the editorial model deliberately selected no candidates.
     """
     try:
         payload = extract_json(reply)
@@ -815,7 +924,74 @@ def _parse_keep_indices(reply: str, count: int) -> list[int] | None:
         if 1 <= index <= count and index not in seen:
             seen.add(index)
             indexes.append(index - 1)
-    return indexes or None
+    # An explicit empty list is a valid editorial decision: keep none of the
+    # candidates. Only a non-empty list with no usable indices is "unusable".
+    if not keep:
+        return []
+    return indexes if indexes else None
+
+
+def _selection_request(
+    candidates: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    base_prompt: str,
+    session_guide: str,
+    refinement_note: str,
+) -> tuple[list[dict[str, str]], int]:
+    messages = build_synthesis_messages(
+        candidates=candidates,
+        segments=segments,
+        base_prompt=base_prompt,
+        session_guide=session_guide,
+        refinement_note=refinement_note,
+    )
+    budget = _reply_budget(
+        len(candidates),
+        per_item=_SELECTION_TOKENS_PER_ITEM,
+        minimum=SELECTION_MIN_REPLY_TOKENS,
+    )
+    return messages, budget
+
+
+def _plan_selection_batches(
+    candidates: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    base_prompt: str,
+    session_guide: str,
+    refinement_note: str,
+    context_tokens: int,
+) -> list[list[dict[str, Any]]]:
+    """Pack every candidate into an editorial prompt that fits the model."""
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for candidate in candidates:
+        trial = [*current, candidate]
+        messages, budget = _selection_request(
+            trial, segments, base_prompt, session_guide, refinement_note
+        )
+        if _messages_fit(messages, budget, context_tokens):
+            current = trial
+            continue
+        if not current:
+            raise LLMError(
+                "The selected AI model's context is too small for the clip "
+                "editorial prompt. Shorten the clip brief or choose a model "
+                "with a larger context."
+            )
+        batches.append(current)
+        current = [candidate]
+        messages, budget = _selection_request(
+            current, segments, base_prompt, session_guide, refinement_note
+        )
+        if not _messages_fit(messages, budget, context_tokens):
+            raise LLMError(
+                "The selected AI model's context is too small for one clip "
+                "candidate. Shorten the clip brief or choose a model with a "
+                "larger context."
+            )
+    if current:
+        batches.append(current)
+    return batches
 
 
 async def _select_with_prompts(
@@ -834,21 +1010,15 @@ async def _select_with_prompts(
     mandatory); it never turns a discovery run into an error.
     """
     raise_if_cancelled(cancel_event)
-    messages = build_synthesis_messages(
-        candidates=candidates,
-        segments=segments,
-        base_prompt=base_prompt,
-        session_guide=session_guide,
-        refinement_note=refinement_note,
+    messages, budget = _selection_request(
+        candidates, segments, base_prompt, session_guide, refinement_note
     )
     try:
         reply = await chat(
             provider,
             messages,
             temperature=0.2,
-            max_tokens=_reply_budget(
-                len(candidates), per_item=_SELECTION_TOKENS_PER_ITEM
-            ),
+            max_tokens=budget,
         )
         keep = _parse_keep_indices(reply, len(candidates))
     except LLMError as exc:
@@ -868,6 +1038,176 @@ async def _select_with_prompts(
     return [candidates[index] for index in keep]
 
 
+async def _select_candidates(
+    *,
+    candidates: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    base_prompt: str,
+    session_guide: str,
+    refinement_note: str,
+    provider: ProviderConfig,
+    context_tokens: int,
+    cancel_event: threading.Event | None,
+) -> list[dict[str, Any]]:
+    """Run Pass 2 in context-sized batches, reconciling shrinking selections.
+
+    Every candidate is considered in the first round. If a round keeps a
+    smaller pool, the next round compares those survivors together. A round
+    that drops nothing needs no further reconciliation: overlaps are already
+    kept and labelled by design.
+    """
+    current = list(candidates)
+    calls = 0
+    while current:
+        batches = _plan_selection_batches(
+            current, segments, base_prompt, session_guide, refinement_note, context_tokens
+        )
+        if calls + len(batches) > MAX_EDITORIAL_CALLS:
+            if calls == 0:
+                raise LLMError(
+                    f"The clip editorial pass needs {len(batches)} model calls for "
+                    f"this context, above the supported {MAX_EDITORIAL_CALLS}. "
+                    "Choose a model with a larger context or shorten the clip brief."
+                )
+            logger.warning(
+                "Editorial call budget exhausted after %d calls; keeping the %d "
+                "candidate(s) selected so far.",
+                calls,
+                len(current),
+            )
+            return current
+
+        next_round: list[dict[str, Any]] = []
+        for batch in batches:
+            next_round.extend(
+                await _select_with_prompts(
+                    candidates=batch,
+                    segments=segments,
+                    base_prompt=base_prompt,
+                    session_guide=session_guide,
+                    refinement_note=refinement_note,
+                    provider=provider,
+                    cancel_event=cancel_event,
+                )
+            )
+            calls += 1
+        if len(batches) == 1 or not next_round or len(next_round) == len(current):
+            return next_round
+        current = next_round
+    return current
+
+
+def _window_request(
+    window: list[dict[str, Any]],
+    base_prompt: str,
+    session_guide: str,
+    refinement_note: str,
+    excluded_ranges: list[dict[str, float]],
+    language: str,
+    exemplar_block: str,
+) -> tuple[list[dict[str, str]], int]:
+    capacity = _window_reply_capacity(window)
+    messages = build_discover_messages(
+        segments=window,
+        base_prompt=base_prompt,
+        session_guide=session_guide,
+        refinement_note=refinement_note,
+        excluded_ranges=excluded_ranges,
+        language=language,
+        exemplar_block=exemplar_block,
+    )
+    return messages, _reply_budget(capacity, minimum=DISCOVERY_MIN_REPLY_TOKENS)
+
+
+def _fit_discovery_window(
+    window: list[dict[str, Any]],
+    *,
+    base_prompt: str,
+    session_guide: str,
+    refinement_note: str,
+    excluded_ranges: list[dict[str, float]],
+    language: str,
+    exemplar_block: str,
+    context_tokens: int,
+) -> list[list[dict[str, Any]]]:
+    """Split one window until prompt + reply fits, never dropping a segment."""
+    messages, budget = _window_request(
+        window,
+        base_prompt,
+        session_guide,
+        refinement_note,
+        excluded_ranges,
+        language,
+        exemplar_block,
+    )
+    if _messages_fit(messages, budget, context_tokens):
+        return [window]
+    if len(window) <= 1:
+        raise LLMError(
+            "The selected AI model's context is too small for one transcript "
+            "segment. Shorten the clip brief or choose a model with a larger context."
+        )
+    midpoint = len(window) // 2
+    return [
+        *_fit_discovery_window(
+            window[:midpoint],
+            base_prompt=base_prompt,
+            session_guide=session_guide,
+            refinement_note=refinement_note,
+            excluded_ranges=excluded_ranges,
+            language=language,
+            exemplar_block=exemplar_block,
+            context_tokens=context_tokens,
+        ),
+        *_fit_discovery_window(
+            window[midpoint:],
+            base_prompt=base_prompt,
+            session_guide=session_guide,
+            refinement_note=refinement_note,
+            excluded_ranges=excluded_ranges,
+            language=language,
+            exemplar_block=exemplar_block,
+            context_tokens=context_tokens,
+        ),
+    ]
+
+
+def _fit_discovery_windows(
+    segments: list[dict[str, Any]],
+    *,
+    base_prompt: str,
+    session_guide: str,
+    refinement_note: str,
+    excluded_ranges: list[dict[str, float]],
+    language: str,
+    exemplar_block: str,
+    context_tokens: int,
+) -> list[list[dict[str, Any]]]:
+    windows: list[list[dict[str, Any]]] = []
+    for window in split_transcript_windows(
+        segments, max_windows=MAX_DISCOVERY_WINDOWS
+    ):
+        windows.extend(
+            _fit_discovery_window(
+                window,
+                base_prompt=base_prompt,
+                session_guide=session_guide,
+                refinement_note=refinement_note,
+                excluded_ranges=excluded_ranges,
+                language=language,
+                exemplar_block=exemplar_block,
+                context_tokens=context_tokens,
+            )
+        )
+    if len(windows) > MAX_DISCOVERY_WINDOWS:
+        raise LLMError(
+            f"This lecture needs {len(windows)} prompt windows for the selected "
+            f"model's context, above the supported {MAX_DISCOVERY_WINDOWS}. "
+            "Choose a model with a larger context or shorten the clip brief."
+        )
+    return windows
+
+
 async def _discover_with_prompts(
     *,
     segments: list[dict[str, Any]],
@@ -881,21 +1221,32 @@ async def _discover_with_prompts(
     cancel_event: threading.Event | None = None,
     approved_exemplars: list[dict[str, Any]] | None = None,
     rejected_exemplars: list[dict[str, Any]] | None = None,
+    context_tokens: int = DEFAULT_OLLAMA_NUM_CTX,
 ) -> list[dict[str, Any]]:
     """Find clips across the *whole* lecture with the writing model.
 
-    The transcript is split into provider-sized windows on segment boundaries
-    (``TRANSCRIPT_WINDOW_CHARS``) and Pass 1 asks each window for every passage
-    that stands on its own - no count and no length target. The pooled
-    candidates then go through one editorial pass (Pass 2) that chooses the
-    final, non-redundant set. ``sanitize_clips`` applies safety guards only.
+    The transcript is first packed into character-sized windows on segment
+    boundaries, then split further until each prompt and its reserved output
+    fit ``context_tokens``. Pass 1 asks each window for every passage that
+    stands on its own - no count and no length target. The pooled candidates go
+    through context-sized editorial batches (Pass 2), with another round when
+    a batch round shrinks the pool. ``sanitize_clips`` applies safety guards.
 
     ``approved_exemplars`` / ``rejected_exemplars`` are the editor's Keep &
     Re-roll feedback; they are rendered once (bounded) and appended to every
     Pass-1 window prompt so the writing model learns from earlier passes.
     """
-    windows = split_transcript_windows(segments, max_windows=MAX_DISCOVERY_WINDOWS)
     exemplar_block = format_exemplars(approved_exemplars, rejected_exemplars)
+    windows = _fit_discovery_windows(
+        segments,
+        base_prompt=base_prompt,
+        session_guide=session_guide,
+        refinement_note=refinement_note,
+        excluded_ranges=excluded_ranges,
+        language=language,
+        exemplar_block=exemplar_block,
+        context_tokens=context_tokens,
+    )
 
     proposals: list[Any] = []
     failed_windows = 0
@@ -904,21 +1255,20 @@ async def _discover_with_prompts(
         # Natural cancellation boundary: one LLM pass per window; a
         # disconnected client stops before the next provider call.
         raise_if_cancelled(cancel_event)
-        capacity = _window_reply_capacity(window)
-        messages = build_discover_messages(
-            segments=window,
-            base_prompt=base_prompt,
-            session_guide=session_guide,
-            refinement_note=refinement_note,
-            excluded_ranges=excluded_ranges,
-            language=language,
-            exemplar_block=exemplar_block,
+        messages, budget = _window_request(
+            window,
+            base_prompt,
+            session_guide,
+            refinement_note,
+            excluded_ranges,
+            language,
+            exemplar_block,
         )
         reply = await chat(
             provider,
             messages,
             temperature=0.3,
-            max_tokens=_reply_budget(capacity),
+            max_tokens=budget,
         )
         try:
             payload = extract_json(reply)
@@ -960,13 +1310,14 @@ async def _discover_with_prompts(
     if not pool:
         return []
 
-    selected = await _select_with_prompts(
+    selected = await _select_candidates(
         candidates=pool,
         segments=segments,
         base_prompt=base_prompt,
         session_guide=session_guide,
         refinement_note=refinement_note,
         provider=provider,
+        context_tokens=context_tokens,
         cancel_event=cancel_event,
     )
     return sanitize_clips(
@@ -1235,6 +1586,7 @@ async def discover_clips(
             excluded_ranges=excluded_ranges,
             max_clips=flood_ceiling(duration),
         )
+    context_tokens = await resolve_context_tokens(provider)
     return await _discover_with_prompts(
         segments=segments,
         duration=duration,
@@ -1247,6 +1599,7 @@ async def discover_clips(
         cancel_event=cancel_event,
         approved_exemplars=approved_exemplars,
         rejected_exemplars=rejected_exemplars,
+        context_tokens=context_tokens,
     )
 
 

@@ -35,6 +35,7 @@ Hard rules:
 - Keep every candidate that clearly earns its place; drop every candidate that does not.
 - When two candidates cover the same moment or repeat the same point, keep only the stronger one.
 - There is no target count: do not pad the set to reach a number, and do not drop a strong moment to stay under one.
+- Return {"keep": []} when no candidate earns its place; an empty selection is a valid editorial decision.
 - Respect the refinement note and the session topic guide.
 - Never output a number that is not in the candidate list.
 `;

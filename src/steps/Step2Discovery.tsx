@@ -36,6 +36,16 @@ import { TimeFlow } from "@/components/TimeFlow";
 import { InlineError } from "@/components/InlineError";
 import { VideoPlayer, type VideoPlayerHandle } from "@/components/VideoPlayer";
 import { WaveformBar } from "@/components/WaveformBar";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -281,6 +291,7 @@ export function Step2Discovery() {
   const error = discoveryJob?.status === "error" ? discoveryJob.error : null;
   const [refinement, setRefinement] = useState("");
   const [importOpen, setImportOpen] = useState(false);
+  const [replaceConfirmOpen, setReplaceConfirmOpen] = useState(false);
   const [bufferDraft, setBufferDraft] = useState(editor.cutBufferSeconds);
   const [buttonStepDraft, setButtonStepDraft] = useState(String(editor.edgeButtonStepSeconds));
   const [keyStepDraft, setKeyStepDraft] = useState(String(editor.edgeKeyStepSeconds));
@@ -303,6 +314,7 @@ export function Step2Discovery() {
   const clips = project?.clips ?? [];
   const approvedClips = useMemo(() => clips.filter((clip) => clip.approved), [clips]);
   const approvedCount = approvedClips.length;
+  const unapprovedCount = clips.length - approvedCount;
   const selected = clips.find((clip) => clip.id === project?.selectedClipId) ?? clips[0] ?? null;
   const selectedIndex = selected ? clips.findIndex((clip) => clip.id === selected.id) : -1;
   const duration = project?.duration ?? 0;
@@ -316,6 +328,7 @@ export function Step2Discovery() {
     if (lastProjectIdRef.current === nextId) return;
     lastProjectIdRef.current = nextId;
     setRefinement("");
+    setReplaceConfirmOpen(false);
     setPlayhead(0);
     playheadRef.current = 0;
   }, [project?.id]);
@@ -456,7 +469,6 @@ export function Step2Discovery() {
             kind: "discovery" as const,
             proposals,
             replaceAll,
-            excludedRangesApplied: result.excluded_ranges_applied,
           };
         } catch (caught) {
           useAiActivityStore
@@ -469,7 +481,6 @@ export function Step2Discovery() {
         if (payload?.kind !== "discovery") return;
         if (note.trim()) setRefinement("");
         const count = payload.proposals.length;
-        const excluded = payload.excludedRangesApplied ?? 0;
         if (count === 0) {
           // A re-roll that finds nothing leaves the deck untouched, so this is
           // a "nothing more" outcome rather than a silent success.
@@ -484,14 +495,13 @@ export function Step2Discovery() {
           mode === "replace"
             ? "Started over with new clips"
             : mode === "reroll"
-              ? L("More clips found")
+              ? L("Search complete")
               : L("Clip proposals ready"),
           {
-            description: `${count} new clip${count === 1 ? "" : "s"}${
-              !replaceAll && excluded > 0
-                ? ` — ${excluded} approved clip${excluded === 1 ? " was" : "s were"} kept`
-                : ""
-            }`,
+            description:
+              mode === "reroll"
+                ? `${count} new clip${count === 1 ? "" : "s"} — approved clips kept; unapproved clips replaced`
+                : `${count} new clip${count === 1 ? "" : "s"}`,
           },
         );
       },
@@ -707,13 +717,21 @@ export function Step2Discovery() {
     if (next) selectClip(next.id);
   }
 
-  function handleRetry() {
+  function beginSearch() {
     void runDiscovery(clips.length > 0 ? "reroll" : "initial", refinement);
   }
 
   function startSearch() {
     if (status === "running") return;
-    void runDiscovery(clips.length > 0 ? "reroll" : "initial", refinement);
+    if (clips.length > 0 && unapprovedCount > 0) {
+      setReplaceConfirmOpen(true);
+      return;
+    }
+    beginSearch();
+  }
+
+  function handleRetry() {
+    startSearch();
   }
 
   function commitEdgeStep(which: "button" | "key") {
@@ -940,7 +958,7 @@ export function Step2Discovery() {
                   ? L("Looking for more moments…")
                   : clips.length === 0
                     ? L("Find clips")
-                    : L("Find more clips")}
+                    : L("Search again (keeps approved)")}
               </Button>
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -967,8 +985,8 @@ export function Step2Discovery() {
                   : approvedCount > 0
                     ? `${approvedCount} approved clip${
                         approvedCount === 1 ? "" : "s"
-                      } will be kept; unapproved ones are dropped.`
-                    : "Unapproved clips are dropped from the next search."}
+                      } will be kept. Unapproved clips are replaced only when new clips arrive; an empty result changes nothing.`
+                    : "Unapproved clips are replaced only when new clips arrive; an empty result changes nothing."}
               </p>
               {status === "running" ? (
                 <Button
@@ -1222,6 +1240,29 @@ export function Step2Discovery() {
           </Button>
         </div>
       </footer>
+
+      <AlertDialog open={replaceConfirmOpen} onOpenChange={setReplaceConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{L("Replace unapproved clips?")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {`This search keeps your ${approvedCount} approved clip${
+                approvedCount === 1 ? "" : "s"
+              }. If new clips are found, ${unapprovedCount} unapproved clip${
+                unapprovedCount === 1 ? "" : "s"
+              } will be replaced. Trims and subtitle edits on those clips will be lost. If nothing new is found, your current clips remain unchanged.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel asChild>
+              <Button variant="outline">{L("Cancel")}</Button>
+            </AlertDialogCancel>
+            <AlertDialogAction asChild>
+              <Button onClick={beginSearch}>{L("Search and replace")}</Button>
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <ImportClipsDialog open={importOpen} onOpenChange={setImportOpen} />
     </div>

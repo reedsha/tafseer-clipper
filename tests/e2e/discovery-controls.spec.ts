@@ -83,6 +83,30 @@ const OVERLAP_PROJECT = {
   selectedClipId: "e2e00000-0000-4000-8000-0000000000a1",
 };
 
+/** One approved clip and one unapproved clip, for the confirmed re-roll flow. */
+const REROLL_PROJECT = {
+  ...OVERLAP_PROJECT,
+  id: "e2e00000-0000-4000-8000-000000000005",
+  name: "Reroll-confirmation",
+  clips: [
+    { ...OVERLAP_PROJECT.clips[0], approved: true },
+    {
+      ...OVERLAP_PROJECT.clips[1],
+      title: "Unapproved trim",
+      start: 100,
+      end: 140,
+      speechStart: 100.3,
+      speechEnd: 139.7,
+      approved: false,
+    },
+  ],
+  subtitles: {
+    "e2e00000-0000-4000-8000-0000000000a2": [
+      { id: "cue-1", start: 0, end: 2, arabic: "", thai: "แก้ไขแล้ว", reviewed: true },
+    ],
+  },
+};
+
 /** A local analysis model avoids the provider pre-flight blocking the click. */
 const SETTINGS = {
   state: {
@@ -144,6 +168,113 @@ test.describe("Step 2 search orchestration", () => {
     expect(discoveryBodies[0]).not.toHaveProperty("max_duration");
     // An empty result reads as "nothing more found" and keeps the deck as is.
     await expect(page.getByText("No new clips found")).toBeVisible();
+  });
+
+  test("re-roll confirms replacement and keeps a proposal adjacent after padding", async ({
+    page,
+  }) => {
+    await page.addInitScript((settings) => {
+      if (window.location.protocol !== "http:") return;
+      window.localStorage.setItem("tafseer.settings.v1", JSON.stringify(settings));
+    }, SETTINGS);
+    await seedProjectFile(page, REROLL_PROJECT);
+
+    let discoveryCalls = 0;
+    await page.route("**/discover-clips", async (route) => {
+      discoveryCalls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          clips: [
+            {
+              start: 40.1,
+              end: 70,
+              title: "Adjacent discovery",
+              rationale: "Starts immediately after the approved clip.",
+            },
+          ],
+          model: "test-model",
+          excluded_ranges_applied: 1,
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Reroll-confirmation/ })
+      .first()
+      .click();
+
+    const searchButton = page.getByRole("button", {
+      name: "Search again (keeps approved)",
+      exact: true,
+    });
+    await searchButton.click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog.getByText("Replace unapproved clips?")).toBeVisible();
+    await expect(dialog.getByText(/1 approved clip/)).toBeVisible();
+    await expect(dialog.getByText(/1 unapproved clip/)).toBeVisible();
+    expect(discoveryCalls, "confirmation must precede the request").toBe(0);
+
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByText("Unapproved trim", { exact: true })).toBeVisible();
+    expect(discoveryCalls).toBe(0);
+
+    await searchButton.click();
+    await dialog.getByRole("button", { name: "Search and replace", exact: true }).click();
+    await expect.poll(() => discoveryCalls).toBe(1);
+
+    // 40.1s speech becomes a 39.8s cut with the default 0.3s buffer. It
+    // overlaps the approved 10–40s cut only because of that padding, so it
+    // must be shown and labelled rather than silently discarded.
+    await expect(page.getByText("Unapproved trim", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Adjacent discovery", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Overlaps: The patience of Ayyub")).toBeVisible();
+    await expect(page.getByText("The patience of Ayyub", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Search complete", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("1 new clip — approved clips kept; unapproved clips replaced"),
+    ).toBeVisible();
+  });
+
+  test("an empty confirmed re-roll leaves unapproved clips unchanged", async ({ page }) => {
+    await page.addInitScript((settings) => {
+      if (window.location.protocol !== "http:") return;
+      window.localStorage.setItem("tafseer.settings.v1", JSON.stringify(settings));
+    }, SETTINGS);
+    await seedProjectFile(page, REROLL_PROJECT);
+
+    let discoveryCalls = 0;
+    await page.route("**/discover-clips", async (route) => {
+      discoveryCalls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ clips: [], model: "test-model", excluded_ranges_applied: 1 }),
+      });
+    });
+
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Reroll-confirmation/ })
+      .first()
+      .click();
+    await page
+      .getByRole("button", { name: "Search again (keeps approved)", exact: true })
+      .click();
+    await page
+      .getByRole("alertdialog")
+      .getByRole("button", { name: "Search and replace", exact: true })
+      .click();
+
+    await expect.poll(() => discoveryCalls).toBe(1);
+    await expect(page.getByText("No new clips found")).toBeVisible();
+    await expect(page.getByText("Unapproved trim", { exact: true })).toBeVisible();
+    await expect(page.getByText("The patience of Ayyub", { exact: true }).first()).toBeVisible();
   });
 
   test("colliding clips are both kept and labelled with each other's titles", async ({
