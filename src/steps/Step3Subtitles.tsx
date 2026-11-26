@@ -33,7 +33,6 @@ import {
 } from "lucide-react";
 import { cn } from "cn";
 
-import { AiActivityLine } from "@/components/AiActivityLine";
 import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { TimeFlow } from "@/components/TimeFlow";
 import { CueRibbon } from "@/components/subtitles/CueRibbon";
@@ -69,13 +68,21 @@ import {
   stylesOverlap,
   type SubtitleLine,
 } from "@/lib/subtitleStyles";
-import { buildCuesFromTranscript, looksLikeFragmentSeed } from "@/lib/subtitleCues";
-import { useAiActivityStore } from "@/store/aiActivityStore";
+import {
+  buildCuesFromTranscript,
+  looksLikeBrokenBoundaryTrack,
+  looksLikeFragmentSeed,
+} from "@/lib/subtitleCues";
 import { deliverTaskResult, useJobStore, useTaskJob } from "@/store/jobStore";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useUiStore } from "@/store/uiStore";
-import { splitAtWordBoundary, wrapArabicText, wrapSubtitleText } from "@/lib/subtitleWrap";
+import {
+  splitAtWordBoundary,
+  wordBoundaries,
+  wrapArabicText,
+  wrapSubtitleText,
+} from "@/lib/subtitleWrap";
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
@@ -92,6 +99,43 @@ function clamp(value: number, min: number, max: number): number {
 
 function hasText(cue: SubtitleCue): boolean {
   return cue.arabic.trim().length > 0 || cue.thai.trim().length > 0;
+}
+
+function unwrapLines(text: string): string {
+  return text
+    .replace(/\s*\n\s*/g, (match, offset: number, source: string) => {
+      const before = offset > 0 ? source[offset - 1] : "";
+      const afterIndex = offset + match.length;
+      const after = afterIndex < source.length ? source[afterIndex] : "";
+      if (before && after && /[\u0E00-\u0E7F]/.test(before) && /[\u0E00-\u0E7F]/.test(after)) {
+        return "";
+      }
+      return " ";
+    })
+    .trim();
+}
+
+function joinMergedText(first: string, second: string, kind: "thai" | "arabic"): string {
+  const a = unwrapLines(first);
+  const b = unwrapLines(second);
+  if (!a) return b;
+  if (!b) return a;
+  if (kind === "arabic") return `${a} ${b}`;
+  return /[\u0E00-\u0E7F]$/.test(a) && /^[\u0E00-\u0E7F]/.test(b) ? `${a}${b}` : `${a} ${b}`;
+}
+
+function hasMidWordCut(list: SubtitleCue[]): boolean {
+  for (let i = 0; i < list.length - 1; i += 1) {
+    const prev = list[i].thai.replace(/\s*\n\s*/g, "").trimEnd();
+    const next = list[i + 1].thai.replace(/\s*\n\s*/g, "").trimStart();
+    if (!prev || !next) continue;
+    const lastChar = prev[prev.length - 1];
+    const firstChar = next[0];
+    if (!/[\u0E00-\u0E7F]/.test(lastChar) || !/[\u0E00-\u0E7F]/.test(firstChar)) continue;
+    const boundaries = wordBoundaries(prev + next, "thai");
+    if (!boundaries.includes(prev.length)) return true;
+  }
+  return false;
 }
 
 interface SubtitleCueRowProps {
@@ -173,14 +217,15 @@ const SubtitleCueRow = memo(function SubtitleCueRow({
         >
           <div className="flex items-center gap-1.5 text-[11px] tabular-nums text-muted-foreground">
             <span className="font-mono">
-              <TimeFlow value={cue.start} tenths />
+              <TimeFlow value={cue.start} hundredths />
               <span aria-hidden> → </span>
-              <TimeFlow value={cue.end} tenths />
+              <TimeFlow value={cue.end} hundredths />
             </span>
             <span className="text-muted-foreground/50">·</span>
             <NumberFlow
-              value={cue.end - cue.start}
+              value={Math.max(0, Math.round((cue.end - cue.start) * 100) / 100)}
               suffix="s"
+              locales="en-US"
               format={{ maximumFractionDigits: 1 }}
             />
           </div>
@@ -196,11 +241,11 @@ const SubtitleCueRow = memo(function SubtitleCueRow({
           <p
             lang="th"
             className={cn(
-              "line-clamp-2 text-xs leading-snug",
+              "line-clamp-2 whitespace-pre-line text-xs leading-snug",
               cue.thai ? "text-foreground/90" : "text-muted-foreground/60",
             )}
           >
-            {cue.thai.replace(/\n/g, " ") || L("No Thai line")}
+            {cue.thai || L("No Thai line")}
           </p>
         </div>
 
@@ -343,6 +388,7 @@ function arabicSourceLabel(cue: SubtitleCue): string {
 export function Step3Subtitles() {
   const project = useProjectStore((state) => state.project);
   const setSubtitles = useProjectStore((state) => state.setSubtitles);
+  const setSubtitlesBatch = useProjectStore((state) => state.setSubtitlesBatch);
   const selectClip = useProjectStore((state) => state.selectClip);
   const setStep = useProjectStore((state) => state.setStep);
   const updateExportSettings = useProjectStore((state) => state.updateExportSettings);
@@ -359,10 +405,8 @@ export function Step3Subtitles() {
   const applyPreset = useSettingsStore((state) => state.applyPreset);
 
   const openConfig = useUiStore((state) => state.openConfig);
-  const aiEntries = useAiActivityStore((state) => state.entries);
-  const activeArabicCheck =
-    aiEntries.find((entry) => entry.task === "arabic-check" && entry.status === "running") ??
-    aiEntries.find((entry) => entry.task === "arabic-check");
+  const settingsOpen = useUiStore((state) => state.settingsOpen);
+  const configStep = useUiStore((state) => state.configStep);
 
   const monitorRef = useRef<SubtitleMonitorHandle>(null);
   const queueRef = useRef<HTMLDivElement>(null);
@@ -370,6 +414,7 @@ export function Step3Subtitles() {
   const caretRef = useRef<{ cueId: string; field: CueField; offset: number } | null>(null);
   const healedSeedRef = useRef<string | null>(null);
   const seekKeyRef = useRef<string | null>(null);
+  const manualEditClipsRef = useRef<Set<string>>(new Set());
 
   const [activeCueId, setActiveCueId] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "unchecked">("all");
@@ -380,14 +425,11 @@ export function Step3Subtitles() {
   const [arabicReviewOpen, setArabicReviewOpen] = useState(false);
   const [rebuildHint, setRebuildHint] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [verifying, setVerifying] = useState<string | null>(null);
-  // The batch owns its job, so leaving Step 3 no longer stops the check; only
-  // the explicit Stop button (or starting a new run) cancels it.
-  const verifyJob = useTaskJob("verify", project?.id ?? null);
-  const verifyAll = verifyJob?.status === "running" ? verifyJob.progress : null;
+  const [verifyingIds, setVerifyingIds] = useState<Set<string>>(() => new Set());
   const [playhead, setPlayhead] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [rate, setRate] = useState(1);
+  const [overlayMode, setOverlayMode] = useState<"cue" | "playhead">("cue");
 
   const resolution: Resolution = project?.export.resolution ?? "1080x1920";
   const framing: FramingMode = project?.export.framing ?? "blur-fill";
@@ -402,13 +444,15 @@ export function Step3Subtitles() {
     approvedClips[0] ??
     null;
   const selectedClipId = selectedClip?.id ?? null;
+  // The batch owns its job, so leaving Step 3 no longer stops the check; only
+  // the explicit Stop button (or starting a new run) cancels it.
+  const verifyJob = useTaskJob("verify", project?.id ?? null, selectedClipId);
+  const verifyAll = verifyJob?.status === "running" ? verifyJob.progress : null;
   const cues = project?.subtitles[selectedClipId ?? ""] ?? [];
   const clipStart = selectedClip?.start ?? 0;
   const clipDuration = selectedClip ? selectedClip.end - selectedClip.start : 0;
   const canPlay = Boolean(project?.sourcePath);
 
-  const activeCue = cues.find((cue) => cue.id === activeCueId) ?? cues[0] ?? null;
-  const activeCueKey = activeCue?.id ?? null;
   const arabicMaxCharsPerLine = Math.max(
     16,
     Math.round(maxCharsPerLine * (thaiSettings.fontSize / Math.max(1, arabicSettings.fontSize))),
@@ -420,6 +464,11 @@ export function Step3Subtitles() {
     () => cues.map((cue, index) => ({ cue, index })).filter(({ cue }) => filter === "all" || !cue.reviewed),
     [cues, filter],
   );
+  const activeCue = useMemo(() => {
+    const pool = filter === "unchecked" ? visibleCues.map((entry) => entry.cue) : cues;
+    return pool.find((cue) => cue.id === activeCueId) ?? pool[0] ?? null;
+  }, [activeCueId, cues, filter, visibleCues]);
+  const activeCueKey = activeCue?.id ?? null;
   const arabicPassages = useMemo(
     () =>
       cues.filter(
@@ -429,78 +478,105 @@ export function Step3Subtitles() {
   );
   const verifiedArabicCount = arabicPassages.filter((cue) => cue.source === "quran").length;
   const unreviewedArabicCount = arabicPassages.filter((cue) => !cue.reviewed).length;
+  const unreviewedVerifiedArabicCount = arabicPassages.filter(
+    (cue) => cue.source === "quran" && !cue.reviewed,
+  ).length;
 
   /* Seed the cue list from the transcript the first time a clip is opened.
      Raw transcript segments are not subtitle lines: rebuild them into readable
      lines, and auto-heal a track saved by the old one-cue-per-segment seeding. */
   useEffect(() => {
     const current = useProjectStore.getState().project;
-    if (!current || !selectedClip) return;
+    if (!current || approvedClips.length === 0) return;
     const segments = current.transcript?.segments ?? [];
     if (!segments.length) return;
 
-    const existing = current.subtitles[selectedClip.id] ?? [];
-    if (existing.length) {
-      if (looksLikeFragmentSeed(existing)) {
-        const key = `${selectedClip.id}:${existing.length}`;
-        if (healedSeedRef.current !== key) {
-          healedSeedRef.current = key;
-          const rebuilt = buildCuesFromTranscript(segments, {
-            clipStart: selectedClip.start,
-            clipEnd: selectedClip.end,
-            maxCharsPerLine,
-            maxLines,
-            arabicMaxCharsPerLine,
-          });
-          if (rebuilt.length) {
-            const flatten = (list: SubtitleCue[]) =>
-              list
-                .map((cue) => `${cue.arabic}${cue.thai}`)
-                .join("")
-                .replace(/\s+/g, "");
-            // Only replace an untouched transcript seed; a manual edit keeps
-            // the track and surfaces the Rebuild banner instead.
-            if (flatten(existing) === flatten(rebuilt)) {
-              setSubtitles(selectedClip.id, rebuilt);
-              toast("Subtitle lines rebuilt", {
-                description: `Merged ${existing.length} transcript fragments into ${rebuilt.length} readable line${
-                  rebuilt.length === 1 ? "" : "s"
-                }.`,
-              });
-            }
-          }
-        }
-      }
-      return;
+    // Seed all approved clips that don't yet have a saved track (check hasOwnProperty
+    // so an intentionally emptied track `[]` is never silently re-seeded).
+    const patch: Record<string, SubtitleCue[]> = {};
+    for (const clip of approvedClips) {
+      if (Object.prototype.hasOwnProperty.call(current.subtitles, clip.id)) continue;
+      const seeded = buildCuesFromTranscript(segments, {
+        clipStart: clip.start,
+        clipEnd: clip.end,
+        maxCharsPerLine,
+        maxLines,
+        arabicMaxCharsPerLine,
+      });
+      if (seeded.length) patch[clip.id] = seeded;
+    }
+    if (Object.keys(patch).length > 0) {
+      setSubtitlesBatch(patch);
+      if (selectedClip && patch[selectedClip.id]) return;
     }
 
-    const seeded = buildCuesFromTranscript(segments, {
+    if (!selectedClip) return;
+    if (!Object.prototype.hasOwnProperty.call(current.subtitles, selectedClip.id)) return;
+    const existing = current.subtitles[selectedClip.id] ?? [];
+    if (existing.length === 0) return;
+
+    const flatten = (list: SubtitleCue[]) =>
+      list
+        .map((cue) => `${cue.arabic}${cue.thai}`)
+        .join("")
+        .replace(/\s+/g, "");
+
+    const isBrokenTrack =
+      looksLikeBrokenBoundaryTrack(existing) &&
+      !existing.some((cue) => cue.reviewed) &&
+      !manualEditClipsRef.current.has(selectedClip.id);
+    const isFragmentTrack = !isBrokenTrack && looksLikeFragmentSeed(existing);
+    if (!isBrokenTrack && !isFragmentTrack) return;
+
+    const key = `${selectedClip.id}:${existing.length}:${isBrokenTrack ? "broken" : "fragment"}`;
+    if (healedSeedRef.current === key) return;
+    healedSeedRef.current = key;
+
+    const rebuilt = buildCuesFromTranscript(segments, {
       clipStart: selectedClip.start,
       clipEnd: selectedClip.end,
       maxCharsPerLine,
       maxLines,
       arabicMaxCharsPerLine,
     });
-    if (seeded.length) setSubtitles(selectedClip.id, seeded);
+    if (!rebuilt.length) return;
+
+    // Auto-heal broken 0.05s sliver tracks unconditionally when unreviewed (clean
+    // slicing may skip a grazed out-of-clip segment so text lengths differ);
+    // fragment tracks still require identical flattened text.
+    if (isBrokenTrack || flatten(existing) === flatten(rebuilt)) {
+      setSubtitles(selectedClip.id, rebuilt);
+      toast("Subtitle lines rebuilt", {
+        description: `Merged ${existing.length} ${
+          isBrokenTrack ? "broken lines" : "transcript fragments"
+        } into ${rebuilt.length} readable line${rebuilt.length === 1 ? "" : "s"}.`,
+      });
+    }
   }, [
-    project?.id,
-    project?.transcriptId,
-    project?.transcript,
-    selectedClip,
+    approvedClips,
+    arabicMaxCharsPerLine,
     maxCharsPerLine,
     maxLines,
-    arabicMaxCharsPerLine,
+    project?.id,
+    project?.transcript,
+    project?.transcriptId,
+    selectedClip,
     setSubtitles,
+    setSubtitlesBatch,
   ]);
 
   /**
    * Detect a saved track that was generated before word-safe cuts (or by a
    * different rule) even when it no longer looks like a sliver seed: the cue
-   * text still matches the transcript, but the cue boundaries do not match the
-   * word-stream rebuild. Offer Rebuild instead of silently replacing it.
+   * text still matches the transcript, has actual mid-word Thai cuts, and the
+   * cue boundaries do not match the word-stream rebuild.
    */
   useEffect(() => {
     if (!selectedClip) {
+      setRebuildHint(false);
+      return;
+    }
+    if (manualEditClipsRef.current.has(selectedClip.id)) {
       setRebuildHint(false);
       return;
     }
@@ -511,8 +587,12 @@ export function Step3Subtitles() {
       setRebuildHint(false);
       return;
     }
-    if (looksLikeFragmentSeed(existing)) {
-      // The auto-heal above owns this case.
+    if (looksLikeBrokenBoundaryTrack(existing) || looksLikeFragmentSeed(existing)) {
+      // The auto-heal above owns these cases.
+      setRebuildHint(false);
+      return;
+    }
+    if (!hasMidWordCut(existing)) {
       setRebuildHint(false);
       return;
     }
@@ -568,6 +648,7 @@ export function Step3Subtitles() {
       arabicMaxCharsPerLine,
     });
     if (!rebuilt.length) return;
+    manualEditClipsRef.current.delete(selectedClip.id);
     setSubtitles(selectedClip.id, rebuilt);
     healedSeedRef.current = `${selectedClip.id}:${rebuilt.length}`;
     setRebuildHint(false);
@@ -617,6 +698,7 @@ export function Step3Subtitles() {
       });
       return;
     }
+    manualEditClipsRef.current.add(selectedClipId);
     setRebuildHint(false);
     setSubtitles(
       selectedClipId,
@@ -625,7 +707,7 @@ export function Step3Subtitles() {
           ? {
               ...item,
               arabic: "",
-              thai: original,
+              thai: wrapSubtitleText(original, maxCharsPerLine),
               source: undefined,
               reference: undefined,
               confidence: undefined,
@@ -710,7 +792,7 @@ export function Step3Subtitles() {
       ),
     [resolution, arabicSettings, thaiSettings],
   );
-  const overlap = stylesOverlap(styles.arabic, styles.thai);
+  const overlap = stylesOverlap(styles.arabic, styles.thai, maxLines, 1);
 
   /** Drag/arrow positioning writes the same style fields the preset captures. */
   const nudgeMonitorLine = (kind: SubtitleLine, delta: number) => {
@@ -748,15 +830,24 @@ export function Step3Subtitles() {
   const playCue = useCallback(
     (cue: SubtitleCue) => {
       setActiveCueId(cue.id);
+      setOverlayMode("cue");
       if (!selectedClip) return;
       monitorRef.current?.playRange(selectedClip.start + cue.start, selectedClip.start + cue.end);
     },
     [selectedClip],
   );
 
+  const playClip = useCallback(() => {
+    if (!selectedClip) return;
+    const from = playhead >= clipDuration - 0.05 ? 0 : playhead;
+    setOverlayMode("playhead");
+    monitorRef.current?.playRange(selectedClip.start + from, selectedClip.start + clipDuration);
+  }, [clipDuration, playhead, selectedClip]);
+
   const selectCue = useCallback(
     (cue: SubtitleCue) => {
       setActiveCueId(cue.id);
+      setOverlayMode("cue");
       if (!selectedClip) return;
       monitorRef.current?.pause();
       monitorRef.current?.seekTo(selectedClip.start + cue.start + 0.02);
@@ -791,7 +882,7 @@ export function Step3Subtitles() {
       }
       const slower = [...SHUTTLE_RATES].reverse().find((entry) => entry < current - 0.001);
       if (slower === undefined) {
-        monitorRef.current?.seekBy(-2);
+        monitorRef.current?.seekBy(-2, true);
         return;
       }
       if (activeCue) playCue(activeCue);
@@ -807,11 +898,13 @@ export function Step3Subtitles() {
 
   const moveCue = useCallback(
     (direction: -1 | 1) => {
-      const index = cues.findIndex((cue) => cue.id === activeCue?.id);
-      const target = index < 0 ? cues[0] : cues[index + direction];
+      const pool = filter === "unchecked" ? visibleCues.map((entry) => entry.cue) : cues;
+      if (pool.length === 0) return;
+      const index = pool.findIndex((cue) => cue.id === activeCue?.id);
+      const target = index < 0 ? pool[0] : pool[index + direction];
       if (target) selectCue(target);
     },
-    [activeCue?.id, cues, selectCue],
+    [activeCue?.id, cues, filter, selectCue, visibleCues],
   );
 
   /* ------------------------------ editing ------------------------------- */
@@ -819,13 +912,26 @@ export function Step3Subtitles() {
   const handleCueChange = useCallback(
     (cueId: string, field: CueField, value: string) => {
       if (!selectedClipId) return;
+      manualEditClipsRef.current.add(selectedClipId);
       setRebuildHint(false);
       // Store the raw value; Thai wraps on commit (blur/split), not on every
       // keystroke, so typing past the wrap width never jumps the caret.
       const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
-      const next = latest.map((cue) =>
-        cue.id === cueId ? { ...cue, [field]: value, reviewed: false } : cue,
-      );
+      const next = latest.map((cue) => {
+        if (cue.id !== cueId) return cue;
+        if (field === "arabic" && value !== cue.arabic) {
+          return {
+            ...cue,
+            arabic: value,
+            reviewed: false,
+            source: undefined,
+            reference: undefined,
+            confidence: undefined,
+            translation: undefined,
+          };
+        }
+        return { ...cue, [field]: value, reviewed: false };
+      });
       setSubtitles(selectedClipId, next);
     },
     [selectedClipId, setSubtitles],
@@ -973,15 +1079,21 @@ export function Step3Subtitles() {
         });
         return;
       }
-      const boundary = Math.min(
-        cue.end - 0.05,
-        Math.max(cue.start + 0.05, cue.start + duration * ratio),
+      const mid = Math.round((cue.start + duration * ratio) * 100) / 100;
+      const clampedMid = clamp(
+        mid,
+        Math.round((cue.start + 0.05) * 100) / 100,
+        Math.round((cue.end - 0.05) * 100) / 100,
       );
+      const firstEnd =
+        duration >= 0.22 ? Math.max(cue.start + 0.05, clampedMid - 0.01) : clampedMid;
+      const secondStart =
+        duration >= 0.22 ? Math.min(cue.end - 0.05, clampedMid + 0.01) : clampedMid;
 
       const first: SubtitleCue = {
         ...cue,
         id: crypto.randomUUID(),
-        end: boundary,
+        end: Math.round(firstEnd * 100) / 100,
         arabic: wrapArabicText(
           field === "arabic" ? editedFirst : otherFirst,
           arabicMaxCharsPerLine,
@@ -990,12 +1102,17 @@ export function Step3Subtitles() {
           field === "thai" ? editedFirst : otherFirst,
           maxCharsPerLine,
         ),
+        source: undefined,
+        reference: undefined,
+        confidence: undefined,
+        originalText: undefined,
+        translation: undefined,
         reviewed: false,
       };
       const second: SubtitleCue = {
         ...cue,
         id: crypto.randomUUID(),
-        start: boundary,
+        start: Math.round(secondStart * 100) / 100,
         arabic: wrapArabicText(
           field === "arabic" ? editedSecond : otherSecond,
           arabicMaxCharsPerLine,
@@ -1004,18 +1121,30 @@ export function Step3Subtitles() {
           field === "thai" ? editedSecond : otherSecond,
           maxCharsPerLine,
         ),
+        source: undefined,
+        reference: undefined,
+        confidence: undefined,
+        originalText: undefined,
+        translation: undefined,
         reviewed: false,
       };
 
       const index = latest.findIndex((item) => item.id === cueId);
       const next = [...latest];
       next.splice(index, 1, first, second);
+      manualEditClipsRef.current.add(selectedClipId);
+      if (index === 0) {
+        // Splitting line 0 gives it a fresh id; keep the park key synced so
+        // editing the split does not jump the monitor back to start.
+        seekKeyRef.current = `${selectedClipId}:${next[0]?.id ?? "empty"}`;
+      }
       setSubtitles(selectedClipId, next);
       setActiveCueId(second.id);
-      monitorRef.current?.seekTo((selectedClip?.start ?? 0) + boundary + 0.02);
-      setPlayhead(boundary + 0.02);
+      setOverlayMode("cue");
+      monitorRef.current?.seekTo((selectedClip?.start ?? 0) + second.start + 0.02);
+      setPlayhead(second.start + 0.02);
       toast.success("Line split", {
-        description: `Split at ${formatClock(boundary - cue.start, true)} into the line · ${editedFirst.length} / ${editedSecond.length} characters.`,
+        description: `Split at ${formatClock(clampedMid - cue.start, true)} into the line · ${editedFirst.length} / ${editedSecond.length} characters.`,
       });
     },
     [arabicMaxCharsPerLine, maxCharsPerLine, selectedClip, selectedClipId, setSubtitles],
@@ -1035,7 +1164,7 @@ export function Step3Subtitles() {
       const offset =
         caret && caret.cueId === cue.id && caret.field === preferred
           ? caret.offset
-          : Math.floor(text.length / 2);
+          : splitAtWordBoundary(text, 0.5, preferred) || Math.floor(text.length / 2);
       handleSplit(cue.id, preferred, offset);
     },
     [handleSplit],
@@ -1044,6 +1173,7 @@ export function Step3Subtitles() {
   const handleMerge = useCallback(
     (cueId: string) => {
       if (!selectedClipId) return;
+      manualEditClipsRef.current.add(selectedClipId);
       setRebuildHint(false);
       const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
       const index = latest.findIndex((cue) => cue.id === cueId);
@@ -1052,11 +1182,11 @@ export function Step3Subtitles() {
       if (!cue || !following) return;
 
       const arabic = wrapArabicText(
-        [cue.arabic.trim(), following.arabic.trim()].filter(Boolean).join(" "),
+        joinMergedText(cue.arabic, following.arabic, "arabic"),
         arabicMaxCharsPerLine,
       );
       const thai = wrapSubtitleText(
-        [cue.thai.trim(), following.thai.trim()].filter(Boolean).join(" "),
+        joinMergedText(cue.thai, following.thai, "thai"),
         maxCharsPerLine,
       );
       const merged: SubtitleCue = {
@@ -1064,6 +1194,11 @@ export function Step3Subtitles() {
         end: following.end,
         arabic,
         thai,
+        source: undefined,
+        reference: undefined,
+        confidence: undefined,
+        originalText: undefined,
+        translation: undefined,
         reviewed: false,
       };
       const next = latest
@@ -1081,8 +1216,11 @@ export function Step3Subtitles() {
   const handleDelete = useCallback(
     (cueId: string) => {
       if (!selectedClipId) return;
+      manualEditClipsRef.current.add(selectedClipId);
       setRebuildHint(false);
-      const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
+      const currentProject = useProjectStore.getState().project;
+      const owningProjectId = currentProject?.id ?? null;
+      const latest = currentProject?.subtitles[selectedClipId] ?? [];
       const index = latest.findIndex((cue) => cue.id === cueId);
       const removed = latest[index];
       if (!removed) return;
@@ -1098,7 +1236,8 @@ export function Step3Subtitles() {
           label: "Undo",
           onClick: () => {
             const current = useProjectStore.getState().project;
-            const list = current?.subtitles[selectedClipId] ?? [];
+            if (!owningProjectId || current?.id !== owningProjectId) return;
+            const list = current.subtitles[selectedClipId] ?? [];
             if (list.some((cue) => cue.id === removed.id)) return;
             useProjectStore
               .getState()
@@ -1116,24 +1255,41 @@ export function Step3Subtitles() {
 
   const handleAdd = useCallback(() => {
     if (!selectedClipId || !selectedClip) return;
+    manualEditClipsRef.current.add(selectedClipId);
     setRebuildHint(false);
     const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
-    const previous =
-      [...latest]
-        .filter((cue) => cue.start <= playhead)
-        .sort((a, b) => b.end - a.end)[0] ?? null;
-    const following =
-      latest
-        .filter((cue) => cue.start > playhead)
-        .sort((a, b) => a.start - b.start)[0] ?? null;
-    const start = Math.max(playhead, previous?.end ?? 0);
-    const end = Math.min(start + 2.5, following?.start ?? clipDuration);
-    if (end - start < 0.3) {
+    const sorted = [...latest].sort((a, b) => a.start - b.start);
+    const findFreeGap = (): { start: number; end: number } | null => {
+      const candidates: Array<{ start: number; end: number }> = [];
+      let cursor = 0;
+      for (const cue of sorted) {
+        if (cue.start - cursor >= 0.25) {
+          candidates.push({ start: cursor, end: cue.start });
+        }
+        cursor = Math.max(cursor, cue.end);
+      }
+      if (clipDuration - cursor >= 0.25) {
+        candidates.push({ start: cursor, end: clipDuration });
+      }
+      const containing = candidates.find((g) => playhead >= g.start && playhead <= g.end);
+      if (containing) {
+        const s = Math.max(playhead, containing.start);
+        if (containing.end - s >= 0.25) {
+          return { start: s, end: Math.min(s + 2.5, containing.end) };
+        }
+      }
+      const nextGap = candidates.find((g) => g.start >= playhead) ?? candidates[0] ?? null;
+      if (!nextGap) return null;
+      return { start: nextGap.start, end: Math.min(nextGap.start + 2.5, nextGap.end) };
+    };
+    const slot = findFreeGap();
+    if (!slot || slot.end - slot.start < 0.25) {
       toast.error("No room for a new line here", {
         description: "Move the playhead, or shorten a neighbouring line first.",
       });
       return;
     }
+    const { start, end } = slot;
     const cue: SubtitleCue = {
       id: crypto.randomUUID(),
       start: Math.round(start * 100) / 100,
@@ -1163,8 +1319,9 @@ export function Step3Subtitles() {
         });
         throw new Error("empty");
       }
-      // Capture the owning session now: the reply may land after a switch.
+      // Capture the owning session and clip now: the reply may land after a switch.
       const projectId = useProjectStore.getState().project?.id;
+      const clipId = selectedClipId;
       const result = await verifyArabic({
         arabic_text: arabicText,
         context_thai: cue.thai.replace(/\n/g, " "),
@@ -1172,6 +1329,20 @@ export function Step3Subtitles() {
       });
 
       if (result.source === "unmatched" || result.source === "needs_model") {
+        if (clipId && projectId) {
+          deliverTaskResult(projectId, {
+            kind: "verify",
+            clipId,
+            lines: [
+              {
+                cueId: cue.id,
+                source: result.source,
+                reference: null,
+                confidence: null,
+              },
+            ],
+          });
+        }
         if (announce) {
           toast.info("Not in the Qur'an corpus", {
             description:
@@ -1182,16 +1353,18 @@ export function Step3Subtitles() {
         return "unmatched";
       }
 
-      if (selectedClipId && projectId) {
+      if (clipId && projectId) {
         // Route by project id: a session switch mid-check must not write into
         // whatever project happens to be open when the reply lands.
         deliverTaskResult(projectId, {
           kind: "verify",
-          clipId: selectedClipId,
+          clipId,
           lines: [
             {
               cueId: cue.id,
-              arabic: result.verified_text || cue.arabic,
+              arabic: result.verified_text
+                ? wrapArabicText(result.verified_text, arabicMaxCharsPerLine)
+                : cue.arabic,
               // Provenance travels with the text: a corpus match must badge the
               // line as verified even when the spelling did not change.
               source: result.source,
@@ -1221,12 +1394,12 @@ export function Step3Subtitles() {
       }
       return "verified";
     },
-    [selectedClipId],
+    [arabicMaxCharsPerLine, selectedClipId],
   );
 
   const handleVerify = useCallback(
     async (cue: SubtitleCue) => {
-      setVerifying(cue.id);
+      setVerifyingIds((prev) => new Set(prev).add(cue.id));
       try {
         await verifyOne(cue);
       } catch (error) {
@@ -1235,7 +1408,11 @@ export function Step3Subtitles() {
           toast.error("Verification failed", { description: message });
         }
       } finally {
-        setVerifying(null);
+        setVerifyingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(cue.id);
+          return next;
+        });
       }
     },
     [verifyOne],
@@ -1245,26 +1422,29 @@ export function Step3Subtitles() {
     if (!selectedClipId) return;
     const projectId = useProjectStore.getState().project?.id;
     if (!projectId) return;
+    const clipId = selectedClipId;
     const alreadyRunning = useJobStore
       .getState()
       .jobs.some(
         (job) =>
-          job.kind === "verify" && job.projectId === projectId && job.status === "running",
+          job.kind === "verify" &&
+          job.projectId === projectId &&
+          job.clipId === clipId &&
+          job.status === "running",
       );
     if (alreadyRunning) return;
-    const targets = (useProjectStore.getState().project?.subtitles[selectedClipId] ?? []).filter(
+    const targets = (useProjectStore.getState().project?.subtitles[clipId] ?? []).filter(
       (cue) => cue.arabic.trim().length > 0,
     );
     if (!targets.length) return;
 
-    const clipId = selectedClipId;
     const BATCH = 64;
     type VerifiedLine = {
       cueId: string;
-      arabic: string;
+      arabic?: string;
       source?: string;
-      reference?: string;
-      confidence?: number;
+      reference?: string | null;
+      confidence?: number | null;
     };
     let corrected = 0;
     let failed = 0;
@@ -1275,9 +1455,9 @@ export function Step3Subtitles() {
     useJobStore.getState().startTask({
       kind: "verify",
       projectId,
+      clipId,
       label: "Checking Arabic",
       run: async (signal, hooks) => {
-        const allLines: VerifiedLine[] = [];
         hooks.setProgress(0, targets.length);
         for (let offset = 0; offset < targets.length; offset += BATCH) {
           if (signal.aborted) break;
@@ -1306,24 +1486,28 @@ export function Step3Subtitles() {
               if (!line) continue;
               if (line.source === "unmatched" || line.source === "needs_model") {
                 unmatched += 1;
+                chunkLines.push({
+                  cueId: cue.id,
+                  source: line.source,
+                  reference: null,
+                  confidence: null,
+                });
                 continue;
               }
               if (line.source === "quran") corpus += 1;
               if (line.correction_applied) corrected += 1;
               if (line.verified_text) {
-                const entry: VerifiedLine = {
+                chunkLines.push({
                   cueId: cue.id,
-                  arabic: line.verified_text,
+                  arabic: wrapArabicText(line.verified_text, arabicMaxCharsPerLine),
                   source: line.source,
                   reference: line.reference ?? undefined,
                   confidence: line.confidence ?? undefined,
-                };
-                chunkLines.push(entry);
-                allLines.push(entry);
+                });
               }
             }
             if (chunkLines.length) {
-              hooks.deliverPartial({ kind: "verify", clipId, lines: chunkLines });
+              deliverTaskResult(projectId, { kind: "verify", clipId, lines: chunkLines });
             }
             checked += chunk.length;
           } catch {
@@ -1332,11 +1516,9 @@ export function Step3Subtitles() {
           }
           hooks.setProgress(Math.min(targets.length, offset + chunk.length), targets.length);
         }
-        // A cancelled batch keeps whatever chunks already landed (delivered as
-        // partials); a finished one returns the full list so a session that was
-        // not open can still receive it through the journal.
-        if (signal.aborted) return null;
-        return { kind: "verify" as const, clipId, lines: allLines };
+        // Chunks already deliver via deliverTaskResult (or queue if inactive), so
+        // never re-apply the whole batch at completion and clobber newer edits.
+        return null;
       },
       onSuccess: () => {
         if (failed > 0) {
@@ -1369,15 +1551,16 @@ export function Step3Subtitles() {
         });
       },
     });
-  }, [selectedClipId]);
+  }, [arabicMaxCharsPerLine, selectedClipId]);
 
   /* ------------------------------ keyboard ----------------------------- */
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (settingsOpen || configStep !== null) return;
       if (
         document.querySelector(
-          '[data-slot="dialog-content"][data-state="open"], [data-vaul-drawer][data-state="open"]',
+          '[data-slot="dialog-content"][data-state="open"], [data-vaul-drawer][data-state="open"], [data-slot="popover-content"][data-state="open"], [data-slot="select-content"][data-state="open"]',
         )
       ) {
         return;
@@ -1385,13 +1568,17 @@ export function Step3Subtitles() {
       const target = event.target as HTMLElement | null;
       if (
         target &&
-        (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))
+        (target.isContentEditable ||
+          ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) ||
+          target.closest(
+            'button, a, summary, [role="button"], [role="slider"], [role="switch"], [role="tab"]',
+          ))
       ) {
         return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
 
-      if (event.key === "Escape" && previewFocus) {
+      if (event.key === "Escape" && previewFocus && !event.defaultPrevented) {
         event.preventDefault();
         setPreviewFocus(false);
         return;
@@ -1442,12 +1629,14 @@ export function Step3Subtitles() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     activeCue,
+    configStep,
     moveCue,
     nextUnchecked,
     pauseShuttle,
     previewFocus,
     selectCue,
     setReviewed,
+    settingsOpen,
     shuttle,
     togglePlay,
   ]);
@@ -1498,7 +1687,7 @@ export function Step3Subtitles() {
               {checkedCount}/{cues.length} checked
             </Badge>
             <Badge variant="outline" className="text-[10px]">
-              {language.toUpperCase()}
+              {(project.transcript?.language || language).toUpperCase()}
             </Badge>
           </div>
         </div>
@@ -1682,7 +1871,9 @@ export function Step3Subtitles() {
                     <Button
                       size="xs"
                       variant="ghost"
-                      onClick={() => useJobStore.getState().cancelKind("verify", project?.id ?? null)}
+                      onClick={() => {
+                        if (verifyJob) useJobStore.getState().cancelJob(verifyJob.id);
+                      }}
                     >
                       Stop
                     </Button>
@@ -1703,12 +1894,6 @@ export function Step3Subtitles() {
                 )}
               </div>
             </div>
-
-            {verifyAll && activeArabicCheck ? (
-              <div className="border-b border-border px-3 py-1">
-                <AiActivityLine entry={activeArabicCheck} />
-              </div>
-            ) : null}
 
             <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
               <div ref={listRef} className="min-w-0 space-y-2 px-3 py-3">
@@ -1749,9 +1934,12 @@ export function Step3Subtitles() {
                       cue={cue}
                       index={index}
                       active={activeCue?.id === cue.id}
-                      hasFollowing={Boolean(cues[index + 1])}
+                      hasFollowing={
+                        Boolean(cues[index + 1]) &&
+                        (filter === "all" || !cues[index + 1]?.reviewed)
+                      }
                       canPlay={canPlay}
-                      verifyingThis={verifying === cue.id}
+                      verifyingThis={verifyingIds.has(cue.id)}
                       verifyAll={Boolean(verifyAll)}
                       onPlayCue={playCue}
                       onSelectCue={selectCue}
@@ -1778,7 +1966,7 @@ export function Step3Subtitles() {
             "flex min-h-0 flex-col",
             previewFocus
               ? "fixed inset-x-0 bottom-0 top-[var(--titlebar-height)] z-40 border-0 bg-background p-3"
-              : "border-l border-border",
+              : undefined,
           )}
           role={previewFocus ? "dialog" : undefined}
           aria-modal={previewFocus || undefined}
@@ -1853,8 +2041,11 @@ export function Step3Subtitles() {
               framing={framing}
               sourcePath={project.sourcePath}
               clipStart={clipStart}
+              clipEnd={selectedClip.end}
               cues={cues}
               selectedCueId={activeCue?.id ?? null}
+              overlayMode={overlayMode}
+              playhead={playhead}
               styles={styles}
               safeZone={safeZone}
               muted={muted}
@@ -1880,6 +2071,7 @@ export function Step3Subtitles() {
               }}
               onSeek={(seconds) => {
                 monitorRef.current?.pause();
+                setOverlayMode("playhead");
                 monitorRef.current?.seekTo(clipStart + seconds);
                 setPlayhead(seconds);
               }}
@@ -1895,6 +2087,16 @@ export function Step3Subtitles() {
                 onClick={togglePlay}
               >
                 {playing ? <Pause className="size-4" /> : <Play className="size-4" />}
+              </Button>
+              <Button
+                variant="outline"
+                size="xs"
+                className="gap-1 text-[11px]"
+                disabled={!canPlay || clipDuration <= 0}
+                onClick={playClip}
+              >
+                <Play className="size-3" />
+                {L("Play clip")}
               </Button>
               <Button
                 variant="ghost"
@@ -1928,6 +2130,7 @@ export function Step3Subtitles() {
                   <NumberFlow
                     value={rate}
                     suffix="×"
+                    locales="en-US"
                     format={{ maximumFractionDigits: 2 }}
                   />
                 </span>
@@ -1976,20 +2179,39 @@ export function Step3Subtitles() {
                       Style
                     </p>
                     {presetModified ? (
-                      <Badge variant="outline" className="text-[9px] text-status-warning">
-                        Modified
-                      </Badge>
+                      <div className="flex items-center gap-1">
+                        <Badge variant="outline" className="text-[9px] text-status-warning">
+                          Modified
+                        </Badge>
+                        {activePreset ? (
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="h-5 px-1.5 text-[10px]"
+                            onClick={() => applyPreset(activePreset.id)}
+                          >
+                            {L("Reset")}
+                          </Button>
+                        ) : null}
+                      </div>
                     ) : null}
                   </div>
                   <div className="flex items-center gap-2">
                     <Select
-                      value={activePresetId ?? undefined}
-                      onValueChange={(value) => applyPreset(value)}
+                      value={activePresetId ?? "__custom__"}
+                      onValueChange={(value) => {
+                        if (value !== "__custom__") applyPreset(value);
+                      }}
                     >
                       <SelectTrigger className="h-8 flex-1 text-xs" aria-label="Subtitle style">
                         <SelectValue placeholder={L("Custom style")} />
                       </SelectTrigger>
                       <SelectContent>
+                        {!activePresetId ? (
+                          <SelectItem value="__custom__" disabled>
+                            {L("Custom style")}
+                          </SelectItem>
+                        ) : null}
                         {presets.map((preset) => (
                           <SelectItem key={preset.id} value={preset.id}>
                             {preset.name}
@@ -2084,112 +2306,123 @@ export function Step3Subtitles() {
             {arabicPassages.length === 0 ? (
               <p className="text-xs text-muted-foreground">{L("No Arabic passages in this clip.")}</p>
             ) : null}
-            {arabicPassages.map((cue) => (
-              <div
-                key={cue.id}
-                className={cn(
-                  "rounded-md border px-3 py-2.5",
-                  cue.reviewed
-                    ? "border-border bg-card/40"
-                    : "border-status-warning/40 bg-status-warning/5",
-                )}
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="flex items-center gap-1 text-[11px] tabular-nums text-muted-foreground">
-                    <TimeFlow value={cue.start} tenths />
-                    <span aria-hidden>→</span>
-                    <TimeFlow value={cue.end} tenths />
-                  </span>
-                  <div className="flex items-center gap-1.5">
-                    <Badge
-                      variant={cue.source === "quran" ? "secondary" : "outline"}
-                      className="text-[10px]"
-                    >
-                      {arabicSourceLabel(cue)}
-                    </Badge>
-                    {cue.reviewed ? (
-                      <CheckCircle2 className="size-3.5 text-foreground/70" />
-                    ) : null}
-                  </div>
-                </div>
-
-                <p
-                  dir="rtl"
-                  lang="ar"
-                  className="mt-2 whitespace-pre-line font-arabic text-lg leading-relaxed text-foreground"
+            {arabicPassages.map((cue) => {
+              const cuePlaying = playing && activeCue?.id === cue.id;
+              return (
+                <div
+                  key={cue.id}
+                  className={cn(
+                    "rounded-md border px-3 py-2.5",
+                    cue.reviewed
+                      ? "border-border bg-card/40"
+                      : "border-status-warning/40 bg-status-warning/5",
+                  )}
                 >
-                  {cue.arabic}
-                </p>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="flex items-center gap-1 text-[11px] tabular-nums text-muted-foreground">
+                      <TimeFlow value={cue.start} hundredths />
+                      <span aria-hidden>→</span>
+                      <TimeFlow value={cue.end} hundredths />
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <Badge
+                        variant={cue.source === "quran" ? "secondary" : "outline"}
+                        className="text-[10px]"
+                      >
+                        {arabicSourceLabel(cue)}
+                      </Badge>
+                      {cue.reviewed ? (
+                        <CheckCircle2 className="size-3.5 text-foreground/70" />
+                      ) : null}
+                    </div>
+                  </div>
 
-                {cue.translation ? (
-                  <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-                    Translation reference: {cue.translation}
+                  <p
+                    dir="rtl"
+                    lang="ar"
+                    className="mt-2 whitespace-pre-line font-arabic text-lg leading-relaxed text-foreground"
+                  >
+                    {cue.arabic}
                   </p>
-                ) : null}
 
-                {cue.originalText ? (
-                  <details className="mt-1.5">
-                    <summary className="cursor-default text-[11px] text-muted-foreground/80">
-                      Original Thai transcription
-                    </summary>
-                    <p lang="th" className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                      {cue.originalText}
+                  {cue.translation ? (
+                    <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+                      Translation reference: {cue.translation}
                     </p>
-                  </details>
-                ) : null}
+                  ) : null}
 
-                <div className="mt-2 flex flex-wrap items-center gap-1">
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    className="gap-1"
-                    disabled={!canPlay}
-                    onClick={() => playCue(cue)}
-                  >
-                    <Play className="size-3" />
-                    {L("Play")}
-                  </Button>
-                  <Button
-                    size="xs"
-                    variant={cue.reviewed ? "secondary" : "outline"}
-                    className="gap-1"
-                    onClick={() => setReviewed(cue.id, true)}
-                  >
-                    <CheckCircle2 className="size-3" />
-                    {cue.reviewed ? "Approved" : "Approve"}
-                  </Button>
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    onClick={() => {
-                      setArabicReviewOpen(false);
-                      selectCue(cue);
-                    }}
-                  >
-                    {L("Edit")}
-                  </Button>
                   {cue.originalText ? (
+                    <details className="mt-1.5">
+                      <summary className="cursor-default text-[11px] text-muted-foreground/80">
+                        Original Thai transcription
+                      </summary>
+                      <p lang="th" className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                        {cue.originalText}
+                      </p>
+                    </details>
+                  ) : null}
+
+                  <div className="mt-2 flex flex-wrap items-center gap-1">
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      className="gap-1"
+                      disabled={!canPlay}
+                      onClick={() => {
+                        if (cuePlaying) monitorRef.current?.pause();
+                        else playCue(cue);
+                      }}
+                    >
+                      {cuePlaying ? <Pause className="size-3" /> : <Play className="size-3" />}
+                      {cuePlaying ? L("Pause") : L("Play")}
+                    </Button>
+                    <Button
+                      size="xs"
+                      variant={cue.reviewed ? "secondary" : "outline"}
+                      className="gap-1"
+                      aria-pressed={Boolean(cue.reviewed)}
+                      onClick={() => setReviewed(cue.id, !cue.reviewed)}
+                    >
+                      <CheckCircle2 className="size-3" />
+                      {cue.reviewed ? "Approved" : "Approve"}
+                    </Button>
                     <Button
                       size="xs"
                       variant="ghost"
-                      className="text-muted-foreground"
-                      onClick={() => restoreArabicPassage(cue.id)}
+                      onClick={() => {
+                        setArabicReviewOpen(false);
+                        selectCue(cue);
+                      }}
                     >
-                      {L("Restore Thai")}
+                      {L("Edit")}
                     </Button>
-                  ) : null}
+                    {cue.originalText ? (
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        className="text-muted-foreground"
+                        onClick={() => restoreArabicPassage(cue.id)}
+                      >
+                        {L("Restore Thai")}
+                      </Button>
+                    ) : null}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <DialogFooter>
             <Button variant="ghost" size="sm" onClick={() => setArabicReviewOpen(false)}>
               Close
             </Button>
-            {verifiedArabicCount > 0 ? (
+            {unreviewedVerifiedArabicCount > 0 ? (
               <Button size="sm" onClick={approveAllVerifiedArabic}>
-                Approve {verifiedArabicCount} verified
+                Approve {unreviewedVerifiedArabicCount} verified
+              </Button>
+            ) : verifiedArabicCount > 0 ? (
+              <Button size="sm" variant="secondary" disabled>
+                All {verifiedArabicCount} verified approved
               </Button>
             ) : null}
           </DialogFooter>

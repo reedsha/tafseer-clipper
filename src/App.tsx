@@ -8,6 +8,7 @@ import { SettingsScreen } from "@/components/config/SettingsScreen";
 import { StageConfig } from "@/components/config/StageConfig";
 import { SessionLanding } from "@/components/SessionLanding";
 import { SessionsSidebar } from "@/components/SessionsSidebar";
+import { SourceMissingBanner } from "@/components/SourceMissingBanner";
 import { StartupGate } from "@/components/StartupGate";
 import { StepperHeader } from "@/components/StepperHeader";
 import { TitleBar } from "@/components/TitleBar";
@@ -181,6 +182,7 @@ export default function App() {
           <SessionsSidebar />
           <div className="flex min-w-0 flex-1 flex-col">
             <StepperHeader />
+            <SourceMissingBanner />
             <main className="min-h-0 flex-1 overflow-hidden">
               {project ? (
                 <>

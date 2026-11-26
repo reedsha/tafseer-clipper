@@ -14,7 +14,12 @@
  */
 
 import type { SubtitleCue, TranscriptSegment } from "@/lib/projectTypes";
-import { arabicVisualLength, wrapArabicText, wrapSubtitleText } from "@/lib/subtitleWrap";
+import {
+  arabicVisualLength,
+  wordBoundaries,
+  wrapArabicText,
+  wrapSubtitleText,
+} from "@/lib/subtitleWrap";
 
 type SegmenterLike<T> = { segment(input: string): Iterable<T> };
 type SegmenterCtor = new (
@@ -43,6 +48,7 @@ const THAI_WORD_SEGMENTER: SegmenterLike<{ segment: string; index: number }> | n
 })();
 
 const ARABIC_RUN = /[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]+/g;
+const ARABIC_CHAR_TEST = /[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]/;
 const THAI_CHAR = /[\u0E00-\u0E7F]/;
 const SENTENCE_END = /[.!?…。！？ฯ]["')\]]*\s*$/;
 
@@ -53,6 +59,10 @@ const MIN_CUE_GAP = 0.03;
 const MIN_FRAGMENT_SECONDS = 0.05;
 const CHARS_PER_SECOND = 14;
 const TAIL_CHARS = 8;
+
+/** Arabic sequence possibly spanning words + trailing neutral punctuation. */
+const MIXED_ARABIC_SPAN =
+  /[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]+(?:[\s\u200c\u200d،؛؟.,:!?()[\]"'-]+[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]+)*[.,!?؟،؛:)"'\]\s]*/g;
 
 export interface BuildCuesOptions {
   /** Absolute start of the selected clip in the source lecture (seconds). */
@@ -83,16 +93,6 @@ interface Word {
   segmentId: number;
 }
 
-/** Split a transcript segment into its Arabic and Thai halves (legacy helper). */
-export function splitBilingual(text: string): { arabic: string; thai: string } {
-  const clean = text.replace(/\s+/g, " ").trim();
-  if (!clean) return { arabic: "", thai: "" };
-  const arabicRuns = clean.match(ARABIC_RUN) ?? [];
-  const arabic = arabicRuns.join(" ").trim();
-  const thai = clean.replace(ARABIC_RUN, " ").replace(/\s+/g, " ").trim();
-  return { arabic, thai };
-}
-
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -116,11 +116,158 @@ function arabicRatio(text: string): number {
   return arabic / letters.length;
 }
 
-/** New Stage-1 transcripts carry `language`; legacy ones fall back to script. */
-function isArabicSegment(segment: TranscriptSegment): boolean {
-  if (segment.language === "ar") return true;
-  if (segment.language) return false;
-  return arabicRatio(segment.text) >= 0.6;
+/**
+ * Snap a proportional text slice onto word boundaries (falling back to
+ * grapheme clusters so combining marks / Harakat are never severed) when a
+ * transcript segment straddles a clip edge.
+ */
+function snapOffsetToWordBoundary(
+  text: string,
+  target: number,
+  kind: "thai" | "arabic",
+  direction: "ceil" | "floor",
+): number {
+  if (target <= 0) return 0;
+  if (target >= text.length) return text.length;
+  const bounds = wordBoundaries(text, kind);
+  if (bounds.length > 0) {
+    if (direction === "ceil") {
+      const hit = bounds.find((b) => b >= target);
+      return hit ?? text.length;
+    }
+    for (let i = bounds.length - 1; i >= 0; i -= 1) {
+      if (bounds[i] <= target) return bounds[i];
+    }
+    return 0;
+  }
+  return target;
+}
+
+function trimSegmentToClip(
+  segment: TranscriptSegment,
+  clipStart: number,
+  clipEnd: number,
+): TranscriptSegment | null {
+  if (segment.end <= clipStart || segment.start >= clipEnd) return null;
+  if (segment.start >= clipStart && segment.end <= clipEnd) return segment;
+
+  const segDur = segment.end - segment.start;
+  const overlapStart = Math.max(segment.start, clipStart);
+  const overlapEnd = Math.min(segment.end, clipEnd);
+  const overlapDur = overlapEnd - overlapStart;
+  if (overlapDur <= 0) return null;
+
+  // Auto-pad buffers (e.g. 0.3 s) frequently graze the last or first fraction
+  // of an adjacent multi-second / multi-minute segment. Skipping a tiny sliver
+  // prevents dumping hundreds of out-of-clip characters at t=0 or t=clipEnd.
+  if (segDur > 2 && overlapDur < 0.5 && overlapDur / segDur < 0.15) {
+    return null;
+  }
+
+  const rawText = segment.text;
+  if (!rawText.trim() || segDur <= 0) {
+    return { ...segment, start: overlapStart, end: overlapEnd };
+  }
+
+  const isAr = segment.language === "ar" || arabicRatio(rawText) >= 0.6;
+  const kind: "thai" | "arabic" = isAr ? "arabic" : "thai";
+  const loRatio = clamp((overlapStart - segment.start) / segDur, 0, 1);
+  const hiRatio = clamp((overlapEnd - segment.start) / segDur, 0, 1);
+  const loIdx =
+    loRatio > 0
+      ? snapOffsetToWordBoundary(rawText, Math.round(rawText.length * loRatio), kind, "ceil")
+      : 0;
+  const hiIdx =
+    hiRatio < 1
+      ? snapOffsetToWordBoundary(rawText, Math.round(rawText.length * hiRatio), kind, "floor")
+      : rawText.length;
+
+  const sliced = rawText.slice(loIdx, hiIdx).trim();
+  if (!sliced) return null;
+  return {
+    ...segment,
+    start: overlapStart,
+    end: overlapEnd,
+    text: sliced,
+  };
+}
+
+/**
+ * Split mixed-script segments (Thai + Arabic inside one STT segment) into
+ * ordered, non-overlapping sub-segments so Arabic never sits inside Thai text
+ * and Thai words never leak into an RTL Arabic cue.
+ */
+function normalizeSegmentsByScript(
+  segments: TranscriptSegment[],
+): { segment: TranscriptSegment; arabic: boolean }[] {
+  const out: { segment: TranscriptSegment; arabic: boolean }[] = [];
+  for (const segment of segments) {
+    const text = segment.text;
+    const hasAr = ARABIC_CHAR_TEST.test(text);
+    const hasTh = THAI_CHAR.test(text);
+    if (!hasAr) {
+      out.push({ segment, arabic: false });
+      continue;
+    }
+    if (!hasTh && (segment.language === "ar" || arabicRatio(text) >= 0.6)) {
+      out.push({ segment, arabic: true });
+      continue;
+    }
+    // Split alternating Arabic spans vs non-Arabic (Thai) spans in order.
+    const pieces: { text: string; arabic: boolean }[] = [];
+    let lastIndex = 0;
+    MIXED_ARABIC_SPAN.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = MIXED_ARABIC_SPAN.exec(text))) {
+      if (match.index > lastIndex) {
+        const before = text.slice(lastIndex, match.index).trim();
+        if (before) pieces.push({ text: before, arabic: false });
+      }
+      const arChunk = match[0].trim();
+      if (arChunk) pieces.push({ text: arChunk, arabic: true });
+      lastIndex = match.index + match[0].length;
+    }
+    if (lastIndex < text.length) {
+      const after = text.slice(lastIndex).trim();
+      if (after) pieces.push({ text: after, arabic: false });
+    }
+    if (pieces.length === 0) continue;
+    if (pieces.length === 1) {
+      out.push({ segment, arabic: pieces[0].arabic });
+      continue;
+    }
+    const totalWeight = pieces.reduce((acc, p) => acc + Math.max(1, p.text.length), 0);
+    const dur = Math.max(MIN_FRAGMENT_SECONDS, segment.end - segment.start);
+    let cursor = segment.start;
+    for (let i = 0; i < pieces.length; i += 1) {
+      const piece = pieces[i];
+      const nextTime =
+        i === pieces.length - 1
+          ? Math.max(cursor + 0.01, segment.end)
+          : cursor + dur * (Math.max(1, piece.text.length) / totalWeight);
+      out.push({
+        arabic: piece.arabic,
+        segment: {
+          ...segment,
+          start: cursor,
+          end: nextTime,
+          text: piece.text,
+          language: piece.arabic ? "ar" : segment.language === "ar" ? "th" : segment.language,
+          ...(piece.arabic
+            ? {}
+            : {
+                source: undefined,
+                reference: undefined,
+                confidence: undefined,
+                original_text: undefined,
+                translation: undefined,
+              }),
+        },
+      });
+      cursor = nextTime;
+    }
+  }
+  return out;
 }
 
 function thaiSource(text: string): string {
@@ -147,7 +294,7 @@ function buildLetters(
     const source =
       pick === "thai"
         ? thaiSource(segment.text)
-        : isArabicSegment(segment)
+        : !THAI_CHAR.test(segment.text) && (segment.language === "ar" || arabicRatio(segment.text) >= 0.6)
           ? segment.text
           : arabicSource(segment.text);
     if (!source.trim()) continue;
@@ -268,7 +415,12 @@ function joinWords(words: Word[]): string {
 }
 
 /** Deterministic grouping when the LLM sentence map is absent. */
-function groupWords(words: Word[], maxChars: number): Word[][] {
+function groupWords(
+  words: Word[],
+  maxChars: number,
+  maxCharsPerLine: number,
+  maxLines: number,
+): Word[][] {
   const groups: Word[][] = [];
   let current: Word[] = [];
   const flush = () => {
@@ -286,6 +438,7 @@ function groupWords(words: Word[], maxChars: number): Word[][] {
     const span = word.end - current[0].start;
     const breakHere =
       candidate.length > maxChars ||
+      wrapSubtitleText(candidate, maxCharsPerLine).split("\n").length > maxLines ||
       gap > MAX_GAP_SECONDS ||
       SENTENCE_END.test(previous.text) ||
       span > MAX_CUE_SECONDS;
@@ -317,12 +470,13 @@ function groupBySentence(words: Word[]): Word[][] {
   return groups;
 }
 
-/** Cut a sentence into word-safe chunks that fit `maxChars` and `MAX_CUE_SECONDS`. */
+/** Cut a sentence into word-safe chunks that fit `maxChars`, `maxLines`, and `MAX_CUE_SECONDS`. */
 function splitByCaps(
   words: Word[],
   maxChars: number,
   maxDuration: number,
   measureLength: (text: string) => number = (text) => text.length,
+  fitsCue?: (text: string) => boolean,
 ): Word[][] {
   const chunks: Word[][] = [];
   let current: Word[] = [];
@@ -333,7 +487,11 @@ function splitByCaps(
     }
     const candidate = joinWords([...current, word]);
     const span = word.end - current[0].start;
-    if (measureLength(candidate) > maxChars || span > maxDuration) {
+    if (
+      measureLength(candidate) > maxChars ||
+      span > maxDuration ||
+      (fitsCue && !fitsCue(candidate))
+    ) {
       chunks.push(current);
       current = [word];
     } else {
@@ -371,14 +529,19 @@ function emitThaiCues(
   words: Word[],
   maxCharsPerLine: number,
   maxCharsPerCue: number,
+  maxLines: number,
   cues: SubtitleCue[],
 ): void {
   if (!words.length) return;
   const hasSentences = words.some((word) => word.sentenceId != null);
-  const groups = hasSentences ? groupBySentence(words) : groupWords(words, maxCharsPerCue);
+  const groups = hasSentences
+    ? groupBySentence(words)
+    : groupWords(words, maxCharsPerCue, maxCharsPerLine, maxLines);
+  const fitsThaiLines = (candidate: string) =>
+    wrapSubtitleText(candidate, maxCharsPerLine).split("\n").length <= maxLines;
   for (const group of groups) {
     const chunks = hasSentences
-      ? splitByCaps(group, maxCharsPerCue, MAX_CUE_SECONDS)
+      ? splitByCaps(group, maxCharsPerCue, MAX_CUE_SECONDS, (t) => t.length, fitsThaiLines)
       : [group];
     for (const chunk of chunks) {
       const start = chunk[0].start;
@@ -412,6 +575,8 @@ function emitArabicCues(
   if (current.length) groups.push(current);
 
   const maxCharsPerCue = arabicMaxChars * maxLines;
+  const fitsArabicLines = (candidate: string) =>
+    wrapArabicText(candidate, arabicMaxChars).split("\n").length <= maxLines;
   for (const group of groups) {
     const segment = byId.get(group[0].segmentId);
     const metadata = segment
@@ -423,7 +588,13 @@ function emitArabicCues(
           translation: segment.translation ?? undefined,
         }
       : {};
-    const chunks = splitByCaps(group, maxCharsPerCue, MAX_CUE_SECONDS, arabicVisualLength);
+    const chunks = splitByCaps(
+      group,
+      maxCharsPerCue,
+      MAX_CUE_SECONDS,
+      arabicVisualLength,
+      fitsArabicLines,
+    );
     for (const chunk of chunks) {
       const start = chunk[0].start;
       const end = chunk[chunk.length - 1].end;
@@ -440,22 +611,31 @@ function finalise(
   maxCharsPerLine: number,
   maxLines: number,
 ): SubtitleCue[] {
-  cues.sort((a, b) => a.start - b.start);
+  cues.sort((a, b) => a.start - b.start || a.end - b.end);
   const out: SubtitleCue[] = [];
+  let prevEnd = -MIN_CUE_GAP;
   for (let index = 0; index < cues.length; index += 1) {
     const cue = cues[index];
     const next = cues[index + 1];
-    const start = clamp(round(cue.start), 0, Math.max(0, clipDuration - MIN_FRAGMENT_SECONDS));
+    const start = Math.max(
+      prevEnd + MIN_CUE_GAP,
+      clamp(round(cue.start), 0, Math.max(0, clipDuration - MIN_FRAGMENT_SECONDS)),
+    );
+    if (start >= clipDuration - 0.01) continue;
     let end = clamp(round(cue.end), start + MIN_FRAGMENT_SECONDS, clipDuration);
     const hardEnd = next
-      ? Math.max(start + MIN_FRAGMENT_SECONDS, next.start - MIN_CUE_GAP)
+      ? Math.min(clipDuration, Math.max(start + MIN_FRAGMENT_SECONDS, round(next.start) - MIN_CUE_GAP))
       : clipDuration;
     if (end - start < MIN_CUE_SECONDS) {
       end = Math.min(start + MIN_CUE_SECONDS, hardEnd);
     }
     end = Math.min(end, hardEnd, clipDuration);
-    if (end <= start) end = Math.min(clipDuration, start + MIN_FRAGMENT_SECONDS);
-    out.push({ ...cue, start: round(start), end: round(end) });
+    if (end <= start) continue;
+    const roundedStart = round(start);
+    const roundedEnd = round(end);
+    if (roundedEnd <= roundedStart) continue;
+    out.push({ ...cue, start: roundedStart, end: roundedEnd });
+    prevEnd = roundedEnd;
   }
 
   // Fold a tiny final Thai fragment into the previous Thai cue, but only when
@@ -470,10 +650,10 @@ function finalise(
       !last.arabic &&
       !previous.arabic
     ) {
-      const merged = wrapSubtitleText(
-        `${previous.thai.replace(/\n/g, "")}${last.thai.replace(/\n/g, "")}`,
-        maxCharsPerLine,
-      );
+      const prevFlat = previous.thai.replace(/\n+/g, "").trim();
+      const lastFlat = last.thai.replace(/\n+/g, "").trim();
+      const sep = isThai(prevFlat.slice(-1)) && isThai(lastFlat.charAt(0)) ? "" : " ";
+      const merged = wrapSubtitleText(`${prevFlat}${sep}${lastFlat}`, maxCharsPerLine);
       if (merged.split("\n").length <= maxLines) {
         previous.thai = merged;
         previous.end = last.end;
@@ -503,17 +683,19 @@ export function buildCuesFromTranscript(
     Math.round(options.arabicMaxCharsPerLine ?? maxCharsPerLine * 0.7),
   );
 
-  // Language runs guarantee that a Thai cue never covers an Arabic cue's time.
+  // Trim straddling edge segments and separate mixed-script segments before grouping.
   const ordered = [...segments]
-    .filter((segment) => segment.end > options.clipStart && segment.start < options.clipEnd)
-    .sort((a, b) => a.start - b.start);
+    .sort((a, b) => a.start - b.start)
+    .map((segment) => trimSegmentToClip(segment, options.clipStart, options.clipEnd))
+    .filter((segment): segment is TranscriptSegment => segment !== null);
+  const items = normalizeSegmentsByScript(ordered);
+
   const runs: { arabic: boolean; segments: TranscriptSegment[] }[] = [];
-  for (const segment of ordered) {
-    const arabic = isArabicSegment(segment);
-    if (!runs.length || runs[runs.length - 1].arabic !== arabic) {
-      runs.push({ arabic, segments: [] });
+  for (const item of items) {
+    if (!runs.length || runs[runs.length - 1].arabic !== item.arabic) {
+      runs.push({ arabic: item.arabic, segments: [] });
     }
-    runs[runs.length - 1].segments.push(segment);
+    runs[runs.length - 1].segments.push(item.segment);
   }
 
   const cues: SubtitleCue[] = [];
@@ -525,7 +707,7 @@ export function buildCuesFromTranscript(
     } else {
       const letters = buildLetters(run.segments, options, "thai");
       const words = wordsFromLetters(letters, "thai");
-      emitThaiCues(words, maxCharsPerLine, maxCharsPerCue, cues);
+      emitThaiCues(words, maxCharsPerLine, maxCharsPerCue, maxLines, cues);
     }
   }
 
@@ -546,4 +728,22 @@ export function looksLikeFragmentSeed(cues: SubtitleCue[]): boolean {
     sample.filter((cue) => cue.thai.trim().length + cue.arabic.trim().length <= 3).length /
     sample.length;
   return short >= 0.6 && tiny >= 0.6;
+}
+
+/**
+ * `true` when an unreviewed track has a pile-up of overlapping <=0.06 s boundary
+ * slivers (caused by straddling giant segments or forward rebasing) that should
+ * be rebuilt cleanly from the transcript.
+ */
+export function looksLikeBrokenBoundaryTrack(cues: SubtitleCue[]): boolean {
+  if (cues.length < 5) return false;
+  if (cues.some((cue) => cue.reviewed)) return false;
+  let sliverCount = 0;
+  let overlapCount = 0;
+  for (let i = 0; i < cues.length; i += 1) {
+    const cue = cues[i];
+    if (cue.end - cue.start <= 0.065) sliverCount += 1;
+    if (i > 0 && cue.start < cues[i - 1].end - 0.001) overlapCount += 1;
+  }
+  return sliverCount >= 5 && overlapCount >= 3;
 }

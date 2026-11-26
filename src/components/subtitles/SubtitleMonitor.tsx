@@ -7,11 +7,20 @@ import {
   useRef,
   useState,
 } from "react";
-import { ScanText } from "lucide-react";
+import { ScanText, VideoOff } from "lucide-react";
 import { cn } from "cn";
 
 import { SubtitleOverlay } from "@/components/subtitles/SubtitleOverlay";
-import { toMediaSrc } from "@/lib/media";
+import { Button } from "@/components/ui/button";
+import { L } from "@/lib/i18n";
+import {
+  classifyMediaFailure,
+  probeMediaSrc,
+  toMediaSrc,
+  type MediaFailureKind,
+} from "@/lib/media";
+import { mediaFailureMessage, relinkLecture } from "@/lib/sourceLink";
+import { useProjectStore } from "@/store/projectStore";
 import type { FramingMode, Resolution, SubtitleCue } from "@/lib/projectTypes";
 import { ASS_RESOLUTIONS, type AssStyle, type SubtitleLine } from "@/lib/subtitleStyles";
 
@@ -20,8 +29,7 @@ export interface SubtitleMonitorHandle {
   playRange: (start: number, end: number) => void;
   pause: () => void;
   seekTo: (seconds: number) => void;
-  seekBy: (delta: number) => void;
-  getCurrentTime: () => number;
+  seekBy: (delta: number, preserveRange?: boolean) => void;
   getPlaybackRate: () => number;
   setPlaybackRate: (rate: number) => void;
 }
@@ -32,8 +40,12 @@ export interface SubtitleMonitorProps {
   sourcePath: string | null;
   /** Absolute start of the selected clip in the source video (seconds). */
   clipStart: number;
+  /** Optional absolute end of the selected clip in the source video (seconds). */
+  clipEnd?: number;
   cues: SubtitleCue[];
   selectedCueId: string | null;
+  overlayMode?: "cue" | "playhead";
+  playhead?: number;
   styles: { arabic: AssStyle; thai: AssStyle };
   safeZone: boolean;
   muted?: boolean;
@@ -70,8 +82,11 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
       framing,
       sourcePath,
       clipStart,
+      clipEnd,
       cues,
       selectedCueId,
+      overlayMode = "cue",
+      playhead,
       styles,
       safeZone,
       muted = false,
@@ -85,6 +100,7 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
     },
     ref,
   ) {
+    const sourceStatus = useProjectStore((state) => state.sourceStatus);
     const hostRef = useRef<HTMLDivElement>(null);
     const foregroundRef = useRef<HTMLVideoElement>(null);
     const backdropCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -97,6 +113,9 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
     const [playing, setPlaying] = useState(false);
     /** Video clock while playing, so the overlay follows the frame (rAF). */
     const [now, setNow] = useState(0);
+    const [error, setError] = useState<{ kind: MediaFailureKind; message: string } | null>(
+      null,
+    );
 
     const play = ASS_RESOLUTIONS[resolution];
     const portrait = play.height > play.width;
@@ -196,12 +215,27 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
     }, []);
 
     const seekBy = useCallback(
-      (delta: number) => {
+      (delta: number, preserveRange = false) => {
         const video = foregroundRef.current;
         if (!video) return;
-        seekTo((Number.isFinite(video.currentTime) ? video.currentTime : 0) + delta);
+        const upper =
+          clipEnd ??
+          (Number.isFinite(video.duration) && video.duration > 0 ? video.duration : Infinity);
+        const current = Number.isFinite(video.currentTime) ? video.currentTime : clipStart;
+        const next = clamp(current + delta, clipStart, Math.max(clipStart, upper));
+        if (preserveRange) {
+          if (video.readyState < 1) {
+            pendingRef.current = { start: next, end: rangeEndRef.current ?? next };
+            return;
+          }
+          video.currentTime = next;
+          onTimeUpdateRef.current?.(video.currentTime);
+          setNow(video.currentTime);
+          return;
+        }
+        seekTo(next);
       },
-      [seekTo],
+      [clipEnd, clipStart, seekTo],
     );
 
     const getPlaybackRate = useCallback(() => rateRef.current, []);
@@ -222,7 +256,6 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
         pause,
         seekTo,
         seekBy,
-        getCurrentTime: () => foregroundRef.current?.currentTime ?? 0,
         getPlaybackRate,
         setPlaybackRate,
       }),
@@ -235,6 +268,19 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
       seekTo(clipStart + 0.05);
     }, [mediaSrc, clipStart, seekTo]);
 
+    /* A new source or confirmed re-link clears previous load failures. */
+    useEffect(() => {
+      setError(null);
+    }, [mediaSrc]);
+
+    useEffect(() => {
+      if (sourceStatus === "ok") {
+        setError((prev) =>
+          prev && (prev.kind === "missing" || prev.kind === "forbidden") ? null : prev,
+        );
+      }
+    }, [sourceStatus]);
+
     /* Follow the video clock while playing so the overlay changes on the frame
        it should, and refresh the blurred canvas backdrop at ~15 fps. */
     useEffect(() => {
@@ -245,7 +291,13 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
         const video = foregroundRef.current;
         if (video) {
           const current = video.currentTime;
-          if (Math.abs(current - last) >= 0.05) {
+          const end = rangeEndRef.current;
+          if (!video.paused && end != null && current >= end - 0.02) {
+            rangeEndRef.current = null;
+            video.pause();
+            onTimeUpdateRef.current?.(current);
+            setNow(current);
+          } else if (Math.abs(current - last) >= 0.05) {
             last = current;
             setNow(current);
           }
@@ -259,21 +311,32 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
       return () => cancelAnimationFrame(frame);
     }, [drawBackdrop, playing]);
 
+    const flushPending = useCallback(() => {
+      const video = foregroundRef.current;
+      const pending = pendingRef.current;
+      if (!video || !pending) return false;
+      if (pending.end - pending.start > 0 && video.readyState < 2) return false;
+      pendingRef.current = null;
+      const upper =
+        clipEnd ??
+        (Number.isFinite(video.duration) && video.duration > 0 ? video.duration : Infinity);
+      const target = clamp(pending.start + 0.01, 0, Math.max(0, upper));
+      video.currentTime = target;
+      onTimeUpdateRef.current?.(target);
+      setNow(target);
+      if (pending.end - pending.start > 0) {
+        rangeEndRef.current = pending.end;
+        void video.play().catch(() => {});
+      }
+      drawBackdrop();
+      return true;
+    }, [clipEnd, drawBackdrop]);
+
     function handleForegroundMetadata() {
       applyMediaState();
       const video = foregroundRef.current;
       if (!video) return;
-      const pending = pendingRef.current;
-      if (pending) {
-        pendingRef.current = null;
-        video.currentTime = pending.start + 0.01;
-        if (pending.end - pending.start > 0) {
-          rangeEndRef.current = pending.end;
-          void video.play().catch(() => {});
-        }
-        drawBackdrop();
-        return;
-      }
+      if (flushPending()) return;
       if (Number.isFinite(video.duration) && video.duration > 0) {
         video.currentTime = clamp(video.currentTime, 0, video.duration);
       }
@@ -310,9 +373,10 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
 
     /* ------------------------------ overlay ------------------------------ */
 
-    const overlayCue = playing
-      ? cueAt(cues, now - clipStart)
-      : (cues.find((cue) => cue.id === selectedCueId) ?? null);
+    const overlayCue =
+      playing || overlayMode === "playhead"
+        ? cueAt(cues, playing ? now - clipStart : (playhead ?? now - clipStart))
+        : (cues.find((cue) => cue.id === selectedCueId) ?? null);
 
     return (
       <div
@@ -323,7 +387,7 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
           style={{ width: box.width, height: box.height }}
           className="relative shrink-0 overflow-hidden rounded-lg border border-border bg-black"
         >
-          {mediaSrc ? (
+          {mediaSrc && !error ? (
             <>
               {effectiveFraming === "blur-fill" ? (
                 <canvas
@@ -347,13 +411,42 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
                 )}
                 onClick={() => onTogglePlay?.()}
                 onLoadedMetadata={handleForegroundMetadata}
-                onLoadedData={drawBackdrop}
+                onLoadedData={() => {
+                  flushPending();
+                  drawBackdrop();
+                }}
                 onTimeUpdate={handleTimeUpdate}
                 onSeeked={handleSeeked}
                 onPlay={handlePlay}
                 onPause={handlePause}
+                onError={() => {
+                  const code = foregroundRef.current?.error?.code ?? null;
+                  const target = mediaSrc;
+                  void (async () => {
+                    const probe = target
+                      ? await probeMediaSrc(target)
+                      : { ok: false, status: null, size: null };
+                    const kind = classifyMediaFailure(code, probe);
+                    setError({ kind, message: mediaFailureMessage(kind) });
+                    if (kind === "missing" || kind === "forbidden") {
+                      void useProjectStore.getState().refreshSourceStatus();
+                    }
+                  })();
+                }}
               />
             </>
+          ) : error ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-4 text-center">
+              <VideoOff className="size-4 text-muted-foreground/60" />
+              <p className="max-w-[80%] text-xs leading-relaxed text-muted-foreground/60">
+                {error.message}
+              </p>
+              {error.kind === "missing" || error.kind === "forbidden" ? (
+                <Button variant="outline" size="xs" onClick={() => void relinkLecture()}>
+                  {L("Re-link lecture")}
+                </Button>
+              ) : null}
+            </div>
           ) : (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 px-4 text-center">
               <ScanText className="size-4 text-muted-foreground/60" />

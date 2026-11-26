@@ -55,6 +55,7 @@ import {
   openLectureFile,
   subscribeNativeDrops,
 } from "@/lib/media";
+import { recordSourceSize } from "@/lib/sourceLink";
 import { type TranscriptData } from "@/lib/projectTypes";
 import { saveTextFile } from "@/lib/projectFile";
 import {
@@ -180,6 +181,7 @@ export function Step1Ingest() {
     } else {
       useProjectStore.getState().createProject({ sourcePath: path, sourceFileName, name });
     }
+    recordSourceSize(path);
     setBrowserFile(null);
     toast.success("Session ready", { description: sourceFileName });
   }, []);

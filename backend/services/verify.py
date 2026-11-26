@@ -14,12 +14,10 @@ from typing import Any
 
 from starlette.concurrency import run_in_threadpool
 
-from services import quran
+from services import quran, recitation
 from services.cancel import raise_if_cancelled
 
 logger = logging.getLogger("tafseer.verify")
-
-TRIAGE_BATCH_SIZE = 64
 
 UNMATCHED_NOTE = (
     "Not matched in the Qur'an corpus; left unchanged for manual review."
@@ -81,19 +79,23 @@ def verify_line_sync(line: VerifyLine) -> tuple[VerifyOutcome, bool]:
     if not stripped:
         return unmatched_outcome(line), False
 
-    span = quran.match_span(stripped)
+    # Multi-line wrapped subtitles carry internal newlines; normalize spacing
+    # before matching and comparing so wrapping does not trigger false edits.
+    normalized_in = " ".join(stripped.split())
+    span = quran.match_span(normalized_in)
     if span is None or span.tier in ("reject", "uncertain"):
         return unmatched_outcome(line), False
 
     if span.tier == "auto":
-        verified = span.matched_canonical.strip() or stripped
+        verified = recitation.replace_slice(normalized_in, span)
         is_exact = (
-            quran.normalize_arabic(verified) == quran.normalize_arabic(stripped)
+            quran.normalize_arabic(span.matched_canonical.strip() or normalized_in)
+            == quran.normalize_arabic(normalized_in)
         )
         return (
             VerifyOutcome(
                 verified_text=verified,
-                correction_applied=verified != stripped,
+                correction_applied=verified != normalized_in,
                 notes=f"Matches the Qur'an corpus ({span.reference}).",
                 source="quran",
                 reference=span.reference,
@@ -106,11 +108,11 @@ def verify_line_sync(line: VerifyLine) -> tuple[VerifyOutcome, bool]:
     if span.tier == "rescue":
         span_len = span.end_word - span.start_word + 1
         if span_len >= 6:
-            verified = span.matched_canonical.strip() or stripped
+            verified = recitation.replace_slice(normalized_in, span)
             return (
                 VerifyOutcome(
                     verified_text=verified,
-                    correction_applied=verified != stripped,
+                    correction_applied=verified != normalized_in,
                     notes=f"Phonetic match ({span.reference}); review recommended.",
                     source="quran",
                     reference=span.reference,
@@ -130,14 +132,6 @@ def verify_line_sync(line: VerifyLine) -> tuple[VerifyOutcome, bool]:
         )
 
     return unmatched_outcome(line), False
-
-
-def corpus_gate(text: str) -> VerifyOutcome | None:
-    """Return a corpus outcome only when ``text`` matches canonically."""
-    outcome, is_exact = verify_line_sync(VerifyLine(arabic_text=text))
-    if outcome.source == "quran" and is_exact:
-        return outcome
-    return None
 
 
 def _verify_lines_sync(

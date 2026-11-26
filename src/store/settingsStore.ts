@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import { getHealth, type FontInfo, type HealthResponse } from "@/lib/api";
+import { unloadImportedFont } from "@/lib/fonts";
 import { isDesktopRuntime } from "@/lib/projectFile";
 import { loadDesktopSecrets, persistDesktopSecrets } from "@/lib/secrets";
 import {
@@ -751,12 +752,14 @@ export const useSettingsStore = create<SettingsState>()(
           };
         }),
 
-      removeImportedFont: (key) =>
+      removeImportedFont: (key) => {
+        unloadImportedFont(key);
         set((state) => ({
           importedFonts: state.importedFonts.filter(
             (font) => `${font.family}::${font.style}` !== key,
           ),
-        })),
+        }));
+      },
 
       createPreset: (name) => {
         const id = crypto.randomUUID();

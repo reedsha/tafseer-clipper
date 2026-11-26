@@ -26,6 +26,8 @@ export interface TaskJob {
   id: string;
   kind: TaskKind;
   projectId: string;
+  /** Optional clip scope (used by Step 3 Arabic check). */
+  clipId?: string;
   label: string;
   status: TaskStatus;
   startedAt: number;
@@ -52,6 +54,7 @@ export interface TaskHooks {
 export interface StartTaskInput {
   kind: TaskKind;
   projectId: string;
+  clipId?: string;
   label: string;
   run: (signal: AbortSignal, hooks: TaskHooks) => Promise<TaskResultPayload | null>;
   onSuccess?: (payload: TaskResultPayload | null) => void;
@@ -123,6 +126,7 @@ export const useJobStore = create<JobState>()((set, get) => ({
           id,
           kind: input.kind,
           projectId: input.projectId,
+          ...(input.clipId ? { clipId: input.clipId } : {}),
           label: input.label,
           status: "running" as const,
           startedAt: Date.now(),
@@ -209,10 +213,21 @@ export const useJobStore = create<JobState>()((set, get) => ({
     set((state) => ({ jobs: state.jobs.filter((job) => job.status === "running") })),
 }));
 
-/** The current job of a kind for a session, or `null`. */
-export function useTaskJob(kind: TaskKind, projectId: string | null): TaskJob | null {
+/** The current job of a kind for a session (and optional clip), or `null`. */
+export function useTaskJob(
+  kind: TaskKind,
+  projectId: string | null,
+  clipId?: string | null,
+): TaskJob | null {
   return useJobStore((state) =>
-    projectId ? (state.jobs.find((job) => job.kind === kind && job.projectId === projectId) ?? null) : null,
+    projectId
+      ? (state.jobs.find(
+          (job) =>
+            job.kind === kind &&
+            job.projectId === projectId &&
+            (clipId === undefined || job.clipId === clipId),
+        ) ?? null)
+      : null,
   );
 }
 

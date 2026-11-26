@@ -20,6 +20,14 @@ import {
 import { Button } from "@/components/ui/button";
 import { TimeFlow } from "@/components/TimeFlow";
 import { clamp } from "@/lib/format";
+import { L } from "@/lib/i18n";
+import {
+  classifyMediaFailure,
+  probeMediaSrc,
+  type MediaFailureKind,
+} from "@/lib/media";
+import { mediaFailureMessage, relinkLecture } from "@/lib/sourceLink";
+import { useProjectStore } from "@/store/projectStore";
 
 export interface VideoPlayerHandle {
   seekTo: (seconds: number) => void;
@@ -41,10 +49,6 @@ export interface VideoPlayerProps {
   onPlayingChange?: (playing: boolean) => void;
 }
 
-function describeMediaError(): string {
-  return "The preview could not load this file. In the desktop shell, enable Tauri's asset protocol for the lecture folder.";
-}
-
 /**
  * Precision-seek video preview for Step 2. The native `<video>` element is the
  * single playback source; the waveform only scrubs it.
@@ -57,7 +61,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const [currentTime, setCurrentTime] = useState(0);
     const [playing, setPlaying] = useState(false);
     const [muted, setMuted] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+    const [error, setError] = useState<{ kind: MediaFailureKind; message: string } | null>(
+      null,
+    );
 
     const seekTo = useCallback(
       (seconds: number) => {
@@ -214,17 +220,36 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
               onSeeked={handleTimeUpdate}
               onPlay={handlePlay}
               onPause={handlePause}
-              onError={() => setError(describeMediaError())}
+              onError={() => {
+                const code = videoRef.current?.error?.code ?? null;
+                const target = src;
+                void (async () => {
+                  const probe = target
+                    ? await probeMediaSrc(target)
+                    : { ok: false, status: null, size: null };
+                  const kind = classifyMediaFailure(code, probe);
+                  setError({ kind, message: mediaFailureMessage(kind) });
+                  if (kind === "missing" || kind === "forbidden") {
+                    void useProjectStore.getState().refreshSourceStatus();
+                  }
+                })();
+              }}
             />
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
               <VideoOff className="size-5 text-muted-foreground" />
               <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-                {error ??
-                  (src
+                {error
+                  ? error.message
+                  : src
                     ? "Preparing the video preview…"
-                    : "Video preview unavailable outside the desktop shell.")}
+                    : "Video preview unavailable outside the desktop shell."}
               </p>
+              {error && (error.kind === "missing" || error.kind === "forbidden") ? (
+                <Button variant="outline" size="xs" onClick={() => void relinkLecture()}>
+                  {L("Re-link lecture")}
+                </Button>
+              ) : null}
               {!src ? (
                 <p className="max-w-sm text-[11px] leading-relaxed text-muted-foreground/70">
                   The lecture is opened through Tauri's asset protocol. The waveform and trim

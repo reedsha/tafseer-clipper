@@ -68,37 +68,6 @@ function wrapLine(line: string, maxChars: number): string {
 }
 
 /**
- * Split text into lines no longer than `maxChars`, without the `\n` join.
- * Used by the transcript→cue builder to cut an over-long segment into
- * proportional subtitle lines.
- */
-export function splitSubtitleText(text: string, maxChars: number): string[] {
-  if (!text.trim()) return [];
-  if (maxChars <= 0) return [text];
-  return text
-    .split("\n")
-    .flatMap((line) => splitLine(line.trim(), maxChars))
-    .filter(Boolean);
-}
-
-/**
- * Word chunks for proportional cue splitting. Thai uses the dictionary-backed
- * segmenter (no inter-word spaces); other scripts split on whitespace.
- */
-export function splitTextWords(text: string, kind: "thai" | "space"): string[] {
-  if (!text.trim()) return [];
-  if (kind === "thai") {
-    const segmenter = getThaiSegmenter();
-    if (segmenter) {
-      return [...segmenter.segment(text)]
-        .map((part) => part.segment)
-        .filter((part) => part.trim().length > 0);
-    }
-  }
-  return text.split(/\s+/).filter(Boolean);
-}
-
-/**
  * Wrap Thai text at `maxChars` per line using a hard break, which the `.ass`
  * generator turns into `\N` — exactly how the burned-in subtitle wraps.
  *

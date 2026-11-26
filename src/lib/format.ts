@@ -4,18 +4,25 @@ export function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-/** `12:34` or `1:02:03`, with an optional tenths digit for trim controls. */
-export function formatClock(seconds: number, tenths = false): string {
+export type ClockPrecision = boolean | "tenths" | "hundredths";
+
+/** `12:34` or `1:02:03`, with optional tenths or hundredths (rounded before carry). */
+export function formatClock(seconds: number, precision: ClockPrecision = false): string {
   const safe = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
-  const hours = Math.floor(safe / 3600);
-  const minutes = Math.floor((safe % 3600) / 60);
-  const wholeSeconds = Math.floor(safe % 60);
-  const tenth = Math.floor((safe * 10) % 10);
+  const digits =
+    precision === "hundredths" ? 2 : precision === true || precision === "tenths" ? 1 : 0;
+  const scale = 10 ** digits;
+  const total = Math.round(safe * scale);
+  const fraction = scale > 1 ? total % scale : 0;
+  const whole = Math.floor(total / scale);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const wholeSeconds = whole % 60;
   const base =
     hours > 0
       ? `${hours}:${String(minutes).padStart(2, "0")}:${String(wholeSeconds).padStart(2, "0")}`
       : `${minutes}:${String(wholeSeconds).padStart(2, "0")}`;
-  return tenths ? `${base}.${tenth}` : base;
+  return digits > 0 ? `${base}.${String(fraction).padStart(digits, "0")}` : base;
 }
 
 export function formatBytes(bytes: number): string {

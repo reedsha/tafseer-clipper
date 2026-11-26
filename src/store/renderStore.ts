@@ -14,6 +14,7 @@ import { streamRenderBatch, type RenderCue, type RenderEvent } from "@/lib/api";
 import { defaultOutputDirectory } from "@/lib/filenameTemplate";
 import { formatClock } from "@/lib/format";
 import type { SubtitleCue } from "@/lib/projectTypes";
+import { buildCuesFromTranscript } from "@/lib/subtitleCues";
 import { assStyleToSpec, resolveAssStyles } from "@/lib/subtitleStyles";
 import { wrapArabicText, wrapSubtitleText } from "@/lib/subtitleWrap";
 import { useProjectStore } from "./projectStore";
@@ -173,9 +174,24 @@ export const useRenderStore = create<RenderState>()((set) => ({
           (settings.thai.fontSize / Math.max(1, settings.arabic.fontSize)),
       ),
     );
+    const transcriptSegments = current.transcript?.segments ?? [];
     const renderClips = approvedClips.map((clip) => {
+      // Seed clips that were never opened in Step 3 so exported videos never
+      // lose subtitles just because the editor skipped inspecting a clip.
+      const hasTrack = Object.prototype.hasOwnProperty.call(current.subtitles, clip.id);
+      const rawCues = hasTrack
+        ? (current.subtitles[clip.id] ?? [])
+        : transcriptSegments.length > 0
+          ? buildCuesFromTranscript(transcriptSegments, {
+              clipStart: clip.start,
+              clipEnd: clip.end,
+              maxCharsPerLine,
+              maxLines: settings.editor.subtitleMaxLines,
+              arabicMaxCharsPerLine,
+            })
+          : [];
       const { cues, skipped } = toRenderCues(
-        current.subtitles[clip.id] ?? [],
+        rawCues,
         maxCharsPerLine,
         arabicMaxCharsPerLine,
       );
@@ -382,7 +398,10 @@ export const useRenderStore = create<RenderState>()((set) => ({
             transcript_id: current.transcriptId,
             clips: renderClips,
             resolution: current.export.resolution,
-            framing: current.export.framing,
+            framing:
+              current.export.resolution === "1080x1920"
+                ? current.export.framing
+                : "center-crop",
             use_nvenc: current.export.useNvenc,
             export_srt: current.export.exportSrt,
             output_dir: current.export.outputDir?.trim() ? current.export.outputDir : null,

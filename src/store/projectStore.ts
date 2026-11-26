@@ -20,6 +20,7 @@ import {
   writeAutosave,
   writeAutosaveFile,
 } from "@/lib/projectFile";
+import { probeMediaSrc, toMediaSrc } from "@/lib/media";
 import {
   applyPendingResults,
   applyTaskResult as mergeTaskResult,
@@ -48,10 +49,23 @@ export interface ProjectState {
   dirty: boolean;
   /** Set when the durable disk auto-save failed; cleared on the next success. */
   lastAutosaveError: string | null;
+  /**
+   * Reachability of the open project's source file, probed over the asset
+   * protocol (the fs plugin scope cannot see removable drives). `"missing"`
+   * drives the re-link banner; it never blocks trimming or the waveform.
+   */
+  sourceStatus: "ok" | "missing" | "checking" | "unknown";
 
   createProject: (input?: CreateProjectInput) => ProjectData;
   openProject: (project: ProjectData) => void;
   closeProject: () => void;
+  /** Re-probe the open project's source file; safe to call repeatedly. */
+  refreshSourceStatus: () => Promise<void>;
+  /**
+   * Re-point the open project at a moved/reconnected lecture WITHOUT touching
+   * clips, subtitles, transcript or the project id (non-destructive re-link).
+   */
+  relinkSource: (input: { path: string; name: string; size?: number | null }) => void;
   updateProject: (patch: Partial<ProjectData>) => void;
   setStep: (step: WizardStep) => void;
 
@@ -67,6 +81,7 @@ export interface ProjectState {
   removeClip: (id: string) => void;
   selectClip: (id: string | null) => void;
   setSubtitles: (clipId: string, cues: SubtitleCue[]) => void;
+  setSubtitlesBatch: (patch: Record<string, SubtitleCue[]>) => void;
   setBasePrompt: (prompt: string) => void;
   setPromptPreset: (presetId: string | null) => void;
   setSessionGuide: (guide: string) => void;
@@ -187,7 +202,7 @@ function touch(project: ProjectData, patch: Partial<ProjectData>): ProjectData {
 export const CUE_REBASE_EPSILON = 0.0005;
 const MIN_CUE_WINDOW = 0.05;
 
-/** Pure: shift one clip's cues by `delta` and clamp into `[0, clipDuration]`. */
+/** Pure: shift one clip's cues by `delta`, drop out-of-range cues, and clamp straddlers into `[0, clipDuration]`. */
 export function rebaseCuesForClip(
   subtitles: Record<string, SubtitleCue[]>,
   clipId: string,
@@ -198,17 +213,25 @@ export function rebaseCuesForClip(
   const cues = subtitles[clipId];
   if (!cues || cues.length === 0) return subtitles;
   const duration = Math.max(0, clipDuration);
-  const shifted = cues.map((cue) => {
-    let start = Math.max(0, Math.min(cue.start + delta, duration));
-    let end = Math.max(0, Math.min(cue.end + delta, duration));
-    // Never delete text: keep a minimum window even when the shift pushes the
-    // cue against a boundary.
-    if (end - start < MIN_CUE_WINDOW) {
-      start = Math.max(0, Math.min(start, Math.max(0, duration - MIN_CUE_WINDOW)));
-      end = Math.min(duration, start + MIN_CUE_WINDOW);
-    }
-    return { ...cue, start, end };
-  });
+  if (duration < MIN_CUE_WINDOW) {
+    return { ...subtitles, [clipId]: [] };
+  }
+  const shifted: SubtitleCue[] = [];
+  let prevEnd = -0.02;
+  for (const cue of cues) {
+    const rawStart = cue.start + delta;
+    const rawEnd = cue.end + delta;
+    // Drop cues completely shifted before the new in-point or past the new end
+    // instead of stacking them all onto [0, 0.05].
+    if (rawEnd <= 0 || rawStart >= duration) continue;
+    let start = Math.max(0, prevEnd + 0.02, rawStart);
+    start = Math.min(start, Math.max(0, duration - MIN_CUE_WINDOW));
+    if (start <= prevEnd + 0.001 && shifted.length > 0) continue;
+    const end = Math.min(duration, Math.max(rawEnd, start + MIN_CUE_WINDOW));
+    if (end - start <= 0) continue;
+    shifted.push({ ...cue, start, end });
+    prevEnd = end;
+  }
   return { ...subtitles, [clipId]: shifted };
 }
 
@@ -306,6 +329,7 @@ export const useProjectStore = create<ProjectState>()(
       dirty: false,
       lastAutosaveError: null,
       lastProjectId: null,
+      sourceStatus: "unknown",
 
       createProject: (input = {}) => {
         // Save the outgoing project before replacing it: the debounced timer
@@ -378,6 +402,9 @@ export const useProjectStore = create<ProjectState>()(
           lastProjectId: merged.id,
           recentProjects,
         });
+        // A resumed session may point at a disconnected drive; surface that
+        // immediately instead of waiting for a preview or render to fail.
+        void get().refreshSourceStatus();
       },
 
       closeProject: () => {
@@ -388,7 +415,38 @@ export const useProjectStore = create<ProjectState>()(
           dirty: false,
           lastAutosaveError: null,
           lastProjectId: null,
+          sourceStatus: "unknown",
         });
+      },
+
+      refreshSourceStatus: async () => {
+        const project = get().project;
+        const src = project?.sourcePath ? toMediaSrc(project.sourcePath) : null;
+        if (!src) {
+          set({ sourceStatus: "unknown" });
+          return;
+        }
+        set({ sourceStatus: "checking" });
+        const probe = await probeMediaSrc(src);
+        // Ignore a probe that finished after the session/source changed.
+        if (get().project?.sourcePath !== project?.sourcePath) return;
+        set({ sourceStatus: probe.ok ? "ok" : probe.status === null ? "unknown" : "missing" });
+      },
+
+      relinkSource: ({ path, name, size }) => {
+        set((state) => {
+          if (!state.project) return {};
+          return {
+            project: touch(state.project, {
+              sourcePath: path,
+              sourceFileName: name,
+              ...(size != null ? { sourceSize: size } : {}),
+            }),
+            dirty: true,
+            sourceStatus: "ok",
+          };
+        });
+        get().autosave();
       },
 
       updateProject: (patch) =>
@@ -546,6 +604,17 @@ export const useProjectStore = create<ProjectState>()(
           return {
             project: touch(state.project, {
               subtitles: { ...state.project.subtitles, [clipId]: cues },
+            }),
+            dirty: true,
+          };
+        }),
+
+      setSubtitlesBatch: (patch) =>
+        set((state) => {
+          if (!state.project || Object.keys(patch).length === 0) return {};
+          return {
+            project: touch(state.project, {
+              subtitles: { ...state.project.subtitles, ...patch },
             }),
             dirty: true,
           };

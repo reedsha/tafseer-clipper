@@ -169,9 +169,17 @@ export function assStyleToSpec(style: AssStyle): StyleSpec {
 export function stylesOverlap(
   arabic: AssStyle,
   thai: AssStyle,
+  thaiLines = 1,
+  arabicLines = 1,
 ): { overlaps: boolean; gap: number } {
-  const thaiTop = thai.marginV + thai.size * thai.lineHeightPad;
-  const gap = arabic.marginV - thaiTop;
+  const thaiHeight = thai.size * thai.lineHeightPad * Math.max(1, thaiLines);
+  const arabicHeight = arabic.size * arabic.lineHeightPad * Math.max(1, arabicLines);
+  const thaiBottom = thai.marginV;
+  const thaiTop = thaiBottom + thaiHeight;
+  const arabicBottom = arabic.marginV;
+  const arabicTop = arabicBottom + arabicHeight;
+  // Positive gap means the two blocks are separated; negative gap is overlap in px.
+  const gap = Math.max(arabicBottom - thaiTop, thaiBottom - arabicTop);
   return { overlaps: gap < 0, gap };
 }
 

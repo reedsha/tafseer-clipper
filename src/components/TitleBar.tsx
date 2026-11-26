@@ -92,14 +92,10 @@ export function TitleBar() {
     >
       <div
         data-tauri-drag-region
-        onDoubleClick={() => void appWindow.toggleMaximize().catch(() => {})}
         className="flex min-w-0 flex-1 items-center gap-2 px-3"
       >
-        <BrandMark className="size-4 text-brand-cream" />
-        <span
-          data-tauri-drag-region
-          className="truncate text-[11px] font-medium tracking-wide text-foreground/80"
-        >
+        <BrandMark className="pointer-events-none size-4 text-brand-cream" />
+        <span className="pointer-events-none truncate text-[11px] font-medium tracking-wide text-foreground/80">
           Tafseer Clipper
         </span>
       </div>

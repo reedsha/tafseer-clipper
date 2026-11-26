@@ -78,19 +78,20 @@ export function CueRibbon({
       let end = state.originEnd;
 
       if (state.mode === "move") {
-        const lowest = state.lowerBound + NEIGHBOUR_GAP - state.originStart;
-        const highest = state.upperBound - NEIGHBOUR_GAP - state.originEnd;
-        const shift = clamp(delta, Math.min(lowest, highest), Math.max(lowest, highest));
+        const lowest = state.lowerBound - state.originStart;
+        const highest = state.upperBound - state.originEnd;
+        const shift = lowest <= highest ? clamp(delta, lowest, highest) : 0;
         start += shift;
         end += shift;
       } else if (state.mode === "start") {
-        const lowest = state.lowerBound + NEIGHBOUR_GAP;
+        const lowest = state.lowerBound;
         const highest = state.originEnd - MIN_CUE_SECONDS;
-        start = clamp(state.originStart + delta, Math.min(lowest, highest), Math.max(lowest, highest));
+        start =
+          lowest <= highest ? clamp(state.originStart + delta, lowest, highest) : state.originStart;
       } else {
         const lowest = state.originStart + MIN_CUE_SECONDS;
-        const highest = state.upperBound - NEIGHBOUR_GAP;
-        end = clamp(state.originEnd + delta, Math.min(lowest, highest), Math.max(lowest, highest));
+        const highest = state.upperBound;
+        end = lowest <= highest ? clamp(state.originEnd + delta, lowest, highest) : state.originEnd;
       }
 
       const next = {
@@ -146,8 +147,8 @@ export function CueRibbon({
       originEnd: cue.end,
       draftStart: cue.start,
       draftEnd: cue.end,
-      lowerBound: previous ? previous.end : 0,
-      upperBound: next ? next.start : duration,
+      lowerBound: previous ? previous.end + NEIGHBOUR_GAP : 0,
+      upperBound: next ? next.start - NEIGHBOUR_GAP : duration,
     };
     dragRef.current = state;
     setDrag(state);

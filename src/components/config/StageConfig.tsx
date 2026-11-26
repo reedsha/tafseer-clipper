@@ -46,7 +46,7 @@ import {
   unknownTemplateTokens,
 } from "@/lib/filenameTemplate";
 import { loadImportedFonts } from "@/lib/fonts";
-import { STEP_LABELS, type Resolution, type WizardStep } from "@/lib/projectTypes";
+import { STEP_LABELS, type FramingMode, type Resolution, type WizardStep } from "@/lib/projectTypes";
 import { describeProviderGap, resolveSttConnection, whisperFitSentence } from "@/lib/providers";
 import {
   nudgeVerticalOffset,
@@ -78,6 +78,7 @@ import {
   LineWidthHint,
   ModelSelect,
   NumberField,
+  OUTLINE_COLORS,
   Section,
   SecretInput,
   SwitchRow,
@@ -100,14 +101,6 @@ const STAGE_DESCRIPTIONS: Record<WizardStep, string> = {
  */
 const PREVIEW_ARABIC = "إِنَّ مَعَ الْعُسْرِ يُسْرًا";
 const PREVIEW_THAI = "แท้จริงความยากลำบากนั้นมีทางออกเสมอ";
-
-/**
- * The Stage 3 preview rail (sample line on a black ratio grid + the
- * Both/Arabic/Thai toggle) is parked, not deleted: the settings render
- * centered while this is false. Flip to true to bring back the split layout —
- * the rail markup, `SubtitleFrame` and `SubtitleOverlay` all stay intact.
- */
-const STAGE3_PREVIEW_ENABLED = false;
 
 export function StageConfig({ step }: { step: WizardStep }) {
   const closeConfig = useUiStore((state) => state.closeConfig);
@@ -134,14 +127,7 @@ export function StageConfig({ step }: { step: WizardStep }) {
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div
-          className={cn(
-            "mx-auto w-full space-y-5 px-8 py-6",
-            // Stage 3's preview rail is hidden for now (kept for a follow-up
-            // idea); when it returns, this page widens to max-w-5xl again.
-            step === 3 && STAGE3_PREVIEW_ENABLED ? "max-w-5xl" : "max-w-3xl",
-          )}
-        >
+        <div className="mx-auto w-full max-w-3xl space-y-5 px-8 py-6">
           {step === 1 ? <Stage1Config /> : null}
           {step === 2 ? <Stage2Config /> : null}
           {step === 3 ? <Stage3Config /> : null}
@@ -443,7 +429,7 @@ function Stage2Config() {
     <>
       <Section
         title={L("AI model")}
-        description="Clip finding engine and model. Changing the model applies to the next search; Step 3 can inherit the same choice."
+        description="Clip finding engine and model. Changing the model applies to the next search."
       >
         <SegmentedToggle<EngineMode>
           label="Clip finding engine"
@@ -560,6 +546,10 @@ function FontFamilyField({
   families: string[];
   onChange: (value: string) => void;
 }) {
+  const options = useMemo(
+    () => (value && !families.includes(value) ? [value, ...families] : families),
+    [families, value],
+  );
   return (
     <div className="flex items-center justify-between gap-3">
       <Label className="text-[11px] font-medium text-foreground/80">{label}</Label>
@@ -571,7 +561,7 @@ function FontFamilyField({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {families.map((family) => (
+          {options.map((family) => (
             <SelectItem key={family} value={family} className="text-xs">
               {family}
             </SelectItem>
@@ -631,7 +621,7 @@ function PresetSwatch({ preset }: { preset: StylePreset }) {
   const arabicSize = Math.round(Math.min(11, Math.max(7, preset.arabic.fontSize * 0.16)) * 10) / 10;
   const thaiSize = Math.round(Math.min(8, Math.max(5.5, preset.thai.fontSize * 0.16)) * 10) / 10;
   return (
-    <div className="relative flex aspect-video w-full flex-col items-center justify-end gap-[2px] overflow-hidden rounded-[4px] border border-border bg-black pb-[7%]">
+    <div className="relative flex aspect-video w-full flex-col items-center justify-end gap-[2px] overflow-hidden rounded-[4px] border border-border bg-[#1b1f23] pb-[7%]">
       <span
         dir="rtl"
         lang="ar"
@@ -805,6 +795,7 @@ function PresetLibraryPanel({
 /** The centre canvas: the live export frame on a near-black surface. */
 function StylePreviewCanvas({
   aspect,
+  framing = "blur-fill",
   styles,
   onAspectChange,
   showClip,
@@ -816,6 +807,7 @@ function StylePreviewCanvas({
   className,
 }: {
   aspect: Resolution;
+  framing?: FramingMode;
   styles: { arabic: AssStyle; thai: AssStyle };
   onAspectChange: (resolution: Resolution) => void;
   showClip: boolean;
@@ -846,7 +838,7 @@ function StylePreviewCanvas({
             title={
               clipAvailable
                 ? "Show a paused frame of the selected clip from Step 3"
-                : "Approve a clip in Step 3 to enable this view"
+                : "Approve a clip in Step 2 to enable this view"
             }
           >
             <Switch
@@ -873,6 +865,7 @@ function StylePreviewCanvas({
       <div className="min-h-0 flex-1">
         <SubtitleFrame
           resolution={aspect}
+          framing={framing}
           styles={styles}
           arabic={PREVIEW_ARABIC}
           thai={PREVIEW_THAI}
@@ -903,6 +896,7 @@ function StyleControlsPanel({
   arabic,
   thai,
   editor,
+  resolution,
   fontFamilies,
   modified,
   onArabicChange,
@@ -913,6 +907,7 @@ function StyleControlsPanel({
   arabic: ArabicStyle;
   thai: ThaiStyle;
   editor: EditorDefaults;
+  resolution: Resolution;
   fontFamilies: string[];
   modified: boolean;
   onArabicChange: (patch: Partial<ArabicStyle>) => void;
@@ -969,6 +964,12 @@ function StyleControlsPanel({
                 onChange={(value) => onArabicChange({ color: value })}
                 options={ARABIC_COLORS}
               />
+              <ColorSwatchField
+                label={L("Outline color")}
+                value={arabic.outlineColor}
+                onChange={(value) => onArabicChange({ outlineColor: value })}
+                options={OUTLINE_COLORS}
+              />
               <StyleNumberField
                 label={L("Font size")}
                 ariaLabel="Arabic font size"
@@ -1001,6 +1002,28 @@ function StyleControlsPanel({
                 limits={BOX_OPACITY_PERCENT}
                 suffix="%"
               />
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[11px] font-medium text-foreground/80">Vertical offset</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                    {arabic.verticalOffset > 0
+                      ? `+${Math.round(arabic.verticalOffset)}`
+                      : Math.round(arabic.verticalOffset)}{" "}
+                    px
+                  </span>
+                  {arabic.verticalOffset !== 0 ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      className="h-5 px-1.5 text-[10px]"
+                      onClick={() => onArabicChange({ verticalOffset: 0 })}
+                    >
+                      {L("Reset")}
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
               <StyleSwitchRow
                 label={L("Bold")}
                 checked={arabic.bold}
@@ -1026,6 +1049,12 @@ function StyleControlsPanel({
                 onChange={(value) => onThaiChange({ color: value })}
                 options={THAI_COLORS}
               />
+              <ColorSwatchField
+                label={L("Outline color")}
+                value={thai.outlineColor}
+                onChange={(value) => onThaiChange({ outlineColor: value })}
+                options={OUTLINE_COLORS}
+              />
               <StyleNumberField
                 label={L("Font size")}
                 ariaLabel="Thai font size"
@@ -1050,6 +1079,28 @@ function StyleControlsPanel({
                 limits={BOX_OPACITY_PERCENT}
                 suffix="%"
               />
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[11px] font-medium text-foreground/80">Vertical offset</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                    {thai.verticalOffset > 0
+                      ? `+${Math.round(thai.verticalOffset)}`
+                      : Math.round(thai.verticalOffset)}{" "}
+                    px
+                  </span>
+                  {thai.verticalOffset !== 0 ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      className="h-5 px-1.5 text-[10px]"
+                      onClick={() => onThaiChange({ verticalOffset: 0 })}
+                    >
+                      {L("Reset")}
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
               <StyleSwitchRow
                 label={L("Bold")}
                 checked={thai.bold}
@@ -1090,7 +1141,7 @@ function StyleControlsPanel({
                 fontSize={thai.fontSize}
                 maxChars={editor.maxCharsPerLine}
                 bold={thai.bold}
-                resolution={editor.resolution}
+                resolution={resolution}
                 onUseSuggestion={(chars) =>
                   onEditorChange({ maxCharsPerLine: chars })
                 }
@@ -1172,12 +1223,17 @@ function Stage3Config() {
   const [presetName, setPresetName] = useState("");
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  /** Which line(s) the sticky preview draws; a preview control, not a setting. */
-  const [previewLines, setPreviewLines] = useState<"both" | "arabic" | "thai">("both");
   /** Aspect chosen inside the Add-preset window; preview-only, never saved. */
   const [presetAspect, setPresetAspect] = useState<Resolution>(editor.resolution);
   /** View-only clip frame in the preset preview; never saved in a preset. */
   const [showClip, setShowClip] = useState(false);
+  const presetSnapshotRef = useRef<{
+    arabic: ArabicStyle;
+    thai: ThaiStyle;
+    activePresetId: string | null;
+    maxCharsPerLine: number;
+    subtitleMaxLines: 1 | 2;
+  } | null>(null);
 
   const fontFamilies = useMemo(() => {
     const families = new Set(SYSTEM_FONTS);
@@ -1193,22 +1249,10 @@ function Stage3Config() {
     ? !presetMatchesStyle(activePreset, arabic, thai)
     : false;
 
-  /**
-   * The preview is a typography sample, not the open session: a fixed line on
-   * a black ratio grid, so the styling can be judged before (or without) any
-   * clip. Nothing in it comes from the lecture.
-   */
-  const previewResolution = project?.export.resolution ?? editor.resolution;
-  const previewStyles = useMemo(
-    () => resolveSubtitleStyles(previewResolution, arabic, thai),
-    [previewResolution, arabic, thai],
-  );
   const presetStyles = useMemo(
     () => resolveSubtitleStyles(presetAspect, arabic, thai),
     [presetAspect, arabic, thai],
   );
-  const previewArabic = previewLines === "thai" ? "" : PREVIEW_ARABIC;
-  const previewThai = previewLines === "arabic" ? "" : PREVIEW_THAI;
 
   const editingPreset = editingPresetId
     ? (presets.find((item) => item.id === editingPresetId) ?? null)
@@ -1233,12 +1277,11 @@ function Stage3Config() {
   /** Drag/arrow moves update the live style, so saving a preset captures them. */
   const nudgePreviewLine = (kind: SubtitleLine, delta: number) => {
     const state = useSettingsStore.getState();
-    const resolution = project?.export.resolution ?? editor.resolution;
     if (kind === "arabic") {
       updateArabic({
         verticalOffset: nudgeVerticalOffset(
           "arabic",
-          resolution,
+          presetAspect,
           state.arabic.verticalOffset,
           delta,
         ),
@@ -1247,13 +1290,51 @@ function Stage3Config() {
       updateThai({
         verticalOffset: nudgeVerticalOffset(
           "thai",
-          resolution,
+          presetAspect,
           state.thai.verticalOffset,
           delta,
         ),
       });
     }
   };
+
+  function openPresetDialog(preset: StylePreset | null) {
+    presetSnapshotRef.current = {
+      arabic: { ...arabic },
+      thai: { ...thai },
+      activePresetId,
+      maxCharsPerLine: editor.maxCharsPerLine,
+      subtitleMaxLines: editor.subtitleMaxLines,
+    };
+    if (preset) {
+      applyPreset(preset.id);
+      setEditingPresetId(preset.id);
+      setPresetName(preset.name);
+    } else {
+      setEditingPresetId(null);
+      setPresetName("");
+    }
+    setPresetAspect(project?.export.resolution ?? editor.resolution);
+    setPresetDialogOpen(true);
+  }
+
+  function cancelPresetDialog() {
+    const snap = presetSnapshotRef.current;
+    presetSnapshotRef.current = null;
+    if (snap) {
+      useSettingsStore.setState((state) => ({
+        arabic: snap.arabic,
+        thai: snap.thai,
+        activePresetId: snap.activePresetId,
+        editor: {
+          ...state.editor,
+          maxCharsPerLine: snap.maxCharsPerLine,
+          subtitleMaxLines: snap.subtitleMaxLines,
+        },
+      }));
+    }
+    setPresetDialogOpen(false);
+  }
 
   async function handleFontFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -1278,84 +1359,7 @@ function Stage3Config() {
 
   return (
     <>
-      {/* Preview rail + settings: a fixed narrow rail (like an editor's
-          inspector) with the settings taking the remaining width. The rail
-          shows a sample line on a black ratio grid — nothing here is the
-          lecture and nothing here plays.
-
-          Currently DISABLED (STAGE3_PREVIEW_ENABLED): the settings render
-          centered like every other stage. The rail, its toggle and the
-          SubtitleFrame component are kept intact for a follow-up idea — flip
-          the flag to bring the split layout back. */}
-      <div
-        className={cn(
-          "grid gap-8",
-          STAGE3_PREVIEW_ENABLED &&
-            "md:grid-cols-[320px_minmax(0,1fr)] md:gap-0",
-        )}
-      >
-        {STAGE3_PREVIEW_ENABLED ? (
-          <div className="min-w-0 md:pr-8">
-            <div className="space-y-2.5 md:sticky md:top-0">
-              <div className="flex items-baseline justify-between gap-3">
-                <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                  {L("Preview")}
-                </p>
-                <span className="text-[10px] tabular-nums text-muted-foreground">
-                  {previewResolution === "1080x1920" ? "9:16" : "16:9"}
-                </span>
-              </div>
-              <SubtitleFrame
-                resolution={previewResolution}
-                styles={previewStyles}
-                arabic={previewArabic}
-                thai={previewThai}
-                className="h-[min(46vh,420px)] w-full"
-              />
-              {/* Content-sized, centered: a stretched full-width switch reads
-                  like a form control, not a preview filter. */}
-              <div className="flex justify-center">
-                <SegmentedToggle<"both" | "arabic" | "thai">
-                  label="Preview lines"
-                  value={previewLines}
-                  options={[
-                    { value: "both", label: "Both" },
-                    { value: "arabic", label: L("Arabic") },
-                    { value: "thai", label: L("Thai") },
-                  ]}
-                  onChange={setPreviewLines}
-                  className="w-fit"
-                />
-              </div>
-              {/* Live values, so scrolling the typography cards never loses the
-                  numbers the preview is showing. */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Badge variant="outline" className="text-[10px] font-normal">
-                  {activePreset?.name ?? "Custom style"}
-                  {activePresetModified ? (
-                    <span className="ml-1 text-status-warning">modified</span>
-                  ) : null}
-                </Badge>
-                <Badge variant="outline" className="text-[10px] font-normal tabular-nums">
-                  Arabic {previewStyles.arabic.size}px
-                </Badge>
-                <Badge variant="outline" className="text-[10px] font-normal tabular-nums">
-                  Thai {previewStyles.thai.size}px
-                </Badge>
-              </div>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                {L("A sample line drawn on the export frame with the current typography. The frame never plays and never uses the lecture.")}
-              </p>
-            </div>
-          </div>
-        ) : null}
-
-        <div
-          className={cn(
-            "min-w-0 space-y-5",
-            STAGE3_PREVIEW_ENABLED && "md:border-l md:border-border md:pl-8",
-          )}
-        >
+      <div className="space-y-5">
           <Section
             title={L("Style presets")}
             description={L("One-click themes applied to the preview and the exported subtitles. Open the live style editor to create a new preset or edit an existing one.")}
@@ -1412,13 +1416,7 @@ function Stage3Config() {
                       size="icon-xs"
                       aria-label={`Edit ${preset.name}`}
                       title="Edit preset style and name"
-                      onClick={() => {
-                        applyPreset(preset.id);
-                        setEditingPresetId(preset.id);
-                        setPresetName(preset.name);
-                        setPresetAspect(project?.export.resolution ?? editor.resolution);
-                        setPresetDialogOpen(true);
-                      }}
+                      onClick={() => openPresetDialog(preset)}
                     >
                       <Pencil className="size-3.5" />
                     </Button>
@@ -1438,12 +1436,7 @@ function Stage3Config() {
               variant="outline"
               size="sm"
               className="gap-1.5"
-              onClick={() => {
-                setEditingPresetId(null);
-                setPresetName("");
-                setPresetAspect(project?.export.resolution ?? editor.resolution);
-                setPresetDialogOpen(true);
-              }}
+              onClick={() => openPresetDialog(null)}
             >
               <Plus className="size-3.5" />
               {L("Add preset")}
@@ -1536,15 +1529,19 @@ function Stage3Config() {
               {L("Arabic verification is fully offline — no model selection needed.")}
             </p>
           </Section>
-        </div>
       </div>
 
       {/* ----------------------------- Preset dialogs ----------------------------- */}
       {/* The style editor: a preset library on the left, the live export frame
           in the middle, and one language's typography on the right. Edits
-          apply immediately like every setting here; Save snapshots the
-          typography under a name. */}
-      <Dialog open={presetDialogOpen} onOpenChange={setPresetDialogOpen}>
+          apply live in preview; Cancel / Escape reverts unsaved edits and
+          Save snapshots the typography under a name. */}
+      <Dialog
+        open={presetDialogOpen}
+        onOpenChange={(open) => {
+          if (!open) cancelPresetDialog();
+        }}
+      >
         <DialogContent className="flex h-[min(92vh,840px)] flex-col gap-0 overflow-hidden p-0 sm:max-w-6xl">
           <DialogHeader className="shrink-0 space-y-3 border-b border-border px-5 py-4 pr-12 text-left sm:px-6">
             <div className="space-y-1">
@@ -1595,6 +1592,7 @@ function Stage3Config() {
 
             <StylePreviewCanvas
               aspect={presetAspect}
+              framing={project?.export.framing}
               styles={presetStyles}
               onAspectChange={setPresetAspect}
               showClip={showClip}
@@ -1610,6 +1608,7 @@ function Stage3Config() {
               arabic={arabic}
               thai={thai}
               editor={editor}
+              resolution={presetAspect}
               fontFamilies={fontFamilies}
               modified={editingPresetModified}
               onArabicChange={updateArabic}
@@ -1624,7 +1623,7 @@ function Stage3Config() {
               {L("Edits apply live while you tune the style.")}
             </p>
             <div className="flex items-center gap-2 sm:justify-end">
-              <Button variant="ghost" size="sm" onClick={() => setPresetDialogOpen(false)}>
+              <Button variant="ghost" size="sm" onClick={cancelPresetDialog}>
                 Cancel
               </Button>
               <Button
@@ -1632,6 +1631,7 @@ function Stage3Config() {
                 disabled={!presetName.trim()}
                 onClick={() => {
                   const name = presetName.trim();
+                  presetSnapshotRef.current = null;
                   if (editingPresetId) {
                     updatePreset(editingPresetId);
                     renamePreset(editingPresetId, name);

@@ -741,6 +741,7 @@ def match_span(text: str) -> MatchSpanResult | None:
         )
 
         span_len = ei - si + 1
+        matched_verses = tuple(dict.fromkeys(cand.orth_word_verses[sj : ej + 1]))
 
         # Guardrail: non-Quranic markers skip unless a real (>=4 word) high-score
         # Quran span is present.
@@ -748,8 +749,20 @@ def match_span(text: str) -> MatchSpanResult | None:
             if not (max(orth_score, phon_score) >= 0.90 and span_len >= 4):
                 continue
 
+        # Exact/near-exact full 2-3 word verses (e.g. 1:4 مَالِكِ يَوْمِ الدِّينِ)
+        # can qualify for auto when the entire single verse matches cleanly.
+        full_short_verse = (
+            2 <= span_len < 4
+            and cand.verse_count == 1
+            and len(matched_verses) == 1
+            and len(cand_orth_words) == span_len
+            and (ej - sj + 1) == len(cand_orth_words)
+        )
+
         # Tier decision.
-        if orth_score >= 0.85 and span_len >= 4:
+        if (orth_score >= 0.85 and span_len >= 4) or (
+            orth_score >= 0.96 and full_short_verse
+        ):
             tier = "auto"
         elif orth_score < 0.85 and phon_score >= 0.88:
             tier = "rescue"
@@ -766,7 +779,6 @@ def match_span(text: str) -> MatchSpanResult | None:
         raw_end = cand.orth_to_raw_idx[ej]
         matched_canonical = " ".join(cand.arabic_words[raw_start : raw_end + 1])
 
-        matched_verses = tuple(dict.fromkeys(cand.orth_word_verses[sj : ej + 1]))
         matched_ref = _format_verse_range(matched_verses) or cand.reference
         matched_thai = " ".join(
             _BY_REFERENCE[v].thai for v in matched_verses if v in _BY_REFERENCE

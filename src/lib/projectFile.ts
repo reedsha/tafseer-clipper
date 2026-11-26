@@ -188,6 +188,10 @@ function normalizeProject(raw: unknown): ProjectData {
     name: str(project.name, "Untitled session"),
     sourcePath: strOrNull(project.sourcePath),
     sourceFileName: strOrNull(project.sourceFileName),
+    // Additive field: absent in every project saved before it existed.
+    ...(typeof project.sourceSize === "number" && Number.isFinite(project.sourceSize)
+      ? { sourceSize: project.sourceSize }
+      : {}),
     duration:
       typeof project.duration === "number" && Number.isFinite(project.duration)
         ? project.duration

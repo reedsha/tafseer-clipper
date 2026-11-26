@@ -64,6 +64,7 @@ import {
   normalizeSpeechRange,
 } from "@/lib/clipMath";
 import { toMediaSrc } from "@/lib/media";
+import { relinkLecture } from "@/lib/sourceLink";
 import { clamp, formatClock } from "@/lib/format";
 import { proposalToClip } from "@/lib/importClips";
 import type { ProjectClip, ProjectData } from "@/lib/projectTypes";
@@ -323,6 +324,7 @@ export function Step2Discovery() {
   const selectedIndex = selected ? clips.findIndex((clip) => clip.id === selected.id) : -1;
   const duration = project?.duration ?? 0;
   const videoSrc = useMemo(() => toMediaSrc(project?.sourcePath), [project?.sourcePath]);
+  const sourceMissing = useProjectStore((state) => state.sourceStatus === "missing");
 
   // Switching projects resets the *view* only: refinement text and playhead
   // belong to the session that was on screen. A discovery call that is still
@@ -826,6 +828,11 @@ export function Step2Discovery() {
             <Captions className="size-3.5" />
             {project.transcript.segments.length} segments
           </span>
+          {sourceMissing ? (
+            <Button variant="ghost" size="xs" onClick={() => void relinkLecture()}>
+              {L("Re-link")}
+            </Button>
+          ) : null}
           <Button variant="ghost" size="xs" onClick={() => setStep(1)}>
             {L("Change lecture")}
           </Button>

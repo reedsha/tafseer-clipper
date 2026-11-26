@@ -47,7 +47,7 @@ export type TaskResultPayload =
        */
       lines: Array<{
         cueId: string;
-        arabic: string;
+        arabic?: string;
         source?: string;
         reference?: string | null;
         confidence?: number | null;
@@ -125,12 +125,35 @@ function applyVerify(
   const next = cues.map((cue) => {
     const line = byCue.get(cue.id);
     if (!line) return cue;
+    if (line.source === "unmatched" || line.source === "needs_model") {
+      if (
+        cue.source !== undefined ||
+        cue.reference !== undefined ||
+        cue.confidence !== undefined ||
+        cue.translation !== undefined
+      ) {
+        changed = true;
+        return {
+          ...cue,
+          source: undefined,
+          reference: undefined,
+          confidence: undefined,
+          translation: undefined,
+        };
+      }
+      return cue;
+    }
     const patch: Partial<SubtitleCue> = {};
     // A confirmed line keeps its text; only the provenance is new. Treating
     // "same text" as "nothing to do" is what hid every corpus match.
-    if (line.arabic && line.arabic !== cue.arabic) patch.arabic = line.arabic;
+    if (line.arabic && line.arabic !== cue.arabic) {
+      patch.arabic = line.arabic;
+      patch.reviewed = false;
+    }
     if (line.source && line.source !== cue.source) patch.source = line.source;
-    if (line.reference && line.reference !== cue.reference) patch.reference = line.reference;
+    if (line.reference !== undefined && (line.reference ?? undefined) !== cue.reference) {
+      patch.reference = line.reference ?? undefined;
+    }
     if (typeof line.confidence === "number" && line.confidence !== cue.confidence) {
       patch.confidence = line.confidence;
     }

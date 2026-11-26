@@ -20,13 +20,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { listModels, type ModelDetail, type ModelKind } from "@/lib/api";
@@ -408,39 +401,6 @@ export function LineWidthHint({
   );
 }
 
-export function ColorSelect({
-  value,
-  onChange,
-  options,
-  label,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  options: { value: string; label: string }[];
-  label: string;
-}) {
-  return (
-    <Select value={value} onValueChange={onChange}>
-      <SelectTrigger className="w-full" aria-label={label}>
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {withCurrentColor(options, value).map((option) => (
-          <SelectItem key={option.value} value={option.value}>
-            <span className="flex items-center gap-2">
-              <span
-                className="size-3 rounded-full border border-border"
-                style={{ backgroundColor: option.value }}
-              />
-              {option.label}
-            </span>
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  );
-}
-
 /**
  * Colour row in the inspector rhythm: label on the left, the current swatch
  * and its hex value on the right. The trigger opens a shadcn Popover with the
@@ -511,6 +471,13 @@ export const THAI_COLORS = [
   { value: "#f4f4f1", label: "Crisp white" },
   { value: "#efece4", label: "Warm white" },
   { value: "#dcb46e", label: "Gold" },
+];
+
+export const OUTLINE_COLORS = [
+  { value: "#000000", label: "Pure black" },
+  { value: "#0b0c0d", label: "Charcoal black" },
+  { value: "#1c1917", label: "Warm black" },
+  { value: "#ffffff", label: "White" },
 ];
 
 export const SYSTEM_FONTS = [

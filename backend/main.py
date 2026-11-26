@@ -512,6 +512,7 @@ class VerifyArabicResponse(BaseModel):
     #: Additive provenance for the single-line shape.
     source: str = "proofread"
     reference: str | None = None
+    confidence: float | None = None
     #: Additive per-line results for a batched request.
     lines: list[VerifyArabicLineResult] | None = None
 
@@ -2552,6 +2553,7 @@ async def verify_arabic(body: VerifyArabicRequest) -> VerifyArabicResponse:
         model="",
         source=outcome.source,
         reference=outcome.reference,
+        confidence=outcome.confidence,
     )
 
 

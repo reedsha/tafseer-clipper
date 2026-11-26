@@ -6,7 +6,7 @@
  * Nothing here is persisted — activity is per app session.
  */
 
-export type AiTask = "transcription" | "ai-analysis" | "clip-finding" | "arabic-check";
+export type AiTask = "transcription" | "ai-analysis" | "clip-finding";
 export type AiRunStatus = "running" | "done" | "failed" | "cancelled";
 export type AiBackend = "cloud" | "local";
 
@@ -26,7 +26,6 @@ export const AI_TASK_LABEL: Record<AiTask, string> = {
   transcription: "Transcription",
   "ai-analysis": "AI analysis",
   "clip-finding": "Clip finding",
-  "arabic-check": "Arabic check",
 };
 
 const STATUS_LABEL: Record<AiRunStatus, string> = {

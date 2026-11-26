@@ -110,7 +110,7 @@ function getSections(): { id: SettingsSection; label: string; icon: LucideIcon }
 
 function getSectionDescriptions(): Record<SettingsSection, string> {
   return {
-  connection: L("One AI connection for clip finding, Arabic checking and cloud speech-to-text — cloud or on this computer."),
+  connection: L("One AI connection for clip finding and cloud speech-to-text — cloud or on this computer."),
   gpu: L("Optional hardware acceleration. Everything falls back to the CPU automatically."),
   storage: L("Auto-save, the project folder and the temporary disk cache."),
   engine: L("Live status of the processing engine, plus a copyable support bundle."),

@@ -68,6 +68,61 @@ export function toMediaSrc(path: string | null | undefined): string | null {
   }
 }
 
+export interface MediaProbe {
+  ok: boolean;
+  /** HTTP status from the asset protocol, or `null` when the fetch failed. */
+  status: number | null;
+  /** Content-Length in bytes, when the protocol reports it. */
+  size: number | null;
+}
+
+/**
+ * Probe an asset-protocol URL for reachability and size without downloading the
+ * body. Used to tell "file missing/moved" apart from "codec unsupported" when a
+ * preview fails, and to validate a re-linked lecture. Never throws.
+ */
+export async function probeMediaSrc(src: string): Promise<MediaProbe> {
+  try {
+    const response = await fetch(src);
+    const header = response.headers.get("Content-Length");
+    const parsed = header === null ? NaN : Number(header);
+    // Only status + length are needed; drop the body immediately so a multi-GB
+    // lecture is never streamed into the renderer.
+    void response.body?.cancel().catch(() => {});
+    return {
+      ok: response.ok,
+      status: response.status,
+      size: Number.isFinite(parsed) ? parsed : null,
+    };
+  } catch {
+    return { ok: false, status: null, size: null };
+  }
+}
+
+export type MediaFailureKind = "missing" | "forbidden" | "decode" | "network" | "unknown";
+
+/**
+ * Map a `<video>` MediaError code plus an asset probe to an actionable cause.
+ * A reachable file (probe ok) that still fails is a decode/container problem;
+ * a 404/410 is a missing or moved file; 403 is a scope/permission problem.
+ */
+export function classifyMediaFailure(
+  code: number | null,
+  probe: MediaProbe,
+): MediaFailureKind {
+  if (probe.status === 404 || probe.status === 410) return "missing";
+  if (probe.status === 403) return "forbidden";
+  if (probe.ok) {
+    if (code === 3 || code === 4) return "decode";
+    if (code === 2) return "network";
+    return "unknown";
+  }
+  if (probe.status !== null) return "missing";
+  if (code === 2) return "network";
+  if (code === 4) return "decode";
+  return "unknown";
+}
+
 function firstPath(value: string | string[] | null): string | null {
   if (Array.isArray(value)) return value[0] ?? null;
   return value ?? null;

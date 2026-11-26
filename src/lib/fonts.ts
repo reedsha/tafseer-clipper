@@ -16,11 +16,19 @@
 import type { FontInfo } from "@/lib/api";
 import { toMediaSrc } from "@/lib/media";
 
-/** `family::style` keys already registered with `document.fonts`. */
-const registered = new Set<string>();
+/** `family::style` -> live `FontFace` instances registered with `document.fonts`. */
+const registered = new Map<string, FontFace>();
 
 export function fontFaceKey(font: FontInfo): string {
   return `${font.family}::${font.style}`;
+}
+
+export function unloadImportedFont(key: string): void {
+  const face = registered.get(key);
+  if (face && typeof document !== "undefined") {
+    document.fonts.delete(face);
+  }
+  registered.delete(key);
 }
 
 function styleFromName(style: string): "normal" | "italic" | "oblique" {
@@ -61,7 +69,7 @@ export async function loadImportedFonts(fonts: FontInfo[]): Promise<number> {
       });
       await face.load();
       document.fonts.add(face);
-      registered.add(key);
+      registered.set(key, face);
       added += 1;
     } catch {
       /* Unreadable file or blocked asset URL — keep the system fallback. */

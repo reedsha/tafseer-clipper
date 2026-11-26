@@ -1253,8 +1253,7 @@ def _segments_from_gateway_payload(
             text = (item.get("text") or "").strip()
             if not text:
                 continue
-            start = float(item.get("startSecond", item.get("start", 0.0)) or 0.0)
-            end = float(item.get("endSecond", item.get("end", 0.0)) or 0.0)
+            start, end = _extract_segment_times(item)
             segments.append(
                 Segment(
                     id=index,
@@ -1264,18 +1263,25 @@ def _segments_from_gateway_payload(
                     language=language,
                 )
             )
+    if segments and duration > 0 and all(seg.end <= seg.start for seg in segments):
+        logger.warning(
+            "Gateway STT returned segments without timestamps; distributing "
+            "%d segment(s) proportionally across %.1fs",
+            len(segments),
+            duration,
+        )
+        segments = _distribute_segments_proportionally(
+            [(seg.text, seg.language) for seg in segments],
+            start=offset,
+            duration=duration,
+        )
     if not segments:
         text = (payload.get("text") or "").strip()
         if text:
-            segments.append(
-                Segment(
-                    id=0,
-                    start=offset,
-                    end=offset + duration,
-                    text=text,
-                    language=language,
-                )
+            segments = _segments_from_plain_text(
+                text, start=offset, duration=duration, language=language
             )
+    segments = _split_oversized_segments(segments)
     return segments, duration
 
 
@@ -1476,8 +1482,31 @@ async def transcribe_cloud(
     )
 
 
+CLOUD_STT_OVERSIZED_SEGMENT_SECONDS = 30.0
+
+
+def _extract_segment_times(item: dict) -> tuple[float, float]:
+    """Extract ``(start, end)`` across common OpenAI / gateway / Whisper schemas."""
+    start_val = item.get("start")
+    if start_val is None:
+        start_val = item.get("startSecond", item.get("start_time"))
+    end_val = item.get("end")
+    if end_val is None:
+        end_val = item.get("endSecond", item.get("end_time"))
+    if (start_val is None or end_val is None) and isinstance(
+        item.get("timestamp"), (list, tuple)
+    ):
+        ts = item["timestamp"]
+        if len(ts) >= 2:
+            if start_val is None:
+                start_val = ts[0]
+            if end_val is None:
+                end_val = ts[1]
+    return float(start_val or 0.0), float(end_val or 0.0)
+
+
 def _split_plain_cloud_text(text: str) -> list[str]:
-    """Split a segment-less provider reply into sentence-ish chunks.
+    """Split a segment-less or oversized text into sentence-ish chunks.
 
     Sentence-ending punctuation (and hard newlines) are the boundaries; a run
     with no punctuation at all is cut near a space so no chunk becomes a
@@ -1487,16 +1516,104 @@ def _split_plain_cloud_text(text: str) -> list[str]:
         piece.strip() for piece in _PLAIN_SENTENCE_BREAK.split(text) if piece.strip()
     ]
     chunks: list[str] = []
+    min_space_cut = CLOUD_STT_PLAIN_CHUNK_CHARS // 2
     for piece in pieces:
         while len(piece) > CLOUD_STT_PLAIN_CHUNK_CHARS:
-            cut = piece.rfind(" ", 0, CLOUD_STT_PLAIN_CHUNK_CHARS)
+            cut = piece.rfind(" ", min_space_cut, CLOUD_STT_PLAIN_CHUNK_CHARS)
             if cut <= 0:
                 cut = CLOUD_STT_PLAIN_CHUNK_CHARS
-            chunks.append(piece[:cut].strip())
+            part = piece[:cut].strip()
+            if part:
+                chunks.append(part)
             piece = piece[cut:].strip()
         if piece:
             chunks.append(piece)
     return chunks
+
+
+def _distribute_segments_proportionally(
+    items: list[tuple[str, str | None]],
+    *,
+    start: float,
+    duration: float,
+) -> list[Segment]:
+    if not items:
+        return []
+    total_chars = max(1, sum(len(text) for text, _ in items))
+    cursor = start
+    out: list[Segment] = []
+    for index, (chunk, lang) in enumerate(items):
+        share = duration * len(chunk) / total_chars
+        seg_end = start + duration if index == len(items) - 1 else cursor + share
+        out.append(
+            Segment(
+                id=index,
+                start=round(cursor, 3),
+                end=round(max(cursor + 0.001, seg_end), 3),
+                text=chunk,
+                language=lang,
+            )
+        )
+        cursor = seg_end
+    return out
+
+
+def _segments_from_plain_text(
+    text: str,
+    *,
+    start: float,
+    duration: float,
+    language: str | None,
+) -> list[Segment]:
+    chunks = (
+        _split_plain_cloud_text(text)
+        if len(text) > CLOUD_STT_PLAIN_SPLIT_MIN_CHARS and duration > 0
+        else [text]
+    )
+    if len(chunks) > 1:
+        logger.warning(
+            "Cloud STT returned plain text without segments; splitting "
+            "proportionally into %d pseudo-segments",
+            len(chunks),
+        )
+        return _distribute_segments_proportionally(
+            [(chunk, language) for chunk in chunks],
+            start=start,
+            duration=duration,
+        )
+    return [
+        Segment(
+            id=0,
+            start=start,
+            end=start + duration,
+            text=text,
+            language=language,
+        )
+    ]
+
+
+def _split_oversized_segments(segments: list[Segment]) -> list[Segment]:
+    """Sub-divide multi-minute STT segments into readable sentence/clause chunks."""
+    out: list[Segment] = []
+    for seg in segments:
+        seg_dur = seg.end - seg.start
+        if (
+            seg_dur > CLOUD_STT_OVERSIZED_SEGMENT_SECONDS
+            and len(seg.text) > CLOUD_STT_PLAIN_SPLIT_MIN_CHARS
+        ):
+            chunks = _split_plain_cloud_text(seg.text)
+            if len(chunks) > 1:
+                parts = _distribute_segments_proportionally(
+                    [(chunk, seg.language) for chunk in chunks],
+                    start=seg.start,
+                    duration=seg_dur,
+                )
+                out.extend(parts)
+                continue
+        out.append(seg)
+    for index, seg in enumerate(out):
+        seg.id = index
+    return out
 
 
 def _segments_from_cloud_payload(
@@ -1517,6 +1634,7 @@ def _segments_from_cloud_payload(
     reported_duration = float(payload.get("duration", 0.0) or 0.0)
     duration = reported_duration if reported_duration > 0 else max(0.0, duration_hint)
     raw_segments = payload.get("segments") or []
+    language = payload.get("language")
     segments: list[Segment] = []
     if raw_segments:
         for index, item in enumerate(raw_segments):
@@ -1524,55 +1642,35 @@ def _segments_from_cloud_payload(
                 continue
             text = (item.get("text") or "").strip()
             if text:
+                seg_start, seg_end = _extract_segment_times(item)
                 segments.append(
                     Segment(
                         id=index,
-                        start=float(item.get("start", 0.0)) + offset,
-                        end=float(item.get("end", 0.0)) + offset,
+                        start=seg_start + offset,
+                        end=seg_end + offset,
                         text=text,
-                        language=payload.get("language"),
+                        language=language,
                     )
                 )
-    else:
+    if segments and duration > 0 and all(seg.end <= seg.start for seg in segments):
+        logger.warning(
+            "Cloud STT returned segments without timestamps; distributing "
+            "%d segment(s) proportionally across %.1fs",
+            len(segments),
+            duration,
+        )
+        segments = _distribute_segments_proportionally(
+            [(seg.text, seg.language) for seg in segments],
+            start=offset,
+            duration=duration,
+        )
+    if not segments:
         text = (payload.get("text") or "").strip()
         if text:
-            chunks = (
-                _split_plain_cloud_text(text)
-                if len(text) > CLOUD_STT_PLAIN_SPLIT_MIN_CHARS and duration > 0
-                else [text]
+            segments = _segments_from_plain_text(
+                text, start=offset, duration=duration, language=language
             )
-            if len(chunks) > 1:
-                logger.warning(
-                    "Cloud STT returned plain text without segments; splitting "
-                    "proportionally into %d pseudo-segments",
-                    len(chunks),
-                )
-                # Characters stand in for speaking time across this chunk's
-                # [offset, offset + duration] window.
-                total_chars = max(1, sum(len(chunk) for chunk in chunks))
-                cursor = offset
-                for index, chunk in enumerate(chunks):
-                    share = duration * len(chunk) / total_chars
-                    segments.append(
-                        Segment(
-                            id=index,
-                            start=round(cursor, 3),
-                            end=round(cursor + share, 3),
-                            text=chunk,
-                            language=payload.get("language"),
-                        )
-                    )
-                    cursor += share
-            else:
-                segments.append(
-                    Segment(
-                        id=0,
-                        start=offset,
-                        end=offset + duration,
-                        text=text,
-                        language=payload.get("language"),
-                    )
-                )
+    segments = _split_oversized_segments(segments)
     return segments, duration
 
 

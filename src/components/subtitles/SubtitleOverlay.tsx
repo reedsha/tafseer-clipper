@@ -62,7 +62,10 @@ function lineStyle(
     lineHeight: `${line.lineHeightPad}`,
     fontWeight: line.bold ? 700 : 400,
     color: line.primaryColor,
-    textShadow: textShadow(metrics.outlinePx, line.outlineColor, line.shadow * scale),
+    textShadow:
+      line.boxOpacity > 0
+        ? undefined
+        : textShadow(metrics.outlinePx, line.outlineColor, line.shadow * scale),
   };
 }
 
@@ -144,6 +147,8 @@ export function SubtitleOverlay({
       const delta = ((event.key === "ArrowUp" ? screenPixels : -screenPixels) / scale);
       onNudgeLine(kind, delta);
     } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
       setSelectedLine(null);
     }
   }
@@ -168,7 +173,7 @@ export function SubtitleOverlay({
 
   function lineClass(kind: SubtitleLine) {
     return cn(
-      "absolute px-2 text-center whitespace-pre-line",
+      "absolute text-center whitespace-pre-line",
       interactive && "pointer-events-auto cursor-ns-resize touch-none select-none outline-none",
       interactive &&
         selectedLine === kind &&

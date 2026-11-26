@@ -96,6 +96,11 @@ export interface ProjectData {
   name: string;
   sourcePath: string | null;
   sourceFileName: string | null;
+  /**
+   * Source file size in bytes, when known. Additive: lets a future reconnect
+   * match a moved lecture on another volume by size. Absent in older projects.
+   */
+  sourceSize?: number | null;
   /** Lecture duration in seconds, when known. */
   duration: number | null;
   step: WizardStep;

@@ -3,11 +3,12 @@ import { cn } from "cn";
 
 import { SubtitleOverlay } from "@/components/subtitles/SubtitleOverlay";
 import { toMediaSrc } from "@/lib/media";
-import type { Resolution } from "@/lib/projectTypes";
+import type { FramingMode, Resolution } from "@/lib/projectTypes";
 import { ASS_RESOLUTIONS, type AssStyle, type SubtitleLine } from "@/lib/subtitleStyles";
 
 export interface SubtitleFrameProps {
   resolution: Resolution;
+  framing?: FramingMode;
   styles: { arabic: AssStyle; thai: AssStyle };
   arabic: string;
   thai: string;
@@ -28,6 +29,7 @@ export interface SubtitleFrameProps {
  */
 export function SubtitleFrame({
   resolution,
+  framing = "blur-fill",
   styles,
   arabic,
   thai,
@@ -60,6 +62,16 @@ export function SubtitleFrame({
     return () => observer.disconnect();
   }, [play.width, play.height]);
 
+  useEffect(() => {
+    const element = videoRef.current;
+    if (!element || !mediaSrc || element.readyState < 1) return;
+    const duration = Number.isFinite(element.duration) ? element.duration : Infinity;
+    element.currentTime = Math.min(
+      Math.max(0, (video?.clipStart ?? 0) + 0.05),
+      Math.max(0, duration - 0.05),
+    );
+  }, [mediaSrc, video?.clipStart]);
+
   const portrait = play.height > play.width;
 
   return (
@@ -80,7 +92,10 @@ export function SubtitleFrame({
             playsInline
             preload="metadata"
             aria-label="Selected clip frame"
-            className="absolute inset-0 size-full object-cover"
+            className={cn(
+              "absolute inset-0 size-full",
+              portrait && framing === "blur-fill" ? "object-contain" : "object-cover",
+            )}
             onLoadedMetadata={() => {
               const element = videoRef.current;
               if (!element) return;

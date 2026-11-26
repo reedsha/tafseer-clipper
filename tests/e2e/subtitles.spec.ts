@@ -546,4 +546,262 @@ test.describe("batched Arabic check", () => {
     await page.getByRole("button", { name: "Review", exact: true }).click();
     await expect(page.getByRole("dialog").getByText("Qur'an 1:1")).toBeVisible();
   });
+
+  test("skips grazed multi-minute segment slivers and builds non-zero cues <= 2 lines", async ({
+    page,
+  }) => {
+    const now = Date.now();
+    await seedProjectFile(page, {
+      schemaVersion: 1,
+      id: "e2e-straddle-lecture",
+      name: "Straddle lecture",
+      sourcePath: null,
+      sourceFileName: "straddle-lecture.mp4",
+      duration: 700,
+      step: 3,
+      transcriptId: "e2e-straddle-transcript",
+      transcript: {
+        language: "th",
+        segments: [
+          {
+            id: 0,
+            start: 0,
+            end: 601.8,
+            text: "การทำความเข้าใจอัลกุรอาน".repeat(140),
+            language: "th",
+          },
+          {
+            id: 1,
+            start: 601.8,
+            end: 620.0,
+            text: THAI.repeat(2),
+            language: "th",
+          },
+        ],
+      },
+      audioPath: null,
+      basePrompt: "",
+      promptPresetId: null,
+      sessionGuide: "",
+      clips: [
+        {
+          id: "straddle-clip",
+          title: "Clip past 10m",
+          rationale: "",
+          start: 601.5,
+          end: 620.0,
+          speechStart: 601.8,
+          speechEnd: 620.0,
+          approved: true,
+          createdAt: now,
+        },
+      ],
+      selectedClipId: "straddle-clip",
+      subtitles: {},
+      export: {
+        resolution: "1080x1920",
+        framing: "blur-fill",
+        useNvenc: true,
+        exportSrt: true,
+        filenameTemplate: "{LectureName}_Clip{01}_{Title}.mp4",
+        outputDir: null,
+      },
+      createdAt: now,
+      updatedAt: now,
+      lastActivityAt: now,
+    });
+
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Straddle lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    const rows = page.locator("[data-cue-row]");
+    await expect(rows.first()).toBeVisible();
+    const count = await rows.count();
+    expect(count).toBeGreaterThanOrEqual(1);
+    for (let i = 0; i < count; i += 1) {
+      await expect(rows.nth(i)).not.toContainText("0:00.00 → 0:00.00");
+      const thaiText = (await rows.nth(i).locator('p[lang="th"]').textContent()) ?? "";
+      expect(thaiText).not.toContain("การทำความเข้าใจอัลกุรอาน");
+      expect(thaiText.split("\n").length).toBeLessThanOrEqual(2);
+    }
+
+    const blocks = page.locator('div[role="button"][aria-label^="Subtitle line "][aria-label*=" to "]');
+    await expect(blocks).toHaveCount(count);
+    for (let i = 0; i < count; i += 1) {
+      const label = await blocks.nth(i).getAttribute("aria-label");
+      const match = label ? /Subtitle line (\d+):(\d+)\.(\d+) to (\d+):(\d+)\.(\d+)/.exec(label) : null;
+      if (!match) throw new Error(`Unexpected cue ribbon label: ${label}`);
+      const start = Number(match[1]) * 60 + Number(match[2]) + Number(match[3]) / 10;
+      const end = Number(match[4]) * 60 + Number(match[5]) + Number(match[6]) / 10;
+      expect(end).toBeGreaterThan(start);
+      expect(start).toBeGreaterThanOrEqual(0.2);
+    }
+  });
+
+  test("auto-heals unreviewed broken sliver tracks on open", async ({ page }) => {
+    const now = Date.now();
+    await seedProjectFile(page, {
+      schemaVersion: 1,
+      id: "e2e-sliver-heal",
+      name: "Broken sliver lecture",
+      sourcePath: null,
+      sourceFileName: "sliver-lecture.mp4",
+      duration: 12,
+      step: 3,
+      transcriptId: "e2e-sliver-transcript",
+      transcript: {
+        language: "th",
+        segments: [
+          { id: 0, start: 0, end: 4, text: THAI, language: "th" },
+          {
+            id: 1,
+            start: 4,
+            end: 8,
+            text: "ความศรัทธาที่มั่นคงย่อมนำพาสู่ความสงบในจิตใจ",
+            language: "th",
+          },
+        ],
+      },
+      audioPath: null,
+      basePrompt: "",
+      promptPresetId: null,
+      sessionGuide: "",
+      clips: [
+        {
+          id: "sliver-clip",
+          title: "Healed clip",
+          rationale: "",
+          start: 0,
+          end: 8,
+          speechStart: 0,
+          speechEnd: 8,
+          approved: true,
+          createdAt: now,
+        },
+      ],
+      selectedClipId: "sliver-clip",
+      subtitles: {
+        "sliver-clip": Array.from({ length: 12 }, (_, index) => ({
+          id: `sliver-${index}`,
+          start: 0,
+          end: 0.05,
+          arabic: "",
+          thai: `ข้อความสั้น ${index}`,
+        })),
+      },
+      export: {
+        resolution: "1080x1920",
+        framing: "blur-fill",
+        useNvenc: true,
+        exportSrt: true,
+        filenameTemplate: "{LectureName}_Clip{01}_{Title}.mp4",
+        outputDir: null,
+      },
+      createdAt: now,
+      updatedAt: now,
+      lastActivityAt: now,
+    });
+
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Broken sliver lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    const rows = page.locator("[data-cue-row]");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).not.toContainText("0:00.00 → 0:00.00");
+    await expect(rows.nth(0)).toContainText(THAI);
+  });
+
+  test("preset dialog Cancel rolls back unsaved style changes", async ({ page }) => {
+    const now = Date.now();
+    await seedProjectFile(page, {
+      schemaVersion: 1,
+      id: "e2e-preset-cancel",
+      name: "Preset cancel lecture",
+      sourcePath: null,
+      sourceFileName: "preset-cancel.mp4",
+      duration: 10,
+      step: 3,
+      transcriptId: "e2e-preset-cancel-transcript",
+      transcript: { language: "th", segments: [{ id: 0, start: 0, end: 4, text: THAI, language: "th" }] },
+      audioPath: null,
+      basePrompt: "",
+      promptPresetId: null,
+      sessionGuide: "",
+      clips: [
+        {
+          id: "preset-clip",
+          title: "Sample clip",
+          rationale: "",
+          start: 0,
+          end: 4,
+          speechStart: 0,
+          speechEnd: 4,
+          approved: true,
+          createdAt: now,
+        },
+      ],
+      selectedClipId: "preset-clip",
+      subtitles: {},
+      export: {
+        resolution: "1080x1920",
+        framing: "blur-fill",
+        useNvenc: true,
+        exportSrt: true,
+        filenameTemplate: "{LectureName}_Clip{01}_{Title}.mp4",
+        outputDir: null,
+      },
+      createdAt: now,
+      updatedAt: now,
+      lastActivityAt: now,
+    });
+
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Preset cancel lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    await page
+      .getByRole("navigation", { name: "Wizard steps" })
+      .getByRole("button", { name: "Step 3 configuration" })
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles configuration" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Edit Studio default" }).click();
+    const dialog = page.locator('[data-slot="dialog-content"]');
+    const slider = dialog.getByRole("slider", { name: "Arabic font size" });
+    const beforeSize = Number(await slider.getAttribute("aria-valuenow"));
+    expect(beforeSize).not.toBe(100);
+
+    await dialog.getByRole("button", { name: "Type an exact value for Arabic font size" }).click();
+    const input = page.getByRole("textbox", { name: "Arabic font size" });
+    await input.fill("100");
+    await input.press("Enter");
+    await expect(slider).toHaveAttribute("aria-valuenow", "100");
+
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toBeHidden();
+
+    const persisted = await page.evaluate(() =>
+      JSON.parse(window.localStorage.getItem("tafseer.settings.v1") ?? "null"),
+    );
+    expect(persisted?.state?.arabic?.fontSize).toBe(beforeSize);
+
+    await page.getByRole("button", { name: "Edit Studio default" }).click();
+    await expect(
+      page.locator('[data-slot="dialog-content"]').getByRole("slider", { name: "Arabic font size" }),
+    ).toHaveAttribute("aria-valuenow", String(beforeSize));
+  });
 });

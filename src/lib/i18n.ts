@@ -254,6 +254,27 @@ const TH_BY_EN: Record<string, string> = {
   "Proposed clips": "คลิปที่เสนอ",
   "No clips proposed yet": "ยังไม่มีคลิปที่เสนอ",
   "Change lecture": "เปลี่ยนไฟล์บรรยาย",
+  "Re-link": "เชื่อมต่อใหม่",
+  "Re-link lecture": "เชื่อมต่อไฟล์ใหม่",
+  "Lecture can't be opened at its saved location.":
+    "ไม่สามารถเปิดไฟล์บรรยายจากตำแหน่งที่บันทึกไว้ได้",
+  "The lecture can't be opened at its saved location. It may be on a disconnected drive.":
+    "ไม่สามารถเปิดไฟล์บรรยายจากตำแหน่งที่บันทึกไว้ได้ อาจอยู่บนไดรฟ์ที่ถอดออก",
+  "The lecture can't be read at its saved location.":
+    "ไม่สามารถอ่านไฟล์บรรยายจากตำแหน่งที่บันทึกไว้ได้",
+  "This format can't be previewed in-app. Trimming and export still work.":
+    "รูปแบบนี้แสดงตัวอย่างในแอปไม่ได้ แต่ยังตัดคลิปและส่งออกได้",
+  "The preview stream was interrupted. Try again.": "สตรีมตัวอย่างถูกขัดจังหวะ ลองอีกครั้ง",
+  "The preview could not load this file.": "ไม่สามารถโหลดตัวอย่างของไฟล์นี้",
+  "Unsupported file": "ไฟล์ไม่รองรับ",
+  "Choose an MP4, MOV or MKV lecture.": "เลือกไฟล์บรรยาย MP4, MOV หรือ MKV",
+  "Re-link needs the desktop app": "การเชื่อมต่อใหม่ต้องใช้แอปเดสก์ท็อป",
+  "Can't read that file": "ไม่สามารถอ่านไฟล์นั้น",
+  "The selected file could not be opened.": "ไม่สามารถเปิดไฟล์ที่เลือกได้",
+  "Different lecture length": "ความยาวไฟล์บรรยายต่างกัน",
+  "This file's length differs from the original. Clips and subtitles may not line up.":
+    "ความยาวไฟล์นี้ต่างจากต้นฉบับ คลิปและคำบรรยายอาจไม่ตรงกัน",
+  "Lecture re-linked": "เชื่อมต่อไฟล์บรรยายใหม่แล้ว",
   "Clip finding failed": "การค้นหาคลิปล้มเหลว",
   "Re-transcribe": "ถอดเสียงใหม่",
   "Looking for more moments…": "กำลังค้นหาช่วงอื่นเพิ่มเติม…",
@@ -384,12 +405,14 @@ const TH_BY_EN: Record<string, string> = {
   "Box opacity": "ความโปร่งใสของกล่อง",
   Bold: "ตัวหนา",
   Color: "สี",
+  "Outline color": "สีขอบ",
+  "Play clip": "เล่นคลิป",
   Presets: "พรีเซ็ต",
   "Show clip": "แสดงคลิป",
   Arabic: "อาหรับ",
   Thai: "ไทย",
   "Max characters per line": "จำนวนตัวอักษรสูงสุดต่อบรรทัด",
-  "Lines per subtitle": "จำนวนบรรทัดต่อซับไตเตيل",
+  "Lines per subtitle": "จำนวนบรรทัดต่อซับไตเติล",
   Two: "สอง",
   One: "หนึ่ง",
   "Verification model": "โมเดลตรวจสอบ",
@@ -565,8 +588,8 @@ const TH_BY_EN: Record<string, string> = {
     "จะลบธีมที่บันทึกไว้ การจัดหนังสือปัจจุบันยังคงอยู่",
 
   // Settings descriptions and field labels
-  "One AI connection for clip finding, Arabic checking and cloud speech-to-text — cloud or on this computer.":
-    "เชื่อมต่อ AI ครั้งเดียวสำหรับค้นหาคลิป ตรวจภาษาอาหรับ และถอดเสียงบนคลาวด์",
+  "One AI connection for clip finding and cloud speech-to-text — cloud or on this computer.":
+    "เชื่อมต่อ AI ครั้งเดียวสำหรับค้นหาคลิปและถอดเสียงบนคลาวด์ หรือบนเครื่องนี้",
   "Small, fast models for yes/no and ranking decisions. They make each step quicker and fall back automatically when they are off.":
     "โมเดลขนาดเล็กที่ตัดสินใจเร็วสำหรับคำตอบใช่/ไม่ใช่และการจัดลำดับ ทำให้แต่ละขั้นตอนเร็วขึ้นและสำรองอัตโนมัติเมื่อปิด",
   "Optional hardware acceleration. Everything falls back to the CPU automatically.":

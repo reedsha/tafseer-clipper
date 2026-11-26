@@ -1185,9 +1185,11 @@ def run_http_checks(
             "POST /verify-arabic: an exact Qur'an verse passes the offline corpus gate",
             gated.status_code == 200
             and gated_body.get("source") == "quran"
-            and gated_body.get("reference") == "1:1",
+            and gated_body.get("reference") == "1:1"
+            and isinstance(gated_body.get("confidence"), (int, float))
+            and gated_body["confidence"] >= 0.9,
             f"{gated.status_code} source={gated_body.get('source')} "
-            f"reference={gated_body.get('reference')}",
+            f"reference={gated_body.get('reference')} conf={gated_body.get('confidence')}",
         )
 
         # ---- 5. /discover-clips contract ----------------------------------- #
@@ -1771,6 +1773,112 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         "transcriber: a gateway 400 points at the model/account, not at OpenAI routes",
         "AI Gateway" in str(gateway_error) and "transcription model" in str(gateway_error),
         str(gateway_error)[:120],
+    )
+
+    long_gateway_text = " ".join(f"ประโยคทดสอบยาวลำดับที่ {i}." for i in range(40))
+    gw_split, gw_split_dur = transcriber._segments_from_gateway_payload(
+        {"text": long_gateway_text, "durationInSeconds": 120.0},
+        offset=60.0,
+    )
+    check(
+        "transcriber: gateway long plain text without segments splits proportionally",
+        len(gw_split) > 1
+        and gw_split[0].start == 60.0
+        and abs(gw_split[-1].end - 180.0) < 0.01
+        and gw_split_dur == 120.0
+        and all(seg.end > seg.start for seg in gw_split)
+        and all(
+            gw_split[i].end <= gw_split[i + 1].start + 1e-9
+            for i in range(len(gw_split) - 1)
+        ),
+        f"count={len(gw_split)} start={gw_split[0].start:.2f} end={gw_split[-1].end:.2f}",
+    )
+
+    oversized_text = " ".join(f"เนื้อหาช่วงยาวคำบรรยายส่วนที่ {i}." for i in range(45))
+    cloud_over, _ = transcriber._segments_from_cloud_payload(
+        {
+            "language": "th",
+            "duration": 120.0,
+            "segments": [{"start": 0.0, "end": 120.0, "text": oversized_text}],
+        },
+        duration_hint=120.0,
+    )
+    gw_over, _ = transcriber._segments_from_gateway_payload(
+        {
+            "language": "th",
+            "durationInSeconds": 120.0,
+            "segments": [{"startSecond": 0.0, "endSecond": 120.0, "text": oversized_text}],
+        },
+        duration_hint=120.0,
+    )
+    check(
+        "transcriber: oversized cloud and gateway segments split into shorter sub-segments",
+        len(cloud_over) > 1
+        and len(gw_over) > 1
+        and cloud_over[0].start == 0.0
+        and abs(cloud_over[-1].end - 120.0) < 0.01
+        and abs(gw_over[-1].end - 120.0) < 0.01
+        and all(seg.end > seg.start for seg in [*cloud_over, *gw_over]),
+        f"cloud={len(cloud_over)} gateway={len(gw_over)}",
+    )
+
+    zero_ts_segs, zero_ts_dur = transcriber._segments_from_cloud_payload(
+        {
+            "language": "th",
+            "segments": [
+                {"start": 0.0, "end": 0.0, "text": "ท่อนแรกของการบรรยาย"},
+                {"start": 0.0, "end": 0.0, "text": "ท่อนที่สองของการบรรยายที่ยาวกว่าเล็กน้อย"},
+            ],
+        },
+        duration_hint=40.0,
+    )
+    check(
+        "transcriber: zeroed cloud timestamps distribute proportionally across duration",
+        len(zero_ts_segs) == 2
+        and zero_ts_segs[0].start == 0.0
+        and abs(zero_ts_segs[-1].end - 40.0) < 0.01
+        and all(seg.end > seg.start for seg in zero_ts_segs)
+        and zero_ts_segs[0].end <= zero_ts_segs[1].start + 1e-9
+        and zero_ts_dur == 40.0,
+        f"times={[(round(s.start, 2), round(s.end, 2)) for s in zero_ts_segs]}",
+    )
+
+    canon_1_1 = quran.match_span("بسم الله الرحمن الرحيم").matched_canonical
+    wrapped_out, _ = verify_service.verify_line_sync(
+        verify_service.VerifyLine(
+            arabic_text=canon_1_1.replace(" ", "\n", 1),
+            context_thai="",
+            cue_id="wrap-1-1",
+        )
+    )
+    short_out, _ = verify_service.verify_line_sync(
+        verify_service.VerifyLine(
+            arabic_text="الله الصمد",
+            context_thai="",
+            cue_id="short-112-2",
+        )
+    )
+    surr_out, _ = verify_service.verify_line_sync(
+        verify_service.VerifyLine(
+            arabic_text="قال تعالى بسم الله الرحمن الرحيم ثم شرح الشيخ",
+            context_thai="",
+            cue_id="surr-1-1",
+        )
+    )
+    check(
+        "verify: wrapped canonical verse is clean, 2-word verse matches, and surrounding text survives",
+        wrapped_out.source == "quran"
+        and wrapped_out.reference == "1:1"
+        and wrapped_out.correction_applied is False
+        and short_out.source == "quran"
+        and short_out.reference == "112:2"
+        and short_out.confidence == 1.0
+        and surr_out.source == "quran"
+        and surr_out.reference == "1:1"
+        and surr_out.verified_text.startswith("قال تعالى")
+        and surr_out.verified_text.endswith("ثم شرح الشيخ"),
+        f"wrap_corr={wrapped_out.correction_applied} short={short_out.reference}@{short_out.confidence} "
+        f"surr={surr_out.verified_text!r}",
     )
     # ---- accel: the CUDA probe must be honest in BOTH directions ----------- #
     # Too permissive = the original bug (claiming a CUDA runtime that is not
