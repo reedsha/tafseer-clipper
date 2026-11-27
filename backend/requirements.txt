@@ -19,7 +19,7 @@ fonttools==4.68.0
 # to be declared here - otherwise the suite fails with ModuleNotFoundError on
 # a clean CI runner.
 pillow==13.0.0
-numpy==2.5.3
+numpy==2.5.5
 
 # --- Local AI (optional GPU acceleration) ---------------------------------- #
 # Optional: cloud-only setups can skip this. GPU transcription is optional -
