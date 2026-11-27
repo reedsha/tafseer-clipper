@@ -18,6 +18,7 @@ import {
   Info,
   Loader2,
   Pencil,
+  Scissors,
 } from "lucide-react";
 import { cn } from "cn";
 
@@ -55,8 +56,20 @@ import {
   openLectureFile,
   subscribeNativeDrops,
 } from "@/lib/media";
-import { recordSourceSize } from "@/lib/sourceLink";
-import { type TranscriptData } from "@/lib/projectTypes";
+import {
+  isFullVideoClip,
+  MIN_RENDERABLE_CLIP_SECONDS,
+  resolutionForDimensions,
+} from "@/lib/clipMath";
+import { recordSourceMetadata } from "@/lib/sourceLink";
+import {
+  FRAMING_LABELS,
+  isSubtitleOnlyProject,
+  type FramingMode,
+  type ProjectMode,
+  type Resolution,
+  type TranscriptData,
+} from "@/lib/projectTypes";
 import { saveTextFile } from "@/lib/projectFile";
 import {
   buildDecisionProviderFor,
@@ -74,9 +87,17 @@ import { useUiStore } from "@/store/uiStore";
 /* Step 1                                                                      */
 /* -------------------------------------------------------------------------- */
 
+const SHORT_CLIP_HINT_SECONDS = 180;
+const LONG_LECTURE_HINT_SECONDS = 900;
+
 export function Step1Ingest() {
   const project = useProjectStore((state) => state.project);
   const setStep = useProjectStore((state) => state.setStep);
+  const setProjectMode = useProjectStore((state) => state.setProjectMode);
+  const applyExportDefaults = useProjectStore((state) => state.applyExportDefaults);
+
+  const mode: ProjectMode = project?.mode ?? "lecture";
+  const subtitleOnly = mode === "subtitle-only";
 
   const transcriptionMode = useSettingsStore((state) => state.transcriptionMode);
   const setTranscriptionMode = useSettingsStore((state) => state.setTranscriptionMode);
@@ -99,6 +120,7 @@ export function Step1Ingest() {
   const [browserFile, setBrowserFile] = useState<{ name: string; size: number } | null>(null);
   const [promptOpen, setPromptOpen] = useState(false);
   const [pendingReplace, setPendingReplace] = useState<{ path: string; name: string } | null>(null);
+  const [pendingSubtitleOnlySwitch, setPendingSubtitleOnlySwitch] = useState(false);
   const [elapsed, setElapsed] = useState(0);
 
   // The job lives in `jobStore`, so switching steps (or sessions) never aborts
@@ -108,18 +130,49 @@ export function Step1Ingest() {
   const error = transcribeJob?.status === "error" ? transcribeJob.error : null;
 
   const busyRef = useRef(false);
+  const manualResolutionProjectIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     busyRef.current = busy;
   }, [busy]);
 
-  // A project switch must not leave another session's staged browser file on
-  // screen. The running job is untouched; its result is routed to the project
-  // that started it by `jobStore`.
+  // A project switch must not leave another session's staged browser file or
+  // manual-aspect-ratio lock on screen. The running job is untouched; its
+  // result is routed to the project that started it by `jobStore`.
   useEffect(() => {
+    manualResolutionProjectIdRef.current = null;
     const current = useProjectStore.getState().project;
     if (current?.sourcePath || current?.transcript) setBrowserFile(null);
-  }, [project?.id]);
+  }, [project?.id, project?.sourcePath]);
+
+  const shouldAutoMatchResolution = useCallback(
+    () => manualResolutionProjectIdRef.current !== useProjectStore.getState().project?.id,
+    [],
+  );
+
+  const requestModeChange = useCallback(
+    (nextMode: ProjectMode) => {
+      if (busyRef.current || nextMode === mode) return;
+      const current = useProjectStore.getState().project;
+      if (!current) return;
+      if (
+        nextMode === "subtitle-only" &&
+        current.clips.length > 0 &&
+        !(
+          current.clips.length === 1 &&
+          current.clips[0].approved &&
+          isFullVideoClip(current.clips[0], current.duration)
+        )
+      ) {
+        setPendingSubtitleOnlySwitch(true);
+        return;
+      }
+      setProjectMode(nextMode, {
+        autoMatchResolution: manualResolutionProjectIdRef.current !== current.id,
+      });
+    },
+    [mode, setProjectMode],
+  );
 
   useEffect(() => {
     if (!busy || !transcribeJob) {
@@ -151,12 +204,16 @@ export function Step1Ingest() {
   const stagePath = useCallback((path: string, displayName?: string) => {
     if (busyRef.current) return;
     const sourceFileName = displayName?.trim() || path.split(/[\\/]/).pop() || path;
+    const current = useProjectStore.getState().project;
     if (!hasLectureExtension(sourceFileName) && !hasLectureExtension(path)) {
-      toast.error("Unsupported file", { description: "Choose an MP4, MOV or MKV lecture." });
+      toast.error("Unsupported file", {
+        description: isSubtitleOnlyProject(current)
+          ? "Choose an MP4, MOV or MKV video."
+          : "Choose an MP4, MOV or MKV lecture.",
+      });
       return;
     }
 
-    const current = useProjectStore.getState().project;
     if (current && (current.transcript || current.clips.length > 0)) {
       setPendingReplace({ path, name: sourceFileName });
       return;
@@ -168,6 +225,8 @@ export function Step1Ingest() {
         sourcePath: path,
         sourceFileName,
         name,
+        sourceWidth: null,
+        sourceHeight: null,
         audioPath: null,
         transcriptId: null,
         transcript: null,
@@ -181,10 +240,11 @@ export function Step1Ingest() {
     } else {
       useProjectStore.getState().createProject({ sourcePath: path, sourceFileName, name });
     }
-    recordSourceSize(path);
+    manualResolutionProjectIdRef.current = null;
+    recordSourceMetadata(path, { shouldAutoMatchResolution });
     setBrowserFile(null);
     toast.success("Session ready", { description: sourceFileName });
-  }, []);
+  }, [shouldAutoMatchResolution]);
 
   const handleBrowserFile = useCallback(
     (file: File) => {
@@ -324,6 +384,7 @@ export function Step1Ingest() {
     if (!pending) return;
     const previous = useProjectStore.getState().project;
     useProjectStore.getState().createProject({
+      mode: previous?.mode,
       sourcePath: pending.path,
       sourceFileName: pending.name,
       name: stripExtension(pending.name),
@@ -335,6 +396,8 @@ export function Step1Ingest() {
         sessionGuide: previous.sessionGuide,
       });
     }
+    manualResolutionProjectIdRef.current = null;
+    recordSourceMetadata(pending.path, { shouldAutoMatchResolution });
     setBrowserFile(null);
     toast.success("New session ready", { description: pending.name });
   }
@@ -383,7 +446,7 @@ export function Step1Ingest() {
     useJobStore.getState().startTask({
       kind: "transcribe",
       projectId,
-      label: "Transcribing lecture",
+      label: subtitleOnly ? "Transcribing clip" : "Transcribing lecture",
       run: async (signal, hooks) => {
         const activityId = useAiActivityStore.getState().start({
           ...route,
@@ -459,6 +522,24 @@ export function Step1Ingest() {
       },
       onSuccess: (payload) => {
         if (payload?.kind !== "transcribe") return;
+        const target = useProjectStore.getState().project;
+        const targetSubtitleOnly =
+          target?.id === projectId ? isSubtitleOnlyProject(target) : subtitleOnly;
+        if (targetSubtitleOnly) {
+          if (
+            typeof payload.duration === "number" &&
+            payload.duration < MIN_RENDERABLE_CLIP_SECONDS
+          ) {
+            toast.error("Video is too short", {
+              description: "Clips must be at least 0.5 seconds long to export.",
+            });
+            return;
+          }
+          toast.success("Clip ready for subtitles", {
+            description: `${formatClock(payload.duration ?? 0)} transcribed`,
+          });
+          return;
+        }
         toast.success("Transcript ready", {
           description: `${formatClock(payload.duration ?? 0)} of speech transcribed`,
         });
@@ -512,19 +593,35 @@ export function Step1Ingest() {
   );
   const displayName = browserFile?.name ?? project?.sourceFileName ?? null;
   const dropTitle = dragging
-    ? t("step1.drop.dragging")
+    ? t(subtitleOnly ? "step1.clip.drop.dragging" : "step1.drop.dragging")
     : hasSource
       ? project?.transcript
-        ? t("step1.drop.transcriptReady")
-        : t("step1.drop.selected")
-      : t("step1.drop.default");
+        ? t(subtitleOnly ? "step1.clip.drop.transcriptReady" : "step1.drop.transcriptReady")
+        : t(subtitleOnly ? "step1.clip.drop.selected" : "step1.drop.selected")
+      : t(subtitleOnly ? "step1.clip.drop.default" : "step1.drop.default");
   const dropDescription = dragging
-    ? t("step1.drop.hintDragging")
+    ? t(subtitleOnly ? "step1.clip.drop.hintDragging" : "step1.drop.hintDragging")
     : hasSource
       ? project?.transcript
-        ? t("step1.drop.hintTranscript")
-        : t("step1.drop.hintSelected")
-      : t("step1.drop.hintDefault");
+        ? t(subtitleOnly ? "step1.clip.drop.hintTranscript" : "step1.drop.hintTranscript")
+        : t(subtitleOnly ? "step1.clip.drop.hintSelected" : "step1.drop.hintSelected")
+      : t(subtitleOnly ? "step1.clip.drop.hintDefault" : "step1.drop.hintDefault");
+
+  const resolution: Resolution = project?.export.resolution ?? "1080x1920";
+  const framing: FramingMode = project?.export.framing ?? "blur-fill";
+  const detectedResolution = resolutionForDimensions(
+    project?.sourceWidth,
+    project?.sourceHeight,
+  );
+  const hasValidSubtitleOnlyClip = Boolean(
+    project?.clips.some((clip) => clip.approved),
+  );
+  const tooShortForSubtitleOnly = Boolean(
+    subtitleOnly &&
+      project?.duration !== null &&
+      project?.duration !== undefined &&
+      project.duration < MIN_RENDERABLE_CLIP_SECONDS,
+  );
 
   return (
     <>
@@ -535,9 +632,11 @@ export function Step1Ingest() {
               <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
                 {t("step1.eyebrow")}
               </p>
-              <h1 className="text-lg font-medium text-foreground">{t("step1.title")}</h1>
+              <h1 className="text-lg font-medium text-foreground">
+                {subtitleOnly ? t("step1.clip.title") : t("step1.title")}
+              </h1>
               <p className="max-w-prose text-sm leading-relaxed text-muted-foreground">
-                {t("step1.subtitle")}
+                {subtitleOnly ? t("step1.clip.subtitle") : t("step1.subtitle")}
               </p>
             </div>
             {project ? (
@@ -547,12 +646,78 @@ export function Step1Ingest() {
             ) : null}
           </header>
 
+          <section
+            role="radiogroup"
+            aria-label={L("Workflow mode")}
+            className="grid gap-3 sm:grid-cols-2"
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked={!subtitleOnly}
+              disabled={busy}
+              onClick={() => requestModeChange("lecture")}
+              className={cn(
+                "flex items-start gap-3 rounded-lg border px-4 py-3 text-left outline-none transition-colors",
+                "focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30",
+                !subtitleOnly
+                  ? "border-ring/50 bg-accent/25"
+                  : "border-border bg-card/40 hover:border-border/80 hover:bg-card/60",
+                busy && "pointer-events-none opacity-60",
+              )}
+            >
+              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md border border-border bg-secondary/60">
+                <Scissors className="size-4 text-foreground/80" />
+              </div>
+              <div className="min-w-0 flex-1 space-y-0.5">
+                <p className="text-xs font-medium text-foreground">
+                  {t("step1.mode.lecture.title")}
+                </p>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  {t("step1.mode.lecture.description")}
+                </p>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              role="radio"
+              aria-checked={subtitleOnly}
+              disabled={busy}
+              onClick={() => requestModeChange("subtitle-only")}
+              className={cn(
+                "flex items-start gap-3 rounded-lg border px-4 py-3 text-left outline-none transition-colors",
+                "focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30",
+                subtitleOnly
+                  ? "border-ring/50 bg-accent/25"
+                  : "border-border bg-card/40 hover:border-border/80 hover:bg-card/60",
+                busy && "pointer-events-none opacity-60",
+              )}
+            >
+              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md border border-border bg-secondary/60">
+                <Captions className="size-4 text-foreground/80" />
+              </div>
+              <div className="min-w-0 flex-1 space-y-0.5">
+                <p className="text-xs font-medium text-foreground">
+                  {t("step1.mode.subtitleOnly.title")}
+                </p>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  {t("step1.mode.subtitleOnly.description")}
+                </p>
+              </div>
+            </button>
+          </section>
+
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1.25fr)_minmax(330px,0.75fr)]">
             <div className="space-y-4">
               <section
                 role="button"
                 tabIndex={busy ? -1 : 0}
-                aria-label="Drop a lecture video or browse"
+                aria-label={
+                  subtitleOnly
+                    ? "Drop a clip video or browse"
+                    : "Drop a lecture video or browse"
+                }
                 aria-disabled={busy}
                 onClick={() => void handleBrowse()}
                 onKeyDown={handleDropzoneKeyDown}
@@ -646,6 +811,49 @@ export function Step1Ingest() {
                 ) : null}
               </section>
 
+              {!busy && project?.duration !== null && project?.duration !== undefined ? (
+                tooShortForSubtitleOnly ? (
+                  <InlineError title={L("Video is too short to export")}>
+                    {L("Clips must be at least 0.5 seconds long. Choose a longer video.")}
+                  </InlineError>
+                ) : !subtitleOnly &&
+                  project.duration >= MIN_RENDERABLE_CLIP_SECONDS &&
+                  project.duration <= SHORT_CLIP_HINT_SECONDS ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card/40 px-3.5 py-2.5">
+                    <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Info className="size-3.5 shrink-0" />
+                      <span>
+                        Short video ({formatClock(project.duration)}) — already clipped?
+                      </span>
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      onClick={() => requestModeChange("subtitle-only")}
+                    >
+                      {L("Switch to Subtitles only")}
+                    </Button>
+                  </div>
+                ) : subtitleOnly && project.duration >= LONG_LECTURE_HINT_SECONDS ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card/40 px-3.5 py-2.5">
+                    <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Info className="size-3.5 shrink-0" />
+                      <span>
+                        Long video ({formatClock(project.duration)}) — subtitling the whole file at
+                        once can take a while.
+                      </span>
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      onClick={() => requestModeChange("lecture")}
+                    >
+                      {L("Switch to Find clips")}
+                    </Button>
+                  </div>
+                ) : null
+              ) : null}
+
               {project?.transcript ? (
                 <section className="rounded-lg border border-border bg-card/40 p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -663,33 +871,50 @@ export function Step1Ingest() {
                       </p>
                     </div>
                     <Badge variant="outline" className="shrink-0">
-                      Step 2 next
+                      {subtitleOnly
+                        ? hasValidSubtitleOnlyClip
+                          ? L("Step 3 next")
+                          : L("Too short")
+                        : "Step 2 next"}
                     </Badge>
                   </div>
                   <Separator className="my-3" />
                   <div className="flex flex-wrap items-center gap-2">
-                    <Button size="sm" className="gap-1.5" onClick={() => setStep(2)}>
-                      {t("step1.transcript.continue")}
-                      <ChevronRight className="size-3.5" />
-                    </Button>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="gap-1.5"
-                          onClick={() => void handleExportBrief()}
-                        >
-                          <FileDown className="size-3.5" />
-                          {t("step1.transcript.exportAi")}
+                    {subtitleOnly ? (
+                      hasValidSubtitleOnlyClip ? (
+                        <Button size="sm" className="gap-1.5" onClick={() => setStep(3)}>
+                          {t("step1.clip.transcript.continue")}
+                          <ChevronRight className="size-3.5" />
                         </Button>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom" className="text-xs">
-                        {t("step1.transcript.exportAiHint")}
-                      </TooltipContent>
-                    </Tooltip>
+                      ) : null
+                    ) : (
+                      <>
+                        <Button size="sm" className="gap-1.5" onClick={() => setStep(2)}>
+                          {t("step1.transcript.continue")}
+                          <ChevronRight className="size-3.5" />
+                        </Button>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="gap-1.5"
+                              onClick={() => void handleExportBrief()}
+                            >
+                              <FileDown className="size-3.5" />
+                              {t("step1.transcript.exportAi")}
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent side="bottom" className="text-xs">
+                            {t("step1.transcript.exportAiHint")}
+                          </TooltipContent>
+                        </Tooltip>
+                      </>
+                    )}
                     <Button variant="ghost" size="sm" onClick={() => void handleBrowse()}>
-                      {t("step1.transcript.replace")}
+                      {subtitleOnly
+                        ? t("step1.clip.transcript.replace")
+                        : t("step1.transcript.replace")}
                     </Button>
                   </div>
                 </section>
@@ -758,7 +983,9 @@ export function Step1Ingest() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="space-y-0.5">
                       <h2 className="text-[13px] font-medium text-foreground">
-                        {t("step1.transcribe.title")}
+                        {subtitleOnly
+                          ? t("step1.clip.transcribe.title")
+                          : t("step1.transcribe.title")}
                       </h2>
                       <p className="text-xs leading-relaxed text-muted-foreground">
                         {t("step1.transcribe.description")}
@@ -847,15 +1074,22 @@ export function Step1Ingest() {
                   <Button
                     size="lg"
                     className="mt-3 w-full gap-2"
-                    disabled={!project?.sourcePath || busy || Boolean(browserFile)}
+                    disabled={
+                      !project?.sourcePath ||
+                      busy ||
+                      Boolean(browserFile) ||
+                      tooShortForSubtitleOnly
+                    }
                     onClick={() => void handleTranscribe()}
                   >
                     <Captions className="size-4" />
-                    {t("step1.transcribe.cta")}
+                    {subtitleOnly ? t("step1.clip.transcribe.cta") : t("step1.transcribe.cta")}
                   </Button>
                   {!project?.sourcePath ? (
                     <p className="mt-1.5 text-[10px] text-muted-foreground">
-                      {t("step1.transcribe.chooseFirst")}
+                      {subtitleOnly
+                        ? t("step1.clip.transcribe.chooseFirst")
+                        : t("step1.transcribe.chooseFirst")}
                     </p>
                   ) : null}
                 </section>
@@ -867,25 +1101,93 @@ export function Step1Ingest() {
             </div>
 
             <aside className="space-y-4">
-              <section className="rounded-lg border border-border bg-card/40 p-4">
-                <div className="space-y-0.5">
-                  <h2 className="text-[13px] font-medium text-foreground">
-                    {t("step1.brief.title")}
-                  </h2>
-                  <p className="text-xs leading-relaxed text-muted-foreground">
-                    {t("step1.brief.description")}
-                  </p>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="mt-2 w-full justify-start gap-1.5"
-                  onClick={() => setPromptOpen(true)}
-                >
-                  <Pencil className="size-3.5" />
-                  {L("Clip brief & system prompt")}
-                </Button>
-              </section>
+              {subtitleOnly ? (
+                <section className="space-y-3 rounded-lg border border-border bg-card/40 p-4">
+                  <div className="space-y-0.5">
+                    <h2 className="text-[13px] font-medium text-foreground">
+                      {L("Output frame")}
+                    </h2>
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      {project?.sourceWidth && project?.sourceHeight && detectedResolution
+                        ? `Detected ${project.sourceWidth}×${project.sourceHeight} (${
+                            detectedResolution === "1920x1080" ? "16:9" : "9:16"
+                          }). Auto-matched — you can still choose 9:16 or 16:9 here or in Subtitles.`
+                        : L(
+                            "Matches your clip's orientation automatically when loaded. You can still choose 9:16 or 16:9 anytime.",
+                          )}
+                    </p>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                      {L("Aspect ratio")}
+                    </p>
+                    <SegmentedToggle<Resolution>
+                      label={L("Aspect ratio")}
+                      value={resolution}
+                      disabled={busy}
+                      options={[
+                        { value: "1080x1920", label: L("9:16 Vertical"), hint: "1080 × 1920" },
+                        { value: "1920x1080", label: L("16:9 Widescreen"), hint: "1920 × 1080" },
+                      ]}
+                      onChange={(value) => {
+                        manualResolutionProjectIdRef.current = project?.id ?? null;
+                        applyExportDefaults({ resolution: value });
+                      }}
+                    />
+                  </div>
+
+                  {resolution === "1080x1920" ? (
+                    <div className="space-y-1.5">
+                      <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                        {L("Framing mode")}
+                      </p>
+                      <SegmentedToggle<FramingMode>
+                        label={L("Framing mode")}
+                        value={framing}
+                        disabled={busy}
+                        options={[
+                          {
+                            value: "blur-fill",
+                            label: FRAMING_LABELS["blur-fill"],
+                            hint: "Keeps the frame visible inside blurred bars",
+                          },
+                          {
+                            value: "center-crop",
+                            label: FRAMING_LABELS["center-crop"],
+                            hint: "Crops to fill the frame",
+                          },
+                        ]}
+                        onChange={(value) => applyExportDefaults({ framing: value })}
+                      />
+                    </div>
+                  ) : (
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      {L("16:9 uses the whole frame.")}
+                    </p>
+                  )}
+                </section>
+              ) : (
+                <section className="rounded-lg border border-border bg-card/40 p-4">
+                  <div className="space-y-0.5">
+                    <h2 className="text-[13px] font-medium text-foreground">
+                      {t("step1.brief.title")}
+                    </h2>
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      {t("step1.brief.description")}
+                    </p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="mt-2 w-full justify-start gap-1.5"
+                    onClick={() => setPromptOpen(true)}
+                  >
+                    <Pencil className="size-3.5" />
+                    {L("Clip brief & system prompt")}
+                  </Button>
+                </section>
+              )}
             </aside>
           </div>
 
@@ -918,6 +1220,44 @@ export function Step1Ingest() {
             </Button>
             <Button size="sm" onClick={handleReplaceConfirm}>
               Replace lecture
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pendingSubtitleOnlySwitch}
+        onOpenChange={setPendingSubtitleOnlySwitch}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{L("Switch to Subtitles only?")}</DialogTitle>
+            <DialogDescription>
+              {`This session already has ${project?.clips.length ?? 0} clip${
+                project?.clips.length === 1 ? "" : "s"
+              }. Switching to Subtitles only replaces them with one full-length clip from the transcript.`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPendingSubtitleOnlySwitch(false)}
+            >
+              {L("Cancel")}
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                setPendingSubtitleOnlySwitch(false);
+                setProjectMode("subtitle-only", {
+                  replaceClips: true,
+                  autoMatchResolution:
+                    manualResolutionProjectIdRef.current !== project?.id,
+                });
+              }}
+            >
+              {L("Switch to Subtitles only")}
             </Button>
           </DialogFooter>
         </DialogContent>

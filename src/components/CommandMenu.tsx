@@ -29,7 +29,7 @@ import {
 } from "@/components/ui/command";
 import { describeAcceleration, isGpuEncodingAvailable } from "@/lib/acceleration";
 import { openProjectFile, saveProjectFile, suggestProjectFileName } from "@/lib/projectFile";
-import { STEP_LABELS, type Resolution, type WizardStep } from "@/lib/projectTypes";
+import { isSubtitleOnlyProject, STEP_LABELS, type Resolution, type WizardStep } from "@/lib/projectTypes";
 import { useProjectStore } from "@/store/projectStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useUiStore, type SettingsSection } from "@/store/uiStore";
@@ -162,6 +162,7 @@ export function CommandMenu() {
   const exportSrt = project?.export.exportSrt ?? editor.exportSrt;
   const aspectTarget = resolution === "1080x1920" ? "16:9" : "9:16";
   const nextResolution: Resolution = resolution === "1080x1920" ? "1920x1080" : "1080x1920";
+  const subtitleOnly = isSubtitleOnlyProject(project);
 
   /** Persist a default *and* apply it to the open project (no sync-back). */
   const setExportDefault = (patch: {
@@ -191,6 +192,9 @@ export function CommandMenu() {
                 {step}
               </span>
               {STEP_LABELS[step]}
+              {step === 2 && subtitleOnly ? (
+                <span className="ml-auto text-[10px] text-muted-foreground">Skipped</span>
+              ) : null}
             </CommandItem>
           ))}
         </CommandGroup>
@@ -243,7 +247,7 @@ export function CommandMenu() {
             <CommandItem
               key={`config-${step}`}
               value={`configuration ${step} ${STEP_LABELS[step]}`}
-              disabled={!project && step !== 1}
+              disabled={(!project && step !== 1) || (step === 2 && subtitleOnly)}
               onSelect={() => run(() => openConfig(step))}
             >
               <Settings2 />

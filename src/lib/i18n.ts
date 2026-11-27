@@ -23,6 +23,15 @@ const EN = {
   "step1.title": "Add your lecture",
   "step1.subtitle":
     "Drop a long-form Tafseer lecture. We'll transcribe the Thai–Arabic audio and find clip-worthy moments for you.",
+  "step1.clip.title": "Add your clip",
+  "step1.clip.subtitle":
+    "Drop a pre-clipped video. We'll transcribe the Thai–Arabic speech and take you straight to Subtitles.",
+
+  "step1.mode.lecture.title": "Find clips & subtitle",
+  "step1.mode.lecture.description": "Long lecture — pick clips, then add subtitles.",
+  "step1.mode.subtitleOnly.title": "Subtitles only",
+  "step1.mode.subtitleOnly.description":
+    "Video is already clipped — transcribe and go straight to subtitles.",
 
   "step1.drop.dragging": "Release to load the lecture",
   "step1.drop.selected": "Lecture selected",
@@ -34,12 +43,24 @@ const EN = {
     "The transcript is saved in this project. Continue to clip discovery, or replace the lecture.",
   "step1.drop.hintDefault":
     "MP4, MOV or MKV. Long-form Tafseer lectures are expected; audio stays on this machine.",
+  "step1.clip.drop.dragging": "Release to load the clip",
+  "step1.clip.drop.selected": "Clip selected",
+  "step1.clip.drop.transcriptReady": "Clip ready for subtitles",
+  "step1.clip.drop.default": "Drop your clip here",
+  "step1.clip.drop.hintDragging": "MP4, MOV or MKV",
+  "step1.clip.drop.hintSelected": "Ready for transcription. Drop another file to replace it.",
+  "step1.clip.drop.hintTranscript":
+    "The transcript is saved in this project. Continue to Subtitles, or replace the clip.",
+  "step1.clip.drop.hintDefault":
+    "MP4, MOV or MKV. Pre-clipped video expected; audio stays on this machine.",
   "step1.browse": "Browse files",
   "step1.change": "Change",
 
   "step1.transcript.title": "Transcript ready",
   "step1.transcript.continue": "Continue to clip discovery",
   "step1.transcript.replace": "Replace lecture",
+  "step1.clip.transcript.continue": "Continue to subtitles",
+  "step1.clip.transcript.replace": "Replace clip",
   "step1.transcript.exportAi": "Export for AI chat",
   "step1.transcript.exportAiHint":
     "Ask any chat AI to pick the clips, then import the result in Step 2.",
@@ -54,6 +75,9 @@ const EN = {
     "We pull out the audio and transcribe the Thai–Arabic speech. Your glossary is applied to the transcript afterwards.",
   "step1.transcribe.cta": "Transcribe lecture & find clips",
   "step1.transcribe.chooseFirst": "Choose a lecture file first.",
+  "step1.clip.transcribe.title": "Transcribe the clip",
+  "step1.clip.transcribe.cta": "Transcribe & open subtitles",
+  "step1.clip.transcribe.chooseFirst": "Choose a clip file first.",
   "step1.transcribe.downloadNote":
     "The first transcription on this computer downloads about 1.5 GB of AI files.",
 
@@ -113,6 +137,15 @@ const TH: Partial<Record<MessageKey, string>> = {
   "step1.title": "เพิ่มบทบรรยายของคุณ",
   "step1.subtitle":
     "ลากไฟล์บรรยายตัฟซีรแบบยาวมาวางที่นี่ เราจะถอดเสียงภาษาไทย–อาหรับและค้นหาช่วงที่น่าสนใจให้คุณ",
+  "step1.clip.title": "เพิ่มคลิปของคุณ",
+  "step1.clip.subtitle":
+    "วางคลิปที่ตัดมาแล้ว เราจะถอดเสียงภาษาไทย–อาหรับและพาคุณไปทำซับไตเติลทันที",
+
+  "step1.mode.lecture.title": "ตัดคลิปและทำซับ",
+  "step1.mode.lecture.description": "ไฟล์บรรยายยาว — เลือกช่วงคลิป แล้วค่อยทำซับไตเติล",
+  "step1.mode.subtitleOnly.title": "ทำซับอย่างเดียว",
+  "step1.mode.subtitleOnly.description":
+    "คลิปที่ตัดมาแล้ว — ถอดเสียงและไปทำซับไตเติลทันที",
 
   "step1.drop.dragging": "ปล่อยเพื่อโหลดไฟล์บรรยาย",
   "step1.drop.selected": "เลือกไฟล์บรรยายแล้ว",
@@ -124,12 +157,24 @@ const TH: Partial<Record<MessageKey, string>> = {
     "ข้อความถอดเสียงถูกบันทึกในโปรเจกต์นี้แล้ว ไปค้นหาคลิปต่อ หรือแทนที่ไฟล์บรรยาย",
   "step1.drop.hintDefault":
     "MP4, MOV หรือ MKV รองรับไฟล์บรรยายตัฟซีรแบบยาว เสียงอยู่ในเครื่องนี้เท่านั้น",
+  "step1.clip.drop.dragging": "ปล่อยเพื่อโหลดคลิป",
+  "step1.clip.drop.selected": "เลือกคลิปแล้ว",
+  "step1.clip.drop.transcriptReady": "คลิปพร้อมทำซับแล้ว",
+  "step1.clip.drop.default": "วางคลิปของคุณที่นี่",
+  "step1.clip.drop.hintDragging": "MP4, MOV หรือ MKV",
+  "step1.clip.drop.hintSelected": "พร้อมถอดเสียงแล้ว วางไฟล์อื่นเพื่อแทนที่",
+  "step1.clip.drop.hintTranscript":
+    "ข้อความถอดเสียงถูกบันทึกในโปรเจกต์นี้แล้ว ไปทำซับไตเติลต่อ หรือแทนที่คลิป",
+  "step1.clip.drop.hintDefault":
+    "MP4, MOV หรือ MKV สำหรับคลิปที่ตัดมาแล้ว เสียงอยู่ในเครื่องนี้เท่านั้น",
   "step1.browse": "เลือกไฟล์",
   "step1.change": "เปลี่ยน",
 
   "step1.transcript.title": "ข้อความถอดเสียงพร้อมแล้ว",
   "step1.transcript.continue": "ไปค้นหาคลิปต่อ",
   "step1.transcript.replace": "แทนที่ไฟล์บรรยาย",
+  "step1.clip.transcript.continue": "ไปทำซับไตเติลต่อ",
+  "step1.clip.transcript.replace": "แทนที่คลิป",
   "step1.transcript.exportAi": "ส่งออกเพื่อแชท AI",
   "step1.transcript.exportAiHint":
     "ให้แชท AI ตัวใดก็ได้ช่วยเลือกคลิป แล้วนำผลลัพธ์กลับมาวางในขั้นที่ 2",
@@ -144,6 +189,9 @@ const TH: Partial<Record<MessageKey, string>> = {
     "เราจะแยกเสียงและถอดเสียงภาษาไทย–อาหรับ จากนั้นนำอภิธานศัพท์ไปใช้กับข้อความ",
   "step1.transcribe.cta": "ถอดเสียงและค้นหาคลิป",
   "step1.transcribe.chooseFirst": "เลือกไฟล์บรรยายก่อน",
+  "step1.clip.transcribe.title": "ถอดเสียงคลิป",
+  "step1.clip.transcribe.cta": "ถอดเสียงและไปทำซับ",
+  "step1.clip.transcribe.chooseFirst": "เลือกไฟล์คลิปก่อน",
   "step1.transcribe.downloadNote":
     "การถอดเสียงครั้งแรกในเครื่องนี้จะดาวน์โหลดไฟล์ AI ประมาณ 1.5 GB",
 
@@ -757,6 +805,38 @@ const TH_BY_EN: Record<string, string> = {
   "Transcription (upload)": "การถอดเสียง (อัปโหลด)",
   "The GPU pack speeds up transcription only. Hardware encoding needs an up-to-date graphics driver.":
     "แพ็ก GPU ช่วยเร่งเฉพาะการถอดเสียง การเข้ารหัสแบบฮาร์ดแวร์ต้องใช้ไดรเวอร์การ์ดจอเวอร์ชันล่าสุด",
+
+  // Subtitles-only mode
+  "Workflow mode": "โหมดการทำงาน",
+  "Subtitles only": "ทำซับอย่างเดียว",
+  Skipped: "ข้าม",
+  "Skipped in Subtitles-only mode — click to switch to the full workflow":
+    "ข้ามในโหมดทำซับอย่างเดียว — คลิกเพื่อสลับเป็นโหมดตัดคลิปและทำซับ",
+  "Skipped in Subtitles-only mode": "ข้ามขั้นตอนนี้ในโหมดทำซับอย่างเดียว",
+  "Subtitles-only mode skips clip finding and goes straight to Subtitles after transcription. Switch to the full workflow if you want to cut clips from a longer lecture.":
+    "โหมดทำซับอย่างเดียวจะข้ามการค้นหาคลิปและไปยังหน้าซับไตเติลทันทีหลังถอดเสียง หากต้องการตัดคลิปจากบรรยายยาวให้สลับเป็นโหมดเต็ม",
+  "Switch to full workflow": "สลับเป็นโหมดเต็ม",
+  "Go to Subtitles": "ไปที่ซับไตเติล",
+  "Output frame": "เฟรมผลลัพธ์",
+  "Matches your clip's orientation automatically when loaded. You can still choose 9:16 or 16:9 anytime.":
+    "ปรับสัดส่วนตามแนวของคลิปอัตโนมัติเมื่อโหลดไฟล์ และเลือกเปลี่ยนระหว่าง 9:16 หรือ 16:9 ได้ตลอดเวลา",
+  "16:9 uses the whole frame.": "16:9 ใช้เต็มเฟรมวิดีโอ",
+  "Step 3 next": "ต่อไปขั้นที่ 3",
+  "Too short": "สั้นเกินไป",
+  "Video is too short to export": "วิดีโอสั้นเกินไปสำหรับการส่งออก",
+  "Clips must be at least 0.5 seconds long. Choose a longer video.":
+    "คลิปต้องยาวอย่างน้อย 0.5 วินาที กรุณาเลือกวิดีโอที่ยาวกว่านี้",
+  "Switch to Subtitles only": "สลับเป็นทำซับอย่างเดียว",
+  "Switch to Find clips": "สลับเป็นโหมดค้นหาคลิป",
+  "Switch to Subtitles only?": "สลับเป็นโหมดทำซับอย่างเดียว?",
+  "Upload and transcribe your clip on Step 1 to start editing subtitles.":
+    "อัปโหลดและถอดเสียงคลิปในขั้นที่ 1 เพื่อเริ่มแก้ไขซับไตเติล",
+  "No speech was found in this clip. Re-transcribe on Step 1, or add a line where the playhead sits.":
+    "ไม่พบเสียงพูดในคลิปนี้ ถอดเสียงใหม่ในขั้นที่ 1 หรือเพิ่มบรรทัดที่ตำแหน่งหัวเล่น",
+  "Upload and transcribe your clip on Step 1 before exporting.":
+    "อัปโหลดและถอดเสียงคลิปในขั้นที่ 1 ก่อนส่งออก",
+  "Empty — files go to the exports folder next to the clip.":
+    "เว้นว่าง — ไฟล์จะถูกบันทึกในโฟลเดอร์ exports ข้างไฟล์คลิป",
 };
 
 let activeLocale: Locale = useSettingsStore.getState().uiLanguage;

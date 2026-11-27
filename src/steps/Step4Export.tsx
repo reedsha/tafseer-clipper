@@ -58,8 +58,13 @@ import {
   probeMediaSrc,
   toMediaSrc,
 } from "@/lib/media";
-import type { FramingMode, ProjectClip, Resolution } from "@/lib/projectTypes";
-import { FRAMING_LABELS } from "@/lib/projectTypes";
+import {
+  FRAMING_LABELS,
+  isSubtitleOnlyProject,
+  type FramingMode,
+  type ProjectClip,
+  type Resolution,
+} from "@/lib/projectTypes";
 import { resolveAssStyles, stylesOverlap } from "@/lib/subtitleStyles";
 import { useProjectStore } from "@/store/projectStore";
 import { IDLE_RENDER_JOB, useRenderStore, type ClipStatus } from "@/store/renderStore";
@@ -92,6 +97,7 @@ export function Step4Export() {
   const project = useProjectStore((state) => state.project);
   const updateExportSettings = useProjectStore((state) => state.updateExportSettings);
   const setStep = useProjectStore((state) => state.setStep);
+  const subtitleOnly = isSubtitleOnlyProject(project);
 
   const sidecar = useSettingsStore((state) => state.sidecar);
   const refreshHealth = useSettingsStore((state) => state.refreshHealth);
@@ -285,10 +291,12 @@ export function Step4Export() {
         <FileVideo2 className="size-5 text-muted-foreground" />
         <p className="text-sm font-medium text-foreground">{L("Nothing to export yet")}</p>
         <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-          Approve the clips you want in Step 2. Approved clips become the batch render queue.
+          {subtitleOnly
+            ? L("Upload and transcribe your clip on Step 1 before exporting.")
+            : "Approve the clips you want in Step 2. Approved clips become the batch render queue."}
         </p>
-        <Button className="mt-1" onClick={() => setStep(2)}>
-          Back to clip discovery
+        <Button className="mt-1" onClick={() => setStep(subtitleOnly ? 1 : 2)}>
+          {subtitleOnly ? L("Back to upload") : "Back to clip discovery"}
         </Button>
       </div>
     );
@@ -648,7 +656,9 @@ export function Step4Export() {
               <p className="text-xs leading-relaxed text-muted-foreground">
                 {outputDir?.trim()
                   ? "Files are written to this folder."
-                  : "Empty — files go to the exports folder next to the lecture."}
+                  : subtitleOnly
+                    ? L("Empty — files go to the exports folder next to the clip.")
+                    : "Empty — files go to the exports folder next to the lecture."}
               </p>
             </div>
 

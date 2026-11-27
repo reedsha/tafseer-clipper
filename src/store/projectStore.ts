@@ -2,15 +2,25 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import {
+  DEFAULT_EXPORT_SETTINGS,
+  SUBTITLE_ONLY_FILENAME_TEMPLATE,
+  isSubtitleOnlyProject,
   type MediaInsert,
   type ProjectClip,
   type ProjectData,
   type ProjectExportSettings,
+  type ProjectMode,
   type RecentProject,
   type SubtitleCue,
   type TranscriptData,
   type WizardStep,
 } from "@/lib/projectTypes";
+import {
+  buildFullVideoClip,
+  effectiveTranscriptDuration,
+  isFullVideoClip,
+  resolutionForDimensions,
+} from "@/lib/clipMath";
 import {
   deleteAutosave,
   deleteAutosaveFile,
@@ -36,6 +46,7 @@ const MAX_TRASHED_CLIPS = 20;
 
 export interface CreateProjectInput {
   name?: string;
+  mode?: ProjectMode;
   sourcePath?: string | null;
   sourceFileName?: string | null;
   duration?: number | null;
@@ -68,6 +79,14 @@ export interface ProjectState {
    */
   relinkSource: (input: { path: string; name: string; size?: number | null }) => void;
   updateProject: (patch: Partial<ProjectData>) => void;
+  setProjectMode: (
+    mode: ProjectMode,
+    options?: {
+      replaceClips?: boolean;
+      autoMatchResolution?: boolean;
+      advanceToSubtitles?: boolean;
+    },
+  ) => void;
   setStep: (step: WizardStep) => void;
 
   setTranscript: (
@@ -146,6 +165,7 @@ function normalizeRecentProject(value: unknown): RecentProject | null {
   return {
     id,
     name: typeof record.name === "string" ? record.name : "Untitled session",
+    ...(record.mode === "subtitle-only" ? { mode: "subtitle-only" as const } : {}),
     sourceFileName:
       typeof record.sourceFileName === "string" ? record.sourceFileName : null,
     step,
@@ -412,6 +432,8 @@ export const useProjectStore = create<ProjectState>()(
         // discard the outgoing project's last edits.
         if (get().project && get().dirty) get().autosave();
         const now = Date.now();
+        const mode: ProjectMode =
+          input.mode === "subtitle-only" ? "subtitle-only" : "lecture";
         const sourceFileName = input.sourceFileName ?? null;
         const name = input.name ?? (sourceFileName ? stripExtension(sourceFileName) : "Untitled session");
         const editor = useSettingsStore.getState().editor;
@@ -419,6 +441,7 @@ export const useProjectStore = create<ProjectState>()(
           schemaVersion: 1,
           id: crypto.randomUUID(),
           name,
+          mode,
           sourcePath: input.sourcePath ?? null,
           sourceFileName,
           duration: input.duration ?? null,
@@ -439,7 +462,10 @@ export const useProjectStore = create<ProjectState>()(
             framing: editor.framing,
             useNvenc: editor.useNvenc,
             exportSrt: editor.exportSrt,
-            filenameTemplate: editor.filenameTemplate,
+            filenameTemplate:
+              mode === "subtitle-only"
+                ? SUBTITLE_ONLY_FILENAME_TEMPLATE
+                : editor.filenameTemplate,
             outputDir: null,
           },
           createdAt: now,
@@ -528,6 +554,100 @@ export const useProjectStore = create<ProjectState>()(
         set((state) => {
           if (!state.project) return {};
           return { project: touch(state.project, patch), dirty: true };
+        }),
+
+      setProjectMode: (mode, options) =>
+        set((state) => {
+          const project = state.project;
+          if (!project) return {};
+          const currentMode: ProjectMode = project.mode ?? "lecture";
+          if (currentMode === mode) return {};
+          const editor = useSettingsStore.getState().editor;
+          const nextExport: ProjectExportSettings = { ...project.export };
+
+          if (mode === "subtitle-only") {
+            if (
+              nextExport.filenameTemplate === editor.filenameTemplate ||
+              nextExport.filenameTemplate === DEFAULT_EXPORT_SETTINGS.filenameTemplate
+            ) {
+              nextExport.filenameTemplate = SUBTITLE_ONLY_FILENAME_TEMPLATE;
+            }
+            if (options?.autoMatchResolution !== false) {
+              const detected = resolutionForDimensions(
+                project.sourceWidth,
+                project.sourceHeight,
+              );
+              if (detected) nextExport.resolution = detected;
+            }
+
+            const patch: Partial<ProjectData> = {
+              mode: "subtitle-only",
+              export: nextExport,
+            };
+
+            if (project.transcript) {
+              const duration = effectiveTranscriptDuration(
+                project.duration,
+                project.transcript.segments,
+              );
+              const alreadySingleFull =
+                project.clips.length === 1 &&
+                project.clips[0].approved &&
+                isFullVideoClip(project.clips[0], duration);
+              if (alreadySingleFull) {
+                if (options?.advanceToSubtitles || project.step === 2) {
+                  patch.step = 3;
+                }
+              } else if (project.clips.length === 0 || options?.replaceClips) {
+                const fullClip = buildFullVideoClip({
+                  name: project.name,
+                  sourceFileName: project.sourceFileName,
+                  duration,
+                });
+                if (fullClip) {
+                  patch.clips = [fullClip];
+                  patch.selectedClipId = fullClip.id;
+                  patch.subtitles = {};
+                  patch.inserts = undefined;
+                  if (options?.advanceToSubtitles || project.step === 2) {
+                    patch.step = 3;
+                  }
+                } else {
+                  patch.clips = [];
+                  patch.selectedClipId = null;
+                  patch.subtitles = {};
+                  patch.inserts = undefined;
+                  patch.step = 1;
+                }
+              }
+            }
+
+            const updated = touch(project, patch);
+            return {
+              project: updated,
+              recentProjects: upsertRecent(
+                state.recentProjects,
+                toRecentProject(updated),
+              ),
+              dirty: true,
+            };
+          }
+
+          if (nextExport.filenameTemplate === SUBTITLE_ONLY_FILENAME_TEMPLATE) {
+            nextExport.filenameTemplate = editor.filenameTemplate;
+          }
+          const updated = touch(project, {
+            mode: "lecture",
+            export: nextExport,
+          });
+          return {
+            project: updated,
+            recentProjects: upsertRecent(
+              state.recentProjects,
+              toRecentProject(updated),
+            ),
+            dirty: true,
+          };
         }),
 
       setStep: (step) =>
@@ -757,7 +877,14 @@ export const useProjectStore = create<ProjectState>()(
         }),
 
       updateExportSettings: (patch) => {
-        mirrorExportDefaults(patch);
+        // Keep one-off pre-clipped file templates and orientation overrides
+        // scoped to this session instead of overwriting global lecture defaults.
+        if (isSubtitleOnlyProject(get().project)) {
+          const { filenameTemplate: _ft, resolution: _res, ...rest } = patch;
+          mirrorExportDefaults(rest);
+        } else {
+          mirrorExportDefaults(patch);
+        }
         set((state) => {
           if (!state.project) return {};
           return {
@@ -874,7 +1001,17 @@ export const useProjectStore = create<ProjectState>()(
         const state = get();
         // The open session renames through the normal (autosaving) path…
         if (state.project?.id === projectId) {
-          state.updateProject({ name: trimmed });
+          const current = state.project;
+          const singleClipMatchesName =
+            isSubtitleOnlyProject(current) &&
+            current.clips.length === 1 &&
+            current.clips[0].title === current.name;
+          state.updateProject({
+            name: trimmed,
+            ...(singleClipMatchesName
+              ? { clips: [{ ...current.clips[0], title: trimmed }] }
+              : {}),
+          });
         }
         // …and the sidebar list is updated immediately either way (the debounced
         // auto-save would otherwise leave the row stale for up to an interval).
