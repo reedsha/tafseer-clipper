@@ -37,6 +37,7 @@
     "radix-ui": "^1.8.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-resizable-panels": "^4.24.3",
     "sonner": "^2.0.8",
     "vaul": "^1.1.2",
     "wavesurfer.js": "^8.1.0",

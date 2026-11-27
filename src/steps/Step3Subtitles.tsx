@@ -34,6 +34,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "cn";
+import type { Layout } from "react-resizable-panels";
 
 import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { TimeFlow } from "@/components/TimeFlow";
@@ -50,6 +51,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable";
 import { Separator } from "@/components/ui/separator";
 import {
   Select,
@@ -97,6 +103,41 @@ const SHUTTLE_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
 
 const MAX_UNDO_HISTORY = 100;
 const TEXT_EDIT_COALESCE_MS = 800;
+
+const STEP3_LAYOUT_STORAGE_KEY = "tafseer.step3.layout.v1";
+const STEP3_LINES_PANEL_ID = "step3-lines";
+const STEP3_PREVIEW_PANEL_ID = "step3-preview";
+const STEP3_LINES_MIN_PX = 340;
+const STEP3_PREVIEW_MIN_PX = 320;
+const STEP3_PREVIEW_DEFAULT_PX = 360;
+
+function loadStep3Layout(): Layout | undefined {
+  try {
+    const raw = window.localStorage.getItem(STEP3_LAYOUT_STORAGE_KEY);
+    if (!raw) return undefined;
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const lines = (parsed as Record<string, unknown>)[STEP3_LINES_PANEL_ID];
+    const preview = (parsed as Record<string, unknown>)[STEP3_PREVIEW_PANEL_ID];
+    if (
+      typeof lines === "number" &&
+      typeof preview === "number" &&
+      Number.isFinite(lines) &&
+      Number.isFinite(preview) &&
+      lines > 0 &&
+      preview > 0 &&
+      Math.abs(lines + preview - 100) < 1
+    ) {
+      return {
+        [STEP3_LINES_PANEL_ID]: lines,
+        [STEP3_PREVIEW_PANEL_ID]: preview,
+      };
+    }
+  } catch {
+    /* Ignore unavailable or malformed localStorage. */
+  }
+  return undefined;
+}
 
 function cloneCues(list: SubtitleCue[]): SubtitleCue[] {
   return list.map((cue) => ({ ...cue }));
@@ -430,6 +471,7 @@ export function Step3Subtitles() {
   const lastTextEditRef = useRef<{ key: string; at: number } | null>(null);
 
   const [historyRev, setHistoryRev] = useState(0);
+  const [defaultLayout] = useState<Layout | undefined>(() => loadStep3Layout());
   const [activeCueId, setActiveCueId] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "unchecked">("all");
   const [safeZone, setSafeZone] = useState(true);
@@ -1792,7 +1834,7 @@ export function Step3Subtitles() {
       if (
         target &&
         target.closest(
-          'button, a, summary, [role="button"], [role="slider"], [role="switch"], [role="tab"]',
+          'button, a, summary, [role="button"], [role="slider"], [role="separator"], [role="switch"], [role="tab"]',
         )
       ) {
         return;
@@ -1982,17 +2024,33 @@ export function Step3Subtitles() {
         </div>
       </header>
 
-      <div
-        className={cn(
-          "grid min-h-0 flex-1",
-          previewFocus
-            ? "grid-cols-1"
-            : "grid-cols-[minmax(0,1fr)_minmax(300px,360px)]",
-        )}
+      <ResizablePanelGroup
+        orientation="horizontal"
+        className="min-h-0 flex-1"
+        disabled={previewFocus || settingsOpen || configStep !== null}
+        resizeTargetMinimumSize={{ fine: 8, coarse: 16 }}
+        defaultLayout={defaultLayout}
+        onLayoutChanged={(_layout, meta) => {
+          if (!meta.isUserInteraction) return;
+          try {
+            window.localStorage.setItem(
+              STEP3_LAYOUT_STORAGE_KEY,
+              JSON.stringify(meta.requestedLayout),
+            );
+          } catch {
+            /* Ignore storage quota errors. */
+          }
+        }}
       >
         {/* ------------------------------ lines ------------------------------ */}
-        {previewFocus ? null : (
-          <section className="flex min-h-0 flex-col border-r border-border">
+        <ResizablePanel
+          id={STEP3_LINES_PANEL_ID}
+          minSize={STEP3_LINES_MIN_PX}
+          className="flex min-h-0 min-w-0 flex-col"
+          style={{ overflow: "hidden" }}
+        >
+          {previewFocus ? null : (
+            <section className="flex h-full min-h-0 min-w-0 flex-col">
             <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2">
               <div className="flex items-center gap-2">
                 <h2 className="text-[13px] font-medium text-foreground">{L("Subtitle lines")}</h2>
@@ -2108,8 +2166,8 @@ export function Step3Subtitles() {
               </div>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-              <div ref={listRef} className="min-w-0 space-y-2 px-3 py-3">
+            <div className="mr-1 min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+              <div ref={listRef} className="min-w-0 space-y-2 py-3 pl-3 pr-2">
                 {cues.length === 0 ? (
                   <div className="flex flex-col items-center justify-center gap-2 px-6 py-12 text-center">
                     <ScanText className="size-5 text-muted-foreground" />
@@ -2171,20 +2229,36 @@ export function Step3Subtitles() {
               </div>
             </div>
           </section>
-        )}
+          )}
+        </ResizablePanel>
+
+        <ResizableHandle
+          id="step3-split"
+          withHandle
+          disabled={previewFocus || settingsOpen || configStep !== null}
+          aria-label={L("Resize subtitle editor and preview")}
+          title={L("Drag to resize · Double-click to reset")}
+        />
 
         {/* ----------------------------- monitor ----------------------------- */}
-        <section
-          className={cn(
-            "flex min-h-0 flex-col",
-            previewFocus
-              ? "fixed inset-x-0 bottom-0 top-[var(--titlebar-height)] z-40 border-0 bg-background p-3"
-              : undefined,
-          )}
-          role={previewFocus ? "dialog" : undefined}
-          aria-modal={previewFocus || undefined}
-          aria-label={previewFocus ? L("Output preview") : undefined}
+        <ResizablePanel
+          id={STEP3_PREVIEW_PANEL_ID}
+          defaultSize={STEP3_PREVIEW_DEFAULT_PX}
+          minSize={STEP3_PREVIEW_MIN_PX}
+          className="flex min-h-0 min-w-0 flex-col"
+          style={{ overflow: "hidden" }}
         >
+          <section
+            className={cn(
+              "flex h-full min-h-0 min-w-0 flex-col",
+              previewFocus
+                ? "fixed inset-x-0 bottom-0 top-[var(--titlebar-height)] z-40 border-0 bg-background p-3"
+                : undefined,
+            )}
+            role={previewFocus ? "dialog" : undefined}
+            aria-modal={previewFocus || undefined}
+            aria-label={previewFocus ? L("Output preview") : undefined}
+          >
           {previewFocus ? (
             <div className="flex shrink-0 items-center justify-between px-1 pb-2">
               <span className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
@@ -2203,8 +2277,8 @@ export function Step3Subtitles() {
           <div className="flex min-h-0 flex-1 flex-col gap-2 px-3 py-2">
             {/* Output shape sits above the picture it changes: the editor
                 frames the clip while looking at the frame. */}
-            <div className="flex shrink-0 items-start gap-2">
-              <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex shrink-0 flex-wrap items-start gap-2">
+              <div className="min-w-[136px] flex-1 space-y-1">
                 <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
                   {L("Aspect ratio")}
                 </p>
@@ -2218,7 +2292,7 @@ export function Step3Subtitles() {
                   onChange={(value) => updateExportSettings({ resolution: value })}
                 />
               </div>
-              <div className="min-w-0 flex-1 space-y-1">
+              <div className="min-w-[136px] flex-1 space-y-1">
                 <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
                   {L("Framing mode")}
                 </p>
@@ -2330,7 +2404,7 @@ export function Step3Subtitles() {
               onChangeTime={updateCueTime}
             />
 
-            <div className="flex shrink-0 items-center gap-1">
+            <div className="flex shrink-0 flex-wrap items-center gap-x-1 gap-y-1">
               <Button
                 variant="ghost"
                 size="icon-sm"
@@ -2525,8 +2599,9 @@ export function Step3Subtitles() {
               </PopoverContent>
             </Popover>
           </div>
-        </section>
-      </div>
+          </section>
+        </ResizablePanel>
+      </ResizablePanelGroup>
 
       <Dialog
         open={resetDialogMode !== null}

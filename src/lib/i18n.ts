@@ -361,6 +361,8 @@ const TH_BY_EN: Record<string, string> = {
     "เล่นต่อเนื่องโดยไม่หยุดที่ท้ายบล็อกซับไตเติลที่เลือก",
   "Undo / redo subtitle edits": "เลิกทำ / ทำซ้ำการแก้ไขซับไตเติล",
   "Step 3 · Subtitle lines & track": "ขั้นตอนที่ 3 · บรรทัดและแทร็กซับไตเติล",
+  "Resize subtitle editor and preview": "ปรับขนาดช่องแก้ไขซับไตเติลและพรีวิว",
+  "Drag to resize · Double-click to reset": "ลากเพื่อปรับขนาด · ดับเบิลคลิกเพื่อรีเซ็ต",
   System: "ระบบ",
   "Available fonts": "ฟอนต์ที่ใช้งานได้",
 

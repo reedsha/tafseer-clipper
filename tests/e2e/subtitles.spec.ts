@@ -1189,4 +1189,162 @@ test.describe("Step 3 undo/redo, continuous play, and reset", () => {
     await expect(rows).toHaveCount(1);
     await expect(rows.nth(0)).toContainText("ข้อความที่แก้ไขแล้ว");
   });
+
+  test("resizes the subtitle editor and clip preview split and persists the layout", async ({
+    page,
+  }) => {
+    await seedProjectFile(page, {
+      ...makeStep3Project("e2e-step3-split", "Resizable split lecture"),
+      sourcePath: null,
+    });
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Resizable split lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    const linesPanel = page.locator("#step3-lines");
+    const previewPanel = page.locator("#step3-preview");
+    const separator = page.getByRole("separator", {
+      name: "Resize subtitle editor and preview",
+    });
+    await expect(separator).toBeVisible();
+
+    const initialPreviewBox = await previewPanel.boundingBox();
+    const initialLinesBox = await linesPanel.boundingBox();
+    const initialSepBox = await separator.boundingBox();
+    if (!initialPreviewBox || !initialLinesBox || !initialSepBox) {
+      throw new Error("Step 3 split panels did not render");
+    }
+    expect(initialPreviewBox.width).toBeGreaterThanOrEqual(345);
+    expect(initialPreviewBox.width).toBeLessThanOrEqual(375);
+
+    // Hovering inside the cue list's right scrollbar lane does not trigger the resize handle.
+    const cueScroller = linesPanel.locator("section > div.overflow-y-auto").first();
+    const scrollerBox = await cueScroller.boundingBox();
+    if (!scrollerBox) throw new Error("Cue scroller missing");
+    await page.mouse.move(
+      scrollerBox.x + scrollerBox.width - 2,
+      scrollerBox.y + scrollerBox.height / 2,
+    );
+    await expect(separator).toHaveAttribute("data-separator", "inactive");
+
+    // 1. Drag separator 200px left -> preview widens, lines narrows, monitor scales (e.g. 16:9).
+    const sepStartX = initialSepBox.x + initialSepBox.width / 2;
+    const sepCenterY = initialSepBox.y + initialSepBox.height / 2;
+    await page.mouse.move(sepStartX, sepCenterY);
+    await page.mouse.down();
+    await page.mouse.move(sepStartX - 200, sepCenterY, { steps: 10 });
+    await page.mouse.up();
+
+    const widenedPreviewBox = await previewPanel.boundingBox();
+    const narrowedLinesBox = await linesPanel.boundingBox();
+    if (!widenedPreviewBox || !narrowedLinesBox) {
+      throw new Error("Step 3 panels missing after resize");
+    }
+    expect(widenedPreviewBox.width).toBeGreaterThan(500);
+    expect(narrowedLinesBox.width).toBeLessThan(initialLinesBox.width - 150);
+
+    // Switching to 16:9 fills the wider monitor container.
+    await page.getByRole("button", { name: "16:9" }).click();
+    const monitorFrame = previewPanel.locator("div.bg-black").first();
+    await expect
+      .poll(async () => (await monitorFrame.boundingBox())?.width ?? 0)
+      .toBeGreaterThan(450);
+
+    // 2. Drag far left and far right -> respects minimum widths (>= 340px left, >= 320px right),
+    // and keeps Focus the preview inside the preview panel at minimum width.
+    const widenedSepBox = await separator.boundingBox();
+    if (!widenedSepBox) throw new Error("Separator missing after resize");
+    await page.mouse.move(widenedSepBox.x + widenedSepBox.width / 2, sepCenterY);
+    await page.mouse.down();
+    await page.mouse.move(40, sepCenterY, { steps: 10 });
+    await page.mouse.up();
+
+    const clampedLeftBox = await linesPanel.boundingBox();
+    expect(clampedLeftBox?.width ?? 0).toBeGreaterThanOrEqual(338);
+
+    const minLeftSepBox = await separator.boundingBox();
+    if (!minLeftSepBox) throw new Error("Separator missing after left clamp");
+    await page.mouse.move(minLeftSepBox.x + minLeftSepBox.width / 2, sepCenterY);
+    await page.mouse.down();
+    await page.mouse.move(1260, sepCenterY, { steps: 10 });
+    await page.mouse.up();
+
+    const clampedRightBox = await previewPanel.boundingBox();
+    expect(clampedRightBox?.width ?? 0).toBeGreaterThanOrEqual(318);
+    const focusButton = page.getByRole("button", { name: "Focus the preview" });
+    const focusBtnBox = await focusButton.boundingBox();
+    if (!clampedRightBox || !focusBtnBox) {
+      throw new Error("Focus button or preview panel missing at minimum width");
+    }
+    expect(focusBtnBox.x + focusBtnBox.width).toBeLessThanOrEqual(
+      clampedRightBox.x + clampedRightBox.width + 1,
+    );
+
+    // 3. Drag wider (~520px) and verify persistence across reload, step navigation, and preview focus.
+    const clampedSepBox = await separator.boundingBox();
+    if (!clampedSepBox) throw new Error("Separator missing after right clamp");
+    const clampedSepX = clampedSepBox.x + clampedSepBox.width / 2;
+    await page.mouse.move(clampedSepX, sepCenterY);
+    await page.mouse.down();
+    await page.mouse.move(clampedSepX - 220, sepCenterY, { steps: 10 });
+    await page.mouse.up();
+
+    const persistedBoxBefore = await previewPanel.boundingBox();
+    expect(persistedBoxBefore?.width ?? 0).toBeGreaterThan(480);
+
+    await page.reload();
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Resizable split lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    const afterReloadBox = await previewPanel.boundingBox();
+    expect(Math.abs((afterReloadBox?.width ?? 0) - (persistedBoxBefore?.width ?? 0))).toBeLessThan(
+      6,
+    );
+
+    await page.getByRole("button", { name: "Back to clip discovery" }).click();
+    await expect(page.getByRole("heading", { name: "Find clips" })).toBeVisible();
+    await page.getByRole("button", { name: "Continue to subtitles" }).click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    const afterStepNavBox = await previewPanel.boundingBox();
+    expect(Math.abs((afterStepNavBox?.width ?? 0) - (persistedBoxBefore?.width ?? 0))).toBeLessThan(
+      6,
+    );
+
+    await page.getByRole("button", { name: "Focus the preview" }).click();
+    await expect(page.getByRole("button", { name: "Close preview" })).toBeVisible();
+    await page.getByRole("button", { name: "Close preview" }).click();
+
+    const afterFocusBox = await previewPanel.boundingBox();
+    expect(Math.abs((afterFocusBox?.width ?? 0) - (persistedBoxBefore?.width ?? 0))).toBeLessThan(
+      6,
+    );
+
+    // 4. Keyboard ArrowLeft on the focused separator widens the preview without changing the selected line.
+    const cue2Trigger = page.getByRole("button", { name: "Subtitle line 2" });
+    await cue2Trigger.click();
+    await expect(cue2Trigger).toHaveAttribute("aria-expanded", "true");
+
+    await separator.focus();
+    await page.keyboard.press("ArrowLeft");
+    const afterKeyBox = await previewPanel.boundingBox();
+    expect(afterKeyBox?.width ?? 0).toBeGreaterThan(afterFocusBox?.width ?? 0);
+    await expect(cue2Trigger).toHaveAttribute("aria-expanded", "true");
+
+    // 5. Double-clicking the separator resets preview back to the ~360px default.
+    await separator.dblclick();
+    await expect
+      .poll(async () => (await previewPanel.boundingBox())?.width ?? 0)
+      .toBeGreaterThanOrEqual(345);
+    const resetBox = await previewPanel.boundingBox();
+    expect(resetBox?.width ?? 0).toBeLessThanOrEqual(375);
+  });
 });
