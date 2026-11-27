@@ -10,6 +10,7 @@ import {
 import { ScanText, VideoOff } from "lucide-react";
 import { cn } from "cn";
 
+import { InsertOverlayBox } from "@/components/subtitles/InsertOverlayBox";
 import { SubtitleOverlay } from "@/components/subtitles/SubtitleOverlay";
 import { Button } from "@/components/ui/button";
 import { L } from "@/lib/i18n";
@@ -21,7 +22,13 @@ import {
 } from "@/lib/media";
 import { mediaFailureMessage, relinkLecture } from "@/lib/sourceLink";
 import { useProjectStore } from "@/store/projectStore";
-import type { FramingMode, Resolution, SubtitleCue } from "@/lib/projectTypes";
+import type {
+  FramingMode,
+  InsertRect,
+  MediaInsert,
+  Resolution,
+  SubtitleCue,
+} from "@/lib/projectTypes";
 import { ASS_RESOLUTIONS, type AssStyle, type SubtitleLine } from "@/lib/subtitleStyles";
 
 export interface SubtitleMonitorHandle {
@@ -60,6 +67,11 @@ export interface SubtitleMonitorProps {
   offsets?: { arabic: number; thai: number };
   /** Delta is in export-frame pixels; positive moves the line up. */
   onNudgeLine?: (kind: SubtitleLine, deltaExportPx: number) => void;
+  /** Visual inserts layered over the lecture and beneath subtitles. */
+  inserts?: MediaInsert[];
+  selectedInsertId?: string | null;
+  onSelectInsert?: (id: string | null) => void;
+  onCommitInsertRect?: (id: string, rect: InsertRect) => void;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -99,6 +111,10 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
       interactive = false,
       offsets,
       onNudgeLine,
+      inserts = [],
+      selectedInsertId = null,
+      onSelectInsert,
+      onCommitInsertRect,
     },
     ref,
   ) {
@@ -206,10 +222,11 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
         pendingRef.current = { start, end };
         return;
       }
+      const inset = Math.min(0.01, Math.max(0, (end - start) * 0.1));
       const outside =
         restart || video.currentTime < start - 0.05 || video.currentTime >= end - 0.05;
       if (outside) {
-        video.currentTime = start + 0.01;
+        video.currentTime = start + inset;
       }
       rangeEndRef.current = end;
       void video.play().catch(() => {
@@ -316,9 +333,10 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
             video.pause();
             onTimeUpdateRef.current?.(current);
             setNow(current);
-          } else if (Math.abs(current - last) >= 0.05) {
+          } else if (Math.abs(current - last) >= 0.016) {
             last = current;
             setNow(current);
+            onTimeUpdateRef.current?.(current);
           }
           if (performance.now() - lastBackdropDrawRef.current >= 66) {
             drawBackdrop();
@@ -339,7 +357,11 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
       const upper =
         clipEnd ??
         (Number.isFinite(video.duration) && video.duration > 0 ? video.duration : Infinity);
-      const target = clamp(pending.start + 0.01, 0, Math.max(0, upper));
+      const inset =
+        pending.end > pending.start
+          ? Math.min(0.01, Math.max(0, (pending.end - pending.start) * 0.1))
+          : 0;
+      const target = clamp(pending.start + inset, 0, Math.max(0, upper));
       video.currentTime = target;
       onTimeUpdateRef.current?.(target);
       setNow(target);
@@ -392,10 +414,13 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
 
     /* ------------------------------ overlay ------------------------------ */
 
+    const clipTime = playing ? now - clipStart : (playhead ?? now - clipStart);
     const overlayCue =
       playing || overlayMode === "playhead"
-        ? cueAt(cues, playing ? now - clipStart : (playhead ?? now - clipStart))
+        ? cueAt(cues, clipTime)
         : (cues.find((cue) => cue.id === selectedCueId) ?? null);
+    const activeInsert =
+      inserts.find((item) => clipTime >= item.start - 0.001 && clipTime < item.end) ?? null;
 
     return (
       <div
@@ -405,6 +430,9 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
         <div
           style={{ width: box.width, height: box.height }}
           className="relative shrink-0 overflow-hidden rounded-lg border border-border bg-black"
+          onClick={() => {
+            if (selectedInsertId) onSelectInsert?.(null);
+          }}
         >
           {mediaSrc && !error ? (
             <>
@@ -475,6 +503,21 @@ export const SubtitleMonitor = forwardRef<SubtitleMonitorHandle, SubtitleMonitor
               </p>
             </div>
           )}
+
+          {activeInsert ? (
+            <InsertOverlayBox
+              insert={activeInsert}
+              frameWidth={box.width}
+              frameHeight={box.height}
+              clipTime={clipTime}
+              playing={playing}
+              playbackRate={rateRef.current}
+              interactive={interactive}
+              selected={activeInsert.id === selectedInsertId}
+              onSelect={(id) => onSelectInsert?.(id)}
+              onCommitRect={onCommitInsertRect}
+            />
+          ) : null}
 
           <SubtitleOverlay
             resolution={resolution}

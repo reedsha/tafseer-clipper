@@ -32,6 +32,7 @@ from array import array
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -99,6 +100,13 @@ def normalize_language(language: str | None) -> str | None:
 # Data transfer objects
 # --------------------------------------------------------------------------- #
 @dataclass(slots=True)
+class WordTiming:
+    text: str
+    start: float
+    end: float
+
+
+@dataclass(slots=True)
 class Segment:
     id: int
     start: float
@@ -113,6 +121,88 @@ class Segment:
     confidence: float | None = None
     original_text: str | None = None
     translation: str | None = None
+    words: list[WordTiming] | None = None
+
+
+def _is_thai_char(char: str) -> bool:
+    return "\u0E00" <= char <= "\u0E7F"
+
+
+def join_word_timings(words: Iterable[WordTiming]) -> str:
+    """Join word tokens into readable text without inserting spaces inside Thai."""
+    out = ""
+    previous = ""
+    for word in words:
+        text = word.text.strip()
+        if not text:
+            continue
+        if not out:
+            out = text
+        else:
+            needs_space = not (_is_thai_char(previous[-1]) and _is_thai_char(text[0]))
+            out += f" {text}" if needs_space else text
+        previous = text
+    return out.strip()
+
+
+def _normalize_segment_words(
+    raw_words: Any,
+    *,
+    seg_start: float | None = None,
+    seg_end: float | None = None,
+    offset: float = 0.0,
+) -> list[WordTiming] | None:
+    """Normalise word-level timing entries into monotonic, bounded WordTimings."""
+    if (
+        not raw_words
+        or not isinstance(raw_words, Iterable)
+        or isinstance(raw_words, (str, bytes, dict))
+    ):
+        return None
+    lo = float(seg_start) if seg_start is not None and math.isfinite(seg_start) else 0.0
+    hi = (
+        max(lo, float(seg_end))
+        if seg_end is not None and math.isfinite(seg_end)
+        else float("inf")
+    )
+    out: list[WordTiming] = []
+    cursor = lo
+    for entry in raw_words:
+        if isinstance(entry, dict):
+            raw_text = entry.get("word") if entry.get("word") is not None else entry.get("text")
+            raw_start = entry.get("start")
+            if raw_start is None:
+                raw_start = entry.get("startSecond", entry.get("start_time"))
+            raw_end = entry.get("end")
+            if raw_end is None:
+                raw_end = entry.get("endSecond", entry.get("end_time"))
+        else:
+            raw_text = getattr(entry, "word", None)
+            if raw_text is None:
+                raw_text = getattr(entry, "text", None)
+            raw_start = getattr(entry, "start", None)
+            raw_end = getattr(entry, "end", None)
+        if not isinstance(raw_text, str):
+            continue
+        text = raw_text.strip()
+        if not text:
+            continue
+        try:
+            w_start = float(raw_start) + offset
+            w_end = float(raw_end) + offset
+        except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(w_start) and math.isfinite(w_end)):
+            continue
+        if w_end < w_start:
+            w_start, w_end = w_end, w_start
+        w_start = max(cursor, min(hi, w_start))
+        w_end = max(w_start, min(hi, w_end))
+        w_start_r = round(w_start, 3)
+        w_end_r = round(max(w_start_r, w_end), 3)
+        out.append(WordTiming(text=text, start=w_start_r, end=w_end_r))
+        cursor = w_end
+    return out or None
 
 
 @dataclass(slots=True)
@@ -396,13 +486,41 @@ def apply_glossary_to_segments(
 ) -> list[Segment]:
     cleaned: list[Segment] = []
     for segment in segments:
+        updated_text = apply_glossary(segment.text, glossary)
+        words: list[WordTiming] | None = None
+        if segment.words:
+            if not glossary or updated_text == segment.text:
+                words = [
+                    WordTiming(text=word.text, start=word.start, end=word.end)
+                    for word in segment.words
+                ]
+            else:
+                mapped = [
+                    WordTiming(
+                        text=apply_glossary(word.text, glossary),
+                        start=word.start,
+                        end=word.end,
+                    )
+                    for word in segment.words
+                ]
+                if all(word.text for word in mapped) and "".join(
+                    "".join(word.text.split()) for word in mapped
+                ) == "".join(updated_text.split()):
+                    words = mapped
         cleaned.append(
             Segment(
                 id=segment.id,
                 start=segment.start,
                 end=segment.end,
-                text=apply_glossary(segment.text, glossary),
+                text=updated_text,
                 language=segment.language,
+                sentence_id=segment.sentence_id,
+                source=segment.source,
+                reference=segment.reference,
+                confidence=segment.confidence,
+                original_text=segment.original_text,
+                translation=segment.translation,
+                words=words,
             )
         )
     return cleaned
@@ -652,14 +770,21 @@ class WhisperTranscriber:
                     text = (item.text or "").strip()
                     if not text:
                         continue
+                    start_sec = float(item.start)
                     end_sec = float(item.end)
+                    words = _normalize_segment_words(
+                        getattr(item, "words", None),
+                        seg_start=start_sec,
+                        seg_end=end_sec,
+                    )
                     raw.append(
                         Segment(
                             id=index,
-                            start=float(item.start),
+                            start=start_sec,
                             end=end_sec,
                             text=text,
                             language=getattr(info, "language", None),
+                            words=words,
                         )
                     )
                     if on_progress is not None:
@@ -721,7 +846,7 @@ class WhisperTranscriber:
             vad_filter=vad_filter,
             vad_parameters={"min_silence_duration_ms": 500},
             initial_prompt=initial_prompt or None,
-            word_timestamps=False,
+            word_timestamps=True,
         )
 
 
@@ -1167,14 +1292,14 @@ async def _post_audio_chunk(
     client: httpx.AsyncClient,
     endpoint: str,
     headers: dict[str, str],
-    data: dict[str, str],
+    data: dict[str, Any],
     chunk_path: Path,
 ) -> httpx.Response:
-    """POST one audio chunk, retrying once without ``verbose_json`` and remembering it."""
+    """POST one audio chunk with sticky fallbacks for unsupported formats/granularities."""
     payload = dict(data)
     mime = _audio_mime_type(chunk_path)
     response: httpx.Response | None = None
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             with chunk_path.open("rb") as handle:
                 response = await client.post(
@@ -1187,19 +1312,106 @@ async def _post_audio_chunk(
             raise TranscriptionError(
                 f"Could not read the extracted audio file {chunk_path}: {exc}"
             ) from exc
-        if (
-            attempt == 0
-            and response.status_code == 400
-            and payload.get("response_format") == "verbose_json"
-        ):
+        if attempt < 2 and response.status_code == 400:
             body = (response.text or "").lower()
-            if "response_format" in body or "verbose_json" in body:
+            if payload.get("response_format") == "verbose_json" and (
+                "response_format" in body or "verbose_json" in body
+            ):
                 payload["response_format"] = "json"
                 data["response_format"] = "json"
+                payload.pop("timestamp_granularities[]", None)
+                data.pop("timestamp_granularities[]", None)
+                continue
+            if "timestamp_granularities[]" in payload and (
+                "timestamp_granularit" in body or "granularit" in body
+            ):
+                payload.pop("timestamp_granularities[]", None)
+                data.pop("timestamp_granularities[]", None)
                 continue
         return response
     assert response is not None
     return response
+
+
+def _attach_top_level_words(
+    segments: list[Segment],
+    raw_words: Any,
+    *,
+    offset: float,
+) -> None:
+    """Attach top-level ``words[]`` entries to their matching segments when absent."""
+    words = _normalize_segment_words(raw_words, offset=offset)
+    if not words or not segments:
+        return
+    buckets: list[list[WordTiming]] = [[] for _ in segments]
+    for word in words:
+        mid = (word.start + word.end) * 0.5
+        target_index: int | None = None
+        for idx, segment in enumerate(segments):
+            if segment.start - 0.001 <= mid <= segment.end + 0.001:
+                target_index = idx
+                break
+        if target_index is None:
+            best_dist = 0.15
+            for idx, segment in enumerate(segments):
+                dist = min(abs(mid - segment.start), abs(mid - segment.end))
+                if dist <= best_dist:
+                    best_dist = dist
+                    target_index = idx
+        if target_index is not None:
+            buckets[target_index].append(word)
+    for segment, bucket in zip(segments, buckets):
+        if segment.words or not bucket:
+            continue
+        segment.words = _normalize_segment_words(
+            bucket,
+            seg_start=segment.start,
+            seg_end=segment.end,
+            offset=0.0,
+        )
+
+
+def _segments_from_words(
+    raw_words: Any,
+    *,
+    offset: float,
+    language: str | None,
+) -> list[Segment]:
+    """Group top-level ``words[]`` into segments when ``segments`` is omitted."""
+    words = _normalize_segment_words(raw_words, offset=offset)
+    if not words:
+        return []
+    groups: list[list[WordTiming]] = []
+    current: list[WordTiming] = []
+    for word in words:
+        if current and (
+            word.start - current[-1].end > 0.8
+            or word.end - current[0].start > 6.0
+            or bool(re.search(r"[.!?…。！？]$", current[-1].text))
+        ):
+            groups.append(current)
+            current = []
+        current.append(word)
+    if current:
+        groups.append(current)
+    segments: list[Segment] = []
+    for index, group in enumerate(groups):
+        text = join_word_timings(group)
+        if not text:
+            continue
+        start = group[0].start
+        end = max(group[-1].end, start + 0.001)
+        segments.append(
+            Segment(
+                id=index,
+                start=round(start, 3),
+                end=round(end, 3),
+                text=text,
+                language=language,
+                words=group,
+            )
+        )
+    return segments
 
 
 async def _post_gateway_chunk(
@@ -1223,6 +1435,78 @@ async def _post_gateway_chunk(
     )
 
 
+def _build_segments_from_payload(
+    payload: dict,
+    raw_segments: Any,
+    *,
+    offset: float,
+    duration: float,
+    language: str | None,
+    empty_ts_label: str,
+) -> list[Segment]:
+    """Shared segment + word extraction for Cloud STT and AI Gateway payloads."""
+    segments: list[Segment] = []
+    if isinstance(raw_segments, list):
+        for index, item in enumerate(raw_segments):
+            if not isinstance(item, dict):
+                continue
+            text = (item.get("text") or "").strip()
+            if not text:
+                continue
+            seg_start, seg_end = _extract_segment_times(item)
+            shifted_start = seg_start + offset
+            shifted_end = seg_end + offset
+            seg_words = (
+                _normalize_segment_words(
+                    item.get("words"),
+                    seg_start=shifted_start,
+                    seg_end=shifted_end,
+                    offset=offset,
+                )
+                if shifted_end > shifted_start
+                else None
+            )
+            segments.append(
+                Segment(
+                    id=index,
+                    start=shifted_start,
+                    end=shifted_end,
+                    text=text,
+                    language=language,
+                    words=seg_words,
+                )
+            )
+    had_timed_segments = bool(segments) and not all(
+        seg.end <= seg.start for seg in segments
+    )
+    if segments and duration > 0 and all(seg.end <= seg.start for seg in segments):
+        logger.warning(
+            "%s returned segments without timestamps; distributing "
+            "%d segment(s) proportionally across %.1fs",
+            empty_ts_label,
+            len(segments),
+            duration,
+        )
+        segments = _distribute_segments_proportionally(
+            [(seg.text, seg.language) for seg in segments],
+            start=offset,
+            duration=duration,
+        )
+    if not segments and payload.get("words"):
+        segments = _segments_from_words(
+            payload.get("words"), offset=offset, language=language
+        )
+    elif had_timed_segments and payload.get("words"):
+        _attach_top_level_words(segments, payload.get("words"), offset=offset)
+    if not segments:
+        text = (payload.get("text") or "").strip()
+        if text:
+            segments = _segments_from_plain_text(
+                text, start=offset, duration=duration, language=language
+            )
+    return _split_oversized_segments(segments)
+
+
 def _segments_from_gateway_payload(
     payload: dict,
     *,
@@ -1243,45 +1527,14 @@ def _segments_from_gateway_payload(
     duration = (
         reported_duration if reported_duration > 0 else max(0.0, duration_hint)
     )
-    language = payload.get("language")
-    segments: list[Segment] = []
-    raw_segments = payload.get("segments") or []
-    if isinstance(raw_segments, list):
-        for index, item in enumerate(raw_segments):
-            if not isinstance(item, dict):
-                continue
-            text = (item.get("text") or "").strip()
-            if not text:
-                continue
-            start, end = _extract_segment_times(item)
-            segments.append(
-                Segment(
-                    id=index,
-                    start=start + offset,
-                    end=end + offset,
-                    text=text,
-                    language=language,
-                )
-            )
-    if segments and duration > 0 and all(seg.end <= seg.start for seg in segments):
-        logger.warning(
-            "Gateway STT returned segments without timestamps; distributing "
-            "%d segment(s) proportionally across %.1fs",
-            len(segments),
-            duration,
-        )
-        segments = _distribute_segments_proportionally(
-            [(seg.text, seg.language) for seg in segments],
-            start=offset,
-            duration=duration,
-        )
-    if not segments:
-        text = (payload.get("text") or "").strip()
-        if text:
-            segments = _segments_from_plain_text(
-                text, start=offset, duration=duration, language=language
-            )
-    segments = _split_oversized_segments(segments)
+    segments = _build_segments_from_payload(
+        payload,
+        payload.get("segments") or [],
+        offset=offset,
+        duration=duration,
+        language=payload.get("language"),
+        empty_ts_label="Gateway STT",
+    )
     return segments, duration
 
 
@@ -1325,7 +1578,7 @@ async def transcribe_cloud(
     raise_if_cancelled(cancel_event)
     language = normalize_language(language)
     gateway = _is_vercel_gateway(base_url)
-    data: dict[str, str] = {}
+    data: dict[str, Any] = {}
     max_bytes: int | None = None
     if gateway:
         endpoint = _vercel_gateway_endpoint(base_url)
@@ -1337,7 +1590,11 @@ async def transcribe_cloud(
     else:
         endpoint = base_url.rstrip("/") + "/audio/transcriptions"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        data = {"model": model, "response_format": "verbose_json"}
+        data = {
+            "model": model,
+            "response_format": "verbose_json",
+            "timestamp_granularities[]": ["word", "segment"],
+        }
         if language:
             data["language"] = language
         if prompt:
@@ -1633,44 +1890,14 @@ def _segments_from_cloud_payload(
     """
     reported_duration = float(payload.get("duration", 0.0) or 0.0)
     duration = reported_duration if reported_duration > 0 else max(0.0, duration_hint)
-    raw_segments = payload.get("segments") or []
-    language = payload.get("language")
-    segments: list[Segment] = []
-    if raw_segments:
-        for index, item in enumerate(raw_segments):
-            if not isinstance(item, dict):
-                continue
-            text = (item.get("text") or "").strip()
-            if text:
-                seg_start, seg_end = _extract_segment_times(item)
-                segments.append(
-                    Segment(
-                        id=index,
-                        start=seg_start + offset,
-                        end=seg_end + offset,
-                        text=text,
-                        language=language,
-                    )
-                )
-    if segments and duration > 0 and all(seg.end <= seg.start for seg in segments):
-        logger.warning(
-            "Cloud STT returned segments without timestamps; distributing "
-            "%d segment(s) proportionally across %.1fs",
-            len(segments),
-            duration,
-        )
-        segments = _distribute_segments_proportionally(
-            [(seg.text, seg.language) for seg in segments],
-            start=offset,
-            duration=duration,
-        )
-    if not segments:
-        text = (payload.get("text") or "").strip()
-        if text:
-            segments = _segments_from_plain_text(
-                text, start=offset, duration=duration, language=language
-            )
-    segments = _split_oversized_segments(segments)
+    segments = _build_segments_from_payload(
+        payload,
+        payload.get("segments") or [],
+        offset=offset,
+        duration=duration,
+        language=payload.get("language"),
+        empty_ts_label="Cloud STT",
+    )
     return segments, duration
 
 

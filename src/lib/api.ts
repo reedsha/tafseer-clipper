@@ -592,6 +592,12 @@ export interface TranscribeResponse {
   waveform_peaks?: number[];
 }
 
+export interface TranscriptWord {
+  text: string;
+  start: number;
+  end: number;
+}
+
 export interface TranscriptSegment {
   id: number;
   start: number;
@@ -604,6 +610,7 @@ export interface TranscriptSegment {
   confidence?: number | null;
   original_text?: string | null;
   translation?: string | null;
+  words?: TranscriptWord[] | null;
 }
 
 export function extractAndTranscribe(
@@ -851,10 +858,26 @@ export interface RenderCue {
   thai?: string;
 }
 
+export interface RenderInsert {
+  path: string;
+  kind: "image" | "video";
+  start: number;
+  end: number;
+  source_start?: number;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  fit?: "cover" | "blur-fill" | "contain";
+  muted?: boolean;
+  fade?: number;
+}
+
 export interface RenderClip {
   start: number;
   end: number;
   subtitles?: RenderCue[];
+  inserts?: RenderInsert[];
   title?: string;
   output_path?: string | null;
 }

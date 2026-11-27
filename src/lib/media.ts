@@ -8,12 +8,24 @@
  * processing happens in the renderer.
  */
 
-import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import type { InsertKind } from "@/lib/projectTypes";
 
 export const LECTURE_EXTENSIONS = ["mp4", "mov", "mkv"] as const;
 const LECTURE_ACCEPT = LECTURE_EXTENSIONS.map((extension) => `.${extension}`).join(",");
+
+export const INSERT_IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp"] as const;
+export const INSERT_VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "webm"] as const;
+const INSERT_ACCEPT = [
+  ...INSERT_IMAGE_EXTENSIONS.map((ext) => `.${ext}`),
+  ...INSERT_VIDEO_EXTENSIONS.map((ext) => `.${ext}`),
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "video/*",
+].join(",");
 
 interface TauriDialogOptions {
   multiple?: boolean;
@@ -343,4 +355,234 @@ export function subscribeNativeDrops(handlers: NativeDropHandlers): () => void {
 export function fileFromDrop(dataTransfer: DataTransfer | null): File | null {
   if (!dataTransfer) return null;
   return dataTransfer.files?.[0] ?? null;
+}
+
+export function classifyInsertFile(nameOrPath: string): InsertKind | null {
+  const clean = nameOrPath.split(/[?#]/)[0];
+  const dot = clean.lastIndexOf(".");
+  if (dot < 0) return null;
+  const ext = clean.slice(dot + 1).toLowerCase();
+  if ((INSERT_IMAGE_EXTENSIONS as readonly string[]).includes(ext)) return "image";
+  if ((INSERT_VIDEO_EXTENSIONS as readonly string[]).includes(ext)) return "video";
+  return null;
+}
+
+export interface InsertMediaPick {
+  path: string;
+  name: string;
+  kind: InsertKind;
+}
+
+function fileNameFromPath(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+function pickInsertFilesWithInput(): Promise<File[]> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    input.accept = INSERT_ACCEPT;
+    input.style.display = "none";
+    const finish = (files: File[]) => {
+      input.remove();
+      resolve(files);
+    };
+    input.addEventListener("change", () => finish(Array.from(input.files ?? [])));
+    input.addEventListener("cancel", () => finish([]));
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
+function pickFromBrowserFile(file: File): InsertMediaPick | null {
+  const path = (file as File & { path?: string }).path ?? null;
+  let kind = classifyInsertFile(file.name);
+  if (!kind) {
+    if (file.type.startsWith("image/")) kind = "image";
+    else if (file.type.startsWith("video/")) kind = "video";
+  }
+  if (!kind) return null;
+  return {
+    path: path ?? URL.createObjectURL(file),
+    name: file.name || (kind === "image" ? "image.png" : "video.mp4"),
+    kind,
+  };
+}
+
+/** Pick one or more insert images/videos using the native dialog or browser fallback. */
+export async function openInsertMediaFiles(): Promise<InsertMediaPick[]> {
+  if (isTauriRuntime()) {
+    const options: TauriDialogOptions = {
+      multiple: true,
+      directory: false,
+      title: "Choose images or videos to insert",
+      filters: [
+        {
+          name: "Images & Videos",
+          extensions: [...INSERT_IMAGE_EXTENSIONS, ...INSERT_VIDEO_EXTENSIONS],
+        },
+        { name: "Images", extensions: [...INSERT_IMAGE_EXTENSIONS] },
+        { name: "Videos", extensions: [...INSERT_VIDEO_EXTENSIONS] },
+      ],
+    };
+    try {
+      const globalOpen = tauriWindow()?.__TAURI__?.dialog?.open;
+      const raw =
+        typeof globalOpen === "function" ? await globalOpen(options) : await openDialog(options);
+      const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+      const picks: InsertMediaPick[] = [];
+      for (const path of list) {
+        const kind = classifyInsertFile(path);
+        if (kind) picks.push({ path, name: fileNameFromPath(path), kind });
+      }
+      return picks;
+    } catch {
+      return [];
+    }
+  }
+
+  const files = await pickInsertFilesWithInput();
+  const picks: InsertMediaPick[] = [];
+  for (const file of files) {
+    const pick = pickFromBrowserFile(file);
+    if (pick) picks.push(pick);
+  }
+  return picks;
+}
+
+/** Read copied file paths from the OS clipboard (Windows Explorer Ctrl+C). */
+export async function readClipboardFilePaths(): Promise<string[]> {
+  if (!isTauriRuntime()) return [];
+  try {
+    const result = await invoke<string[]>("read_clipboard_file_paths");
+    return Array.isArray(result) ? result : [];
+  } catch {
+    return [];
+  }
+}
+
+function extensionForImageMime(mime: string, fileName?: string): "png" | "jpg" | "webp" {
+  const lowered = mime.toLowerCase();
+  if (lowered.includes("jpeg") || lowered.includes("jpg")) return "jpg";
+  if (lowered.includes("webp")) return "webp";
+  if (lowered.includes("png")) return "png";
+  if (fileName) {
+    const ext = fileName.slice(fileName.lastIndexOf(".") + 1).toLowerCase();
+    if (ext === "jpg" || ext === "jpeg") return "jpg";
+    if (ext === "webp") return "webp";
+  }
+  return "png";
+}
+
+/** Save a pasted clipboard image blob into app-managed project storage (or blob URL in browser). */
+export async function saveClipboardImage(
+  projectId: string,
+  file: Blob,
+  fileName?: string,
+): Promise<InsertMediaPick | null> {
+  const ext = extensionForImageMime(file.type, fileName);
+  const displayName = fileName && fileName.trim() ? fileName.trim() : `pasted-image.${ext}`;
+  if (isTauriRuntime()) {
+    const buffer = await file.arrayBuffer();
+    const bytes = Array.from(new Uint8Array(buffer));
+    const savedPath = await invoke<string>("save_clipboard_asset", {
+      projectId,
+      extension: ext,
+      bytes,
+    });
+    return { path: savedPath, name: displayName, kind: "image" };
+  }
+  return {
+    path: URL.createObjectURL(file),
+    name: displayName,
+    kind: "image",
+  };
+}
+
+export interface InsertMediaMetadata {
+  duration: number | null;
+  width: number | null;
+  height: number | null;
+}
+
+const METADATA_PROBE_TIMEOUT_MS = 8_000;
+
+/** Probe natural width/height and (for videos) source duration via media elements. */
+export function probeInsertMedia(
+  pathOrSrc: string,
+  kind: InsertKind,
+): Promise<InsertMediaMetadata> {
+  const src = toMediaSrc(pathOrSrc);
+  if (!src) {
+    return Promise.reject(new Error("Could not resolve media preview path."));
+  }
+
+  if (kind === "image") {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      let settled = false;
+      const timer = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        img.src = "";
+        reject(new Error("Timed out reading image dimensions."));
+      }, METADATA_PROBE_TIMEOUT_MS);
+      img.onload = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve({
+          duration: null,
+          width: img.naturalWidth || null,
+          height: img.naturalHeight || null,
+        });
+      };
+      img.onerror = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        reject(new Error("Could not load this image file."));
+      };
+      img.src = src;
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.muted = true;
+    video.playsInline = true;
+    let settled = false;
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      video.onloadedmetadata = null;
+      video.onerror = null;
+      video.removeAttribute("src");
+      video.load();
+    };
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("Timed out reading video duration."));
+    }, METADATA_PROBE_TIMEOUT_MS);
+    video.onloadedmetadata = () => {
+      if (settled) return;
+      settled = true;
+      const duration =
+        Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null;
+      const width = video.videoWidth || null;
+      const height = video.videoHeight || null;
+      cleanup();
+      resolve({ duration, width, height });
+    };
+    video.onerror = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("Could not read this video file."));
+    };
+    video.src = src;
+  });
 }

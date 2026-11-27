@@ -8,13 +8,18 @@
 
 import {
   DEFAULT_EXPORT_SETTINGS,
+  type InsertFit,
+  type InsertRect,
+  type MediaInsert,
   type ProjectClip,
   type ProjectData,
   type RecentProject,
   type SubtitleCue,
   type TranscriptData,
+  type TranscriptWord,
   type WizardStep,
 } from "./projectTypes";
+import { DEFAULT_INSERT_RECT, MIN_INSERT_RECT_DIM } from "./insertTiming";
 import { sanitizeWindowsFileName } from "./filenameTemplate";
 import { MIN_RENDERABLE_CLIP_SECONDS } from "./clipMath";
 
@@ -93,6 +98,7 @@ function normalizeCues(value: unknown): SubtitleCue[] {
       arabic: str(raw.arabic),
       thai: str(raw.thai),
       ...(raw.reviewed === true ? { reviewed: true } : {}),
+      ...(raw.edited === true ? { edited: true } : {}),
       ...(raw.source ? { source: str(raw.source) } : {}),
       ...(raw.reference ? { reference: str(raw.reference) } : {}),
       ...(typeof raw.confidence === "number" ? { confidence: raw.confidence } : {}),
@@ -101,6 +107,66 @@ function normalizeCues(value: unknown): SubtitleCue[] {
     });
   });
   return cues;
+}
+
+function normalizeInsertRect(value: unknown): InsertRect {
+  if (!isRecord(value)) return { ...DEFAULT_INSERT_RECT };
+  const width = Math.min(1, Math.max(MIN_INSERT_RECT_DIM, num(value.width, 1)));
+  const height = Math.min(1, Math.max(MIN_INSERT_RECT_DIM, num(value.height, 1)));
+  const x = Math.min(1 - width, Math.max(0, num(value.x, 0)));
+  const y = Math.min(1 - height, Math.max(0, num(value.y, 0)));
+  return { x, y, width, height };
+}
+
+function normalizeInsertFit(value: unknown, kind: "image" | "video"): InsertFit {
+  if (value === "cover" || value === "blur-fill" || value === "contain") return value;
+  return kind === "video" ? "cover" : "blur-fill";
+}
+
+function normalizeInserts(value: unknown): MediaInsert[] {
+  if (!Array.isArray(value)) return [];
+  const items: MediaInsert[] = [];
+  value.forEach((raw, index) => {
+    if (!isRecord(raw)) return;
+    const kind = raw.kind === "image" ? "image" : raw.kind === "video" ? "video" : null;
+    const path = str(raw.path).trim();
+    if (!kind || !path) return;
+    let start = Math.max(0, num(raw.start, 0));
+    let end = Math.max(0, num(raw.end, start));
+    if (end < start) [start, end] = [end, start];
+    if (end - start <= 0) return;
+    const sourceDuration =
+      kind === "video" && typeof raw.sourceDuration === "number" && Number.isFinite(raw.sourceDuration) && raw.sourceDuration > 0
+        ? raw.sourceDuration
+        : null;
+    const sourceStart =
+      kind === "video" ? Math.max(0, num(raw.sourceStart, 0)) : 0;
+    const fade =
+      typeof raw.fade === "number" && Number.isFinite(raw.fade)
+        ? Math.min(2, Math.max(0, raw.fade))
+        : 0;
+    items.push({
+      id: str(raw.id, `insert-${index}`),
+      kind,
+      path,
+      name: str(raw.name) || path.split(/[\\/]/).pop() || "insert",
+      start,
+      end,
+      sourceStart,
+      sourceDuration,
+      rect: normalizeInsertRect(raw.rect),
+      fit: normalizeInsertFit(raw.fit, kind),
+      muted: raw.muted !== false,
+      ...(fade > 0 ? { fade } : {}),
+      ...(typeof raw.naturalWidth === "number" && Number.isFinite(raw.naturalWidth)
+        ? { naturalWidth: raw.naturalWidth }
+        : {}),
+      ...(typeof raw.naturalHeight === "number" && Number.isFinite(raw.naturalHeight)
+        ? { naturalHeight: raw.naturalHeight }
+        : {}),
+    });
+  });
+  return items.sort((a, b) => a.start - b.start || a.end - b.end);
 }
 
 function normalizeClips(value: unknown): ProjectClip[] {
@@ -132,33 +198,52 @@ function normalizeClips(value: unknown): ProjectClip[] {
   return clips;
 }
 
+function normalizeWords(value: unknown): TranscriptWord[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const words: TranscriptWord[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const text = str(item.text).trim();
+    if (!text) continue;
+    const start = typeof item.start === "number" && Number.isFinite(item.start) ? Math.max(0, item.start) : null;
+    const end = typeof item.end === "number" && Number.isFinite(item.end) ? Math.max(0, item.end) : null;
+    if (start === null || end === null) continue;
+    words.push({ text, start, end: Math.max(start, end) });
+  }
+  return words.length > 0 ? words : undefined;
+}
+
 function normalizeTranscript(value: unknown): TranscriptData | null {
   if (!isRecord(value) || !Array.isArray(value.segments)) return null;
   return {
     language: strOrNull(value.language),
     languageProbability:
       typeof value.languageProbability === "number" ? value.languageProbability : null,
-    segments: value.segments.filter(isRecord).map((segment, index) => ({
-      id: num(segment.id, index),
-      start: num(segment.start, 0),
-      end: num(segment.end, 0),
-      text: str(segment.text),
-      language: strOrNull(segment.language),
-      ...(typeof segment.sentence_id === "number"
-        ? { sentence_id: segment.sentence_id }
-        : {}),
-      ...(typeof segment.source === "string" ? { source: segment.source } : {}),
-      ...(typeof segment.reference === "string" ? { reference: segment.reference } : {}),
-      ...(typeof segment.confidence === "number"
-        ? { confidence: segment.confidence }
-        : {}),
-      ...(typeof segment.original_text === "string"
-        ? { original_text: segment.original_text }
-        : {}),
-      ...(typeof segment.translation === "string"
-        ? { translation: segment.translation }
-        : {}),
-    })),
+    segments: value.segments.filter(isRecord).map((segment, index) => {
+      const words = normalizeWords(segment.words);
+      return {
+        id: num(segment.id, index),
+        start: num(segment.start, 0),
+        end: num(segment.end, 0),
+        text: str(segment.text),
+        language: strOrNull(segment.language),
+        ...(typeof segment.sentence_id === "number"
+          ? { sentence_id: segment.sentence_id }
+          : {}),
+        ...(typeof segment.source === "string" ? { source: segment.source } : {}),
+        ...(typeof segment.reference === "string" ? { reference: segment.reference } : {}),
+        ...(typeof segment.confidence === "number"
+          ? { confidence: segment.confidence }
+          : {}),
+        ...(typeof segment.original_text === "string"
+          ? { original_text: segment.original_text }
+          : {}),
+        ...(typeof segment.translation === "string"
+          ? { translation: segment.translation }
+          : {}),
+        ...(words ? { words } : {}),
+      };
+    }),
     // Keep the precomputed waveform envelope so a resumed project does not have
     // to decode the 16 kHz WAV again; drop non-finite samples.
     peaks: Array.isArray(value.peaks)
@@ -180,6 +265,16 @@ function normalizeProject(raw: unknown): ProjectData {
     for (const [clipId, cues] of Object.entries(project.subtitles)) {
       subtitles[clipId] = normalizeCues(cues);
     }
+  }
+
+  let inserts: Record<string, MediaInsert[]> | undefined;
+  if (isRecord(project.inserts)) {
+    const parsedInserts: Record<string, MediaInsert[]> = {};
+    for (const [clipId, list] of Object.entries(project.inserts)) {
+      const normalized = normalizeInserts(list);
+      if (normalized.length > 0) parsedInserts[clipId] = normalized;
+    }
+    if (Object.keys(parsedInserts).length > 0) inserts = parsedInserts;
   }
 
   return {
@@ -208,6 +303,7 @@ function normalizeProject(raw: unknown): ProjectData {
     trashedClips: normalizeClips(project.trashedClips).slice(-20),
     selectedClipId: strOrNull(project.selectedClipId),
     subtitles,
+    ...(inserts ? { inserts } : {}),
     export: {
       resolution:
         exportRaw.resolution === "1920x1080" ? "1920x1080" : DEFAULT_EXPORT_SETTINGS.resolution,

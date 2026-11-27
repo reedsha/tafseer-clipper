@@ -4,12 +4,17 @@ import NumberFlow from "@number-flow/react";
 import { toast } from "sonner";
 import {
   AlertTriangle,
+  ArrowLeftToLine,
+  ArrowRightToLine,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   Circle,
+  Film,
+  Image as ImageIcon,
+  ImagePlus,
   Languages,
   Loader2,
   Maximize2,
@@ -26,20 +31,24 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Smartphone,
+  Sparkles,
   Trash2,
   Type,
   Undo2,
   Volume2,
   VolumeX,
   X,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import { cn } from "cn";
 import type { Layout } from "react-resizable-panels";
 
 import { SegmentedToggle } from "@/components/SegmentedToggle";
 import { TimeFlow } from "@/components/TimeFlow";
-import { CueRibbon } from "@/components/subtitles/CueRibbon";
+import { CUE_RIBBON_ZOOM_LEVELS } from "@/components/subtitles/CueRibbon";
 import { SubtitleMonitor, type SubtitleMonitorHandle } from "@/components/subtitles/SubtitleMonitor";
+import { TimelineTracks } from "@/components/subtitles/TimelineTracks";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -69,7 +78,33 @@ import { Textarea } from "@/components/ui/textarea";
 import { presetMatchesStyle } from "@/components/config/shared";
 import { verifyArabic, verifyArabicBatch } from "@/lib/api";
 import { formatClock } from "@/lib/format";
-import { FRAMING_LABELS, type FramingMode, type Resolution, type SubtitleCue } from "@/lib/projectTypes";
+import {
+  cloneInserts,
+  DEFAULT_INSERT_RECT,
+  isFullFrameRect,
+  resolveInsertPlacement,
+} from "@/lib/insertTiming";
+import {
+  classifyInsertFile,
+  isTauriRuntime,
+  openInsertMediaFiles,
+  probeInsertMedia,
+  probeMediaSrc,
+  readClipboardFilePaths,
+  saveClipboardImage,
+  subscribeNativeDrops,
+  toMediaSrc,
+  type InsertMediaPick,
+} from "@/lib/media";
+import {
+  FRAMING_LABELS,
+  type FramingMode,
+  type InsertFit,
+  type InsertRect,
+  type MediaInsert,
+  type Resolution,
+  type SubtitleCue,
+} from "@/lib/projectTypes";
 import {
   nudgeVerticalOffset,
   resolveAssStyles,
@@ -91,6 +126,16 @@ import {
   wrapArabicText,
   wrapSubtitleText,
 } from "@/lib/subtitleWrap";
+import {
+  clamp,
+  MIN_CUE_SECONDS,
+  MIN_SPLITTABLE_DURATION,
+  NEIGHBOUR_GAP,
+  resolveSplitTiming,
+  resolveTextSplitOffsetForTime,
+  roundTime,
+  spokenWeight,
+} from "@/lib/subtitleTiming";
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
@@ -111,26 +156,42 @@ const STEP3_LINES_MIN_PX = 340;
 const STEP3_PREVIEW_MIN_PX = 320;
 const STEP3_PREVIEW_DEFAULT_PX = 360;
 
-function loadStep3Layout(): Layout | undefined {
+const STEP3_PREVIEW_SPLIT_STORAGE_KEY = "tafseer.step3.previewSplit.v1";
+const STEP3_MONITOR_PANE_ID = "step3-monitor-pane";
+const STEP3_TIMELINE_PANE_ID = "step3-timeline-pane";
+const STEP3_MONITOR_MIN_PX = 180;
+const STEP3_TIMELINE_MIN_PX = 132;
+const STEP3_TIMELINE_DEFAULT_PX = 144;
+
+interface Step3HistorySnapshot {
+  cues: SubtitleCue[];
+  inserts: MediaInsert[];
+}
+
+function loadTwoPaneLayout(
+  storageKey: string,
+  firstId: string,
+  secondId: string,
+): Layout | undefined {
   try {
-    const raw = window.localStorage.getItem(STEP3_LAYOUT_STORAGE_KEY);
+    const raw = window.localStorage.getItem(storageKey);
     if (!raw) return undefined;
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null) return undefined;
-    const lines = (parsed as Record<string, unknown>)[STEP3_LINES_PANEL_ID];
-    const preview = (parsed as Record<string, unknown>)[STEP3_PREVIEW_PANEL_ID];
+    const first = (parsed as Record<string, unknown>)[firstId];
+    const second = (parsed as Record<string, unknown>)[secondId];
     if (
-      typeof lines === "number" &&
-      typeof preview === "number" &&
-      Number.isFinite(lines) &&
-      Number.isFinite(preview) &&
-      lines > 0 &&
-      preview > 0 &&
-      Math.abs(lines + preview - 100) < 1
+      typeof first === "number" &&
+      typeof second === "number" &&
+      Number.isFinite(first) &&
+      Number.isFinite(second) &&
+      first > 0 &&
+      second > 0 &&
+      Math.abs(first + second - 100) < 1
     ) {
       return {
-        [STEP3_LINES_PANEL_ID]: lines,
-        [STEP3_PREVIEW_PANEL_ID]: preview,
+        [firstId]: first,
+        [secondId]: second,
       };
     }
   } catch {
@@ -141,10 +202,6 @@ function loadStep3Layout(): Layout | undefined {
 
 function cloneCues(list: SubtitleCue[]): SubtitleCue[] {
   return list.map((cue) => ({ ...cue }));
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
 
 function hasText(cue: SubtitleCue): boolean {
@@ -205,6 +262,11 @@ interface SubtitleCueRowProps {
   onSplitAt: (cueId: string, field: CueField, offset: number) => void;
   onVerify: (cue: SubtitleCue) => void;
   onSplitCue: (cue: SubtitleCue) => void;
+  canSplitAtPlayhead: boolean;
+  canSetStartToPlayhead: boolean;
+  canSetEndToPlayhead: boolean;
+  onSplitAtPlayhead: (cue: SubtitleCue) => void;
+  onSetEdgeToPlayhead: (cue: SubtitleCue, edge: "start" | "end") => void;
   onMerge: (cueId: string) => void;
   onDelete: (cueId: string) => void;
 }
@@ -226,6 +288,11 @@ const SubtitleCueRow = memo(function SubtitleCueRow({
   onSplitAt,
   onVerify,
   onSplitCue,
+  canSplitAtPlayhead,
+  canSetStartToPlayhead,
+  canSetEndToPlayhead,
+  onSplitAtPlayhead,
+  onSetEdgeToPlayhead,
   onMerge,
   onDelete,
 }: SubtitleCueRowProps) {
@@ -327,7 +394,11 @@ const SubtitleCueRow = memo(function SubtitleCueRow({
             onKeyDown={(event) => {
               if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
                 event.preventDefault();
-                onSplitAt(cue.id, "arabic", event.currentTarget.selectionStart);
+                if (event.shiftKey) {
+                  onSplitAtPlayhead(cue);
+                } else {
+                  onSplitAt(cue.id, "arabic", event.currentTarget.selectionStart);
+                }
               }
             }}
             rows={2}
@@ -347,7 +418,11 @@ const SubtitleCueRow = memo(function SubtitleCueRow({
             onKeyDown={(event) => {
               if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
                 event.preventDefault();
-                onSplitAt(cue.id, "thai", event.currentTarget.selectionStart);
+                if (event.shiftKey) {
+                  onSplitAtPlayhead(cue);
+                } else {
+                  onSplitAt(cue.id, "thai", event.currentTarget.selectionStart);
+                }
               }
             }}
             rows={2}
@@ -388,9 +463,43 @@ const SubtitleCueRow = memo(function SubtitleCueRow({
               variant="ghost"
               aria-label="Split line at the cursor"
               title="Split line at the cursor (Ctrl + Enter)"
+              onMouseDown={(event) => event.preventDefault()}
               onClick={() => onSplitCue(cue)}
             >
               <Scissors className="size-3" />
+            </Button>
+            <Button
+              size="xs"
+              variant="ghost"
+              className="gap-1 px-1.5 text-[11px]"
+              aria-label="Split line at playhead"
+              title="Split line at playhead (Ctrl + Shift + Enter)"
+              disabled={!canSplitAtPlayhead}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => onSplitAtPlayhead(cue)}
+            >
+              <Scissors className="size-3" />
+              {L("Split at playhead")}
+            </Button>
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label={L("Set start to playhead")}
+              title={L("Set start to playhead")}
+              disabled={!canSetStartToPlayhead}
+              onClick={() => onSetEdgeToPlayhead(cue, "start")}
+            >
+              <ArrowLeftToLine className="size-3" />
+            </Button>
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label={L("Set end to playhead")}
+              title={L("Set end to playhead")}
+              disabled={!canSetEndToPlayhead}
+              onClick={() => onSetEdgeToPlayhead(cue, "end")}
+            >
+              <ArrowRightToLine className="size-3" />
             </Button>
             <Button
               size="icon-xs"
@@ -414,7 +523,7 @@ const SubtitleCueRow = memo(function SubtitleCueRow({
             </Button>
           </div>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            Ctrl + Enter splits at the cursor · Space plays the line.
+            Ctrl + Enter splits at cursor · Ctrl + Shift + Enter splits at playhead · Space plays.
           </p>
         </div>
       ) : null}
@@ -439,6 +548,7 @@ export function Step3Subtitles() {
   const project = useProjectStore((state) => state.project);
   const setSubtitles = useProjectStore((state) => state.setSubtitles);
   const setSubtitlesBatch = useProjectStore((state) => state.setSubtitlesBatch);
+  const setInserts = useProjectStore((state) => state.setInserts);
   const selectClip = useProjectStore((state) => state.selectClip);
   const setStep = useProjectStore((state) => state.setStep);
   const updateExportSettings = useProjectStore((state) => state.updateExportSettings);
@@ -466,13 +576,26 @@ export function Step3Subtitles() {
   const seekKeyRef = useRef<string | null>(null);
   const manualEditClipsRef = useRef<Set<string>>(new Set());
   const historyRef = useRef<
-    Map<string, { past: SubtitleCue[][]; future: SubtitleCue[][] }>
+    Map<string, { past: Step3HistorySnapshot[]; future: Step3HistorySnapshot[] }>
   >(new Map());
   const lastTextEditRef = useRef<{ key: string; at: number } | null>(null);
 
   const [historyRev, setHistoryRev] = useState(0);
-  const [defaultLayout] = useState<Layout | undefined>(() => loadStep3Layout());
+  const [defaultLayout] = useState<Layout | undefined>(() =>
+    loadTwoPaneLayout(STEP3_LAYOUT_STORAGE_KEY, STEP3_LINES_PANEL_ID, STEP3_PREVIEW_PANEL_ID),
+  );
+  const [defaultPreviewSplit] = useState<Layout | undefined>(() =>
+    loadTwoPaneLayout(
+      STEP3_PREVIEW_SPLIT_STORAGE_KEY,
+      STEP3_MONITOR_PANE_ID,
+      STEP3_TIMELINE_PANE_ID,
+    ),
+  );
   const [activeCueId, setActiveCueId] = useState<string | null>(null);
+  const [selectedInsertId, setSelectedInsertId] = useState<string | null>(null);
+  const [insertPopoverOpen, setInsertPopoverOpen] = useState(false);
+  const [insertDragOver, setInsertDragOver] = useState(false);
+  const [missingInsertIds, setMissingInsertIds] = useState<Set<string>>(() => new Set());
   const [filter, setFilter] = useState<"all" | "unchecked">("all");
   const [safeZone, setSafeZone] = useState(true);
   const [previewFocus, setPreviewFocus] = useState(false);
@@ -487,6 +610,7 @@ export function Step3Subtitles() {
   const [continuousPlay, setContinuousPlay] = useState(false);
   const [rate, setRate] = useState(1);
   const [overlayMode, setOverlayMode] = useState<"cue" | "playhead">("cue");
+  const [ribbonZoom, setRibbonZoom] = useState<number>(1);
 
   const resolution: Resolution = project?.export.resolution ?? "1080x1920";
   const framing: FramingMode = project?.export.framing ?? "blur-fill";
@@ -506,6 +630,14 @@ export function Step3Subtitles() {
   const verifyJob = useTaskJob("verify", project?.id ?? null, selectedClipId);
   const verifyAll = verifyJob?.status === "running" ? verifyJob.progress : null;
   const cues = project?.subtitles[selectedClipId ?? ""] ?? [];
+  const inserts = useMemo(
+    () => project?.inserts?.[selectedClipId ?? ""] ?? [],
+    [project?.inserts, selectedClipId],
+  );
+  const selectedInsert = useMemo(
+    () => inserts.find((item) => item.id === selectedInsertId) ?? null,
+    [inserts, selectedInsertId],
+  );
   const clipStart = selectedClip?.start ?? 0;
   const clipDuration = selectedClip ? selectedClip.end - selectedClip.start : 0;
   const canPlay = Boolean(project?.sourcePath);
@@ -521,10 +653,15 @@ export function Step3Subtitles() {
   }, [historyKey, historyRev]);
 
   const pushHistory = useCallback(
-    (clipId: string, snapshot: SubtitleCue[], textCoalesceKey?: string) => {
-      const projectId = useProjectStore.getState().project?.id;
-      if (!projectId) return;
-      const key = `${projectId}:${clipId}`;
+    (
+      clipId: string,
+      cuesSnapshot: SubtitleCue[],
+      textCoalesceKey?: string,
+      insertsSnapshot?: MediaInsert[],
+    ) => {
+      const projectNow = useProjectStore.getState().project;
+      if (!projectNow) return;
+      const key = `${projectNow.id}:${clipId}`;
       const now = Date.now();
       if (textCoalesceKey) {
         const last = lastTextEditRef.current;
@@ -542,7 +679,11 @@ export function Step3Subtitles() {
         entry = { past: [], future: [] };
         historyRef.current.set(key, entry);
       }
-      entry.past.push(cloneCues(snapshot));
+      const insertsNow = insertsSnapshot ?? projectNow.inserts?.[clipId] ?? [];
+      entry.past.push({
+        cues: cloneCues(cuesSnapshot),
+        inserts: cloneInserts(insertsNow),
+      });
       if (entry.past.length > MAX_UNDO_HISTORY) {
         entry.past.splice(0, entry.past.length - MAX_UNDO_HISTORY);
       }
@@ -553,19 +694,24 @@ export function Step3Subtitles() {
   );
 
   const applyHistorySnapshot = useCallback(
-    (clipId: string, target: SubtitleCue[]) => {
-      const cloned = cloneCues(target);
+    (clipId: string, target: Step3HistorySnapshot) => {
+      const clonedCues = cloneCues(target.cues);
+      const clonedInserts = cloneInserts(target.inserts);
       manualEditClipsRef.current.add(clipId);
       setRebuildHint(false);
-      seekKeyRef.current = `${clipId}:${cloned[0]?.id ?? "empty"}`;
-      setSubtitles(clipId, cloned);
+      seekKeyRef.current = `${clipId}:${clonedCues[0]?.id ?? "empty"}`;
+      setSubtitles(clipId, clonedCues);
+      setInserts(clipId, clonedInserts);
       setActiveCueId((prev) =>
-        prev && cloned.some((cue) => cue.id === prev) ? prev : (cloned[0]?.id ?? null),
+        prev && clonedCues.some((cue) => cue.id === prev) ? prev : (clonedCues[0]?.id ?? null),
+      );
+      setSelectedInsertId((prev) =>
+        prev && clonedInserts.some((item) => item.id === prev) ? prev : null,
       );
       setPlayhead((current) => clamp(current, 0, Math.max(0, clipDuration)));
       setHistoryRev((n) => n + 1);
     },
-    [clipDuration, setSubtitles],
+    [clipDuration, setInserts, setSubtitles],
   );
 
   const handleUndo = useCallback(() => {
@@ -576,8 +722,12 @@ export function Step3Subtitles() {
     const previous = entry?.past.pop();
     if (!entry || !previous) return;
     lastTextEditRef.current = null;
-    const current = projectNow.subtitles[selectedClipId] ?? [];
-    entry.future.push(cloneCues(current));
+    const currentCues = projectNow.subtitles[selectedClipId] ?? [];
+    const currentInserts = projectNow.inserts?.[selectedClipId] ?? [];
+    entry.future.push({
+      cues: cloneCues(currentCues),
+      inserts: cloneInserts(currentInserts),
+    });
     if (entry.future.length > MAX_UNDO_HISTORY) {
       entry.future.splice(0, entry.future.length - MAX_UNDO_HISTORY);
     }
@@ -592,8 +742,12 @@ export function Step3Subtitles() {
     const next = entry?.future.pop();
     if (!entry || !next) return;
     lastTextEditRef.current = null;
-    const current = projectNow.subtitles[selectedClipId] ?? [];
-    entry.past.push(cloneCues(current));
+    const currentCues = projectNow.subtitles[selectedClipId] ?? [];
+    const currentInserts = projectNow.inserts?.[selectedClipId] ?? [];
+    entry.past.push({
+      cues: cloneCues(currentCues),
+      inserts: cloneInserts(currentInserts),
+    });
     if (entry.past.length > MAX_UNDO_HISTORY) {
       entry.past.splice(0, entry.past.length - MAX_UNDO_HISTORY);
     }
@@ -616,6 +770,39 @@ export function Step3Subtitles() {
     return pool.find((cue) => cue.id === activeCueId) ?? pool[0] ?? null;
   }, [activeCueId, cues, filter, visibleCues]);
   const activeCueKey = activeCue?.id ?? null;
+  const playingCueId = useMemo(() => {
+    if (!playing) return null;
+    return cues.find((cue) => playhead >= cue.start - 0.001 && playhead < cue.end)?.id ?? null;
+  }, [cues, playhead, playing]);
+  const { canSplitAtPlayhead, canSetStartToPlayhead, canSetEndToPlayhead } = useMemo(() => {
+    if (!activeCue) {
+      return {
+        canSplitAtPlayhead: false,
+        canSetStartToPlayhead: false,
+        canSetEndToPlayhead: false,
+      };
+    }
+    const sorted = [...cues].sort((a, b) => a.start - b.start);
+    const idx = sorted.findIndex((item) => item.id === activeCue.id);
+    const prevCue = idx > 0 ? sorted[idx - 1] : null;
+    const nextCue = idx >= 0 && idx + 1 < sorted.length ? sorted[idx + 1] : null;
+    const lowerBound = prevCue ? prevCue.end + NEIGHBOUR_GAP : 0;
+    const upperBound = nextCue ? nextCue.start - NEIGHBOUR_GAP : clipDuration;
+    return {
+      canSplitAtPlayhead:
+        activeCue.end - activeCue.start >= MIN_SPLITTABLE_DURATION - 0.001 &&
+        playhead >= activeCue.start + MIN_CUE_SECONDS - 0.001 &&
+        playhead <= activeCue.end - MIN_CUE_SECONDS + 0.001,
+      canSetStartToPlayhead:
+        playhead >= lowerBound - 0.001 &&
+        playhead <= activeCue.end - MIN_CUE_SECONDS + 0.001 &&
+        lowerBound <= activeCue.end - MIN_CUE_SECONDS + 0.001,
+      canSetEndToPlayhead:
+        playhead >= activeCue.start + MIN_CUE_SECONDS - 0.001 &&
+        playhead <= upperBound + 0.001 &&
+        activeCue.start + MIN_CUE_SECONDS - 0.001 <= upperBound,
+    };
+  }, [activeCue, clipDuration, cues, playhead]);
   const arabicPassages = useMemo(
     () =>
       cues.filter(
@@ -730,7 +917,11 @@ export function Step3Subtitles() {
     const current = useProjectStore.getState().project;
     const existing = current?.subtitles[selectedClip.id] ?? [];
     const segments = current?.transcript?.segments ?? [];
-    if (!existing.length || !segments.length || existing.some((cue) => cue.reviewed)) {
+    if (
+      !existing.length ||
+      !segments.length ||
+      existing.some((cue) => cue.reviewed || cue.edited)
+    ) {
       setRebuildHint(false);
       return;
     }
@@ -879,6 +1070,7 @@ export function Step3Subtitles() {
               originalText: undefined,
               translation: undefined,
               reviewed: false,
+              edited: true,
             }
           : item,
       ),
@@ -892,9 +1084,12 @@ export function Step3Subtitles() {
   useEffect(() => {
     lastTextEditRef.current = null;
     setActiveCueId(null);
+    setSelectedInsertId(null);
+    setInsertPopoverOpen(false);
     setPlayhead(0);
     setPlaying(false);
     setRate(1);
+    setRibbonZoom(1);
     monitorRef.current?.pause();
     monitorRef.current?.setPlaybackRate(1);
   }, [selectedClipId]);
@@ -1135,13 +1330,14 @@ export function Step3Subtitles() {
             ...cue,
             arabic: value,
             reviewed: false,
+            edited: true,
             source: undefined,
             reference: undefined,
             confidence: undefined,
             translation: undefined,
           };
         }
-        return { ...cue, [field]: value, reviewed: false };
+        return { ...cue, [field]: value, reviewed: false, edited: true };
       });
       setSubtitles(selectedClipId, next);
     },
@@ -1239,24 +1435,528 @@ export function Step3Subtitles() {
       pushHistory(selectedClipId, latest);
       setSubtitles(
         selectedClipId,
-        latest.map((cue) => (cue.id === cueId ? { ...cue, start, end } : cue)),
+        latest.map((cue) => (cue.id === cueId ? { ...cue, start, end, edited: true } : cue)),
       );
       setPlayhead((current) => clamp(current, 0, Math.max(0, clipDuration)));
     },
     [clipDuration, pushHistory, selectedClipId, setSubtitles],
   );
 
+  const updateCuePair = useCallback(
+    (leftId: string, leftEnd: number, rightId: string, rightStart: number) => {
+      if (!selectedClipId) return;
+      const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
+      const leftCue = latest.find((cue) => cue.id === leftId);
+      const rightCue = latest.find((cue) => cue.id === rightId);
+      if (!leftCue || !rightCue) return;
+      if (leftCue.end === leftEnd && rightCue.start === rightStart) return;
+      manualEditClipsRef.current.add(selectedClipId);
+      setRebuildHint(false);
+      pushHistory(selectedClipId, latest);
+      setSubtitles(
+        selectedClipId,
+        latest.map((cue) => {
+          if (cue.id === leftId) return { ...cue, end: leftEnd, edited: true };
+          if (cue.id === rightId) return { ...cue, start: rightStart, edited: true };
+          return cue;
+        }),
+      );
+      setPlayhead((current) => clamp(current, 0, Math.max(0, clipDuration)));
+    },
+    [clipDuration, pushHistory, selectedClipId, setSubtitles],
+  );
+
+  /* -------------------------- insert footage --------------------------- */
+
+  // Probe insert files in the desktop runtime so moved/deleted files flag cleanly.
+  useEffect(() => {
+    if (!isTauriRuntime() || inserts.length === 0) {
+      setMissingInsertIds(new Set());
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const next = new Set<string>();
+      for (const item of inserts) {
+        if (/^(https?:|data:|blob:)/i.test(item.path)) continue;
+        const src = toMediaSrc(item.path);
+        if (!src) continue;
+        const probe = await probeMediaSrc(src);
+        if (!probe.ok && probe.status !== null) {
+          next.add(item.id);
+        }
+      }
+      if (!cancelled) setMissingInsertIds(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [inserts]);
+
+  const addInsertMediaPicks = useCallback(
+    async (picks: InsertMediaPick[]) => {
+      if (!selectedClipId || !selectedClip || picks.length === 0) return;
+      const projectNow = useProjectStore.getState().project;
+      if (!projectNow) return;
+      const latestCues = projectNow.subtitles[selectedClipId] ?? [];
+      const latestInserts = projectNow.inserts?.[selectedClipId] ?? [];
+      const working = cloneInserts(latestInserts);
+      const added: MediaInsert[] = [];
+      let anyTrimmed = false;
+
+      for (const pick of picks) {
+        let meta: { duration: number | null; width: number | null; height: number | null };
+        try {
+          meta = await probeInsertMedia(pick.path, pick.kind);
+        } catch (error) {
+          toast.error("Could not load media", {
+            description: `${pick.name}: ${error instanceof Error ? error.message : String(error)}`,
+          });
+          continue;
+        }
+
+        const placement = resolveInsertPlacement({
+          existing: working,
+          clipDuration,
+          playhead,
+          kind: pick.kind,
+          sourceDuration: meta.duration,
+        });
+
+        if (!placement.ok) {
+          if (placement.reason === "too-long") {
+            toast.error("Video is too long for this clip", {
+              description: `${pick.name} is ${formatClock(placement.sourceDuration ?? 0, true)}, which exceeds this ${formatClock(placement.clipDuration ?? clipDuration, true)} clip.`,
+            });
+          } else if (placement.reason === "invalid-duration") {
+            toast.error("Could not read video duration", { description: pick.name });
+          } else {
+            toast.error("No room on the insert track", {
+              description: "Shorten or move an existing insert block first.",
+            });
+          }
+          continue;
+        }
+
+        if (placement.trimmedToFit) anyTrimmed = true;
+        const created: MediaInsert = {
+          id: crypto.randomUUID(),
+          kind: pick.kind,
+          path: pick.path,
+          name: pick.name,
+          start: placement.start,
+          end: placement.end,
+          sourceStart: placement.sourceStart,
+          sourceDuration: meta.duration,
+          rect: { ...DEFAULT_INSERT_RECT },
+          fit: pick.kind === "video" ? "cover" : "blur-fill",
+          muted: true,
+          fade: 0,
+          naturalWidth: meta.width,
+          naturalHeight: meta.height,
+        };
+        working.push(created);
+        working.sort((a, b) => a.start - b.start || a.end - b.end);
+        added.push(created);
+      }
+
+      if (added.length === 0) return;
+      const last = added[added.length - 1];
+      pushHistory(selectedClipId, latestCues, undefined, latestInserts);
+      setInserts(selectedClipId, working);
+      setSelectedInsertId(last.id);
+      monitorRef.current?.pause();
+      setOverlayMode("playhead");
+      const previewAt = Math.min(last.end - 0.01, last.start + 0.02);
+      monitorRef.current?.seekTo(clipStart + previewAt);
+      setPlayhead(Math.max(0, previewAt));
+
+      if (anyTrimmed) {
+        toast.info("Video shortened to fit available gap", {
+          description: "Drag the edges or free up space on the insert track to extend it.",
+        });
+      }
+    },
+    [clipDuration, clipStart, playhead, pushHistory, selectedClip, selectedClipId, setInserts],
+  );
+
+  const handleBrowseInsertMedia = useCallback(async () => {
+    const picks = await openInsertMediaFiles();
+    if (picks.length > 0) {
+      await addInsertMediaPicks(picks);
+    }
+  }, [addInsertMediaPicks]);
+
+  const handleDropInsertFiles = useCallback(
+    async (fileList: FileList) => {
+      const picks: InsertMediaPick[] = [];
+      for (const file of Array.from(fileList)) {
+        const path = (file as File & { path?: string }).path ?? null;
+        let kind = classifyInsertFile(file.name);
+        if (!kind) {
+          if (file.type.startsWith("image/")) kind = "image";
+          else if (file.type.startsWith("video/")) kind = "video";
+        }
+        if (!kind) continue;
+        picks.push({
+          path: path ?? URL.createObjectURL(file),
+          name: file.name || (kind === "image" ? "image.png" : "video.mp4"),
+          kind,
+        });
+      }
+      if (picks.length === 0) {
+        toast.error("Unsupported media type", {
+          description: "Drop PNG, JPG, WebP images or MP4, MOV, MKV, WebM videos.",
+        });
+        return;
+      }
+      await addInsertMediaPicks(picks);
+    },
+    [addInsertMediaPicks],
+  );
+
+  const updateInsertTiming = useCallback(
+    (insertId: string, patch: Pick<MediaInsert, "start" | "end" | "sourceStart">) => {
+      if (!selectedClipId) return;
+      const projectNow = useProjectStore.getState().project;
+      const latestCues = projectNow?.subtitles[selectedClipId] ?? [];
+      const latestInserts = projectNow?.inserts?.[selectedClipId] ?? [];
+      const target = latestInserts.find((item) => item.id === insertId);
+      if (!target) return;
+      if (
+        target.start === patch.start &&
+        target.end === patch.end &&
+        target.sourceStart === patch.sourceStart
+      ) {
+        return;
+      }
+      pushHistory(selectedClipId, latestCues, undefined, latestInserts);
+      setInserts(
+        selectedClipId,
+        latestInserts
+          .map((item) => (item.id === insertId ? { ...item, ...patch } : item))
+          .sort((a, b) => a.start - b.start || a.end - b.end),
+      );
+      setPlayhead((current) => clamp(current, 0, Math.max(0, clipDuration)));
+    },
+    [clipDuration, pushHistory, selectedClipId, setInserts],
+  );
+
+  const updateInsertRect = useCallback(
+    (insertId: string, rect: InsertRect) => {
+      if (!selectedClipId) return;
+      const projectNow = useProjectStore.getState().project;
+      const latestCues = projectNow?.subtitles[selectedClipId] ?? [];
+      const latestInserts = projectNow?.inserts?.[selectedClipId] ?? [];
+      if (!latestInserts.some((item) => item.id === insertId)) return;
+      pushHistory(selectedClipId, latestCues, undefined, latestInserts);
+      setInserts(
+        selectedClipId,
+        latestInserts.map((item) => (item.id === insertId ? { ...item, rect } : item)),
+      );
+    },
+    [pushHistory, selectedClipId, setInserts],
+  );
+
+  const updateInsertMeta = useCallback(
+    (insertId: string, patch: Partial<Pick<MediaInsert, "fit" | "fade" | "rect">>) => {
+      if (!selectedClipId) return;
+      const projectNow = useProjectStore.getState().project;
+      const latestCues = projectNow?.subtitles[selectedClipId] ?? [];
+      const latestInserts = projectNow?.inserts?.[selectedClipId] ?? [];
+      if (!latestInserts.some((item) => item.id === insertId)) return;
+      pushHistory(selectedClipId, latestCues, undefined, latestInserts);
+      setInserts(
+        selectedClipId,
+        latestInserts.map((item) => (item.id === insertId ? { ...item, ...patch } : item)),
+      );
+    },
+    [pushHistory, selectedClipId, setInserts],
+  );
+
+  const matchInsertToActiveCue = useCallback(
+    (insertId: string) => {
+      if (!selectedClipId || !activeCue) return;
+      const projectNow = useProjectStore.getState().project;
+      const latestCues = projectNow?.subtitles[selectedClipId] ?? [];
+      const latestInserts = projectNow?.inserts?.[selectedClipId] ?? [];
+      const sorted = [...latestInserts].sort((a, b) => a.start - b.start || a.end - b.end);
+      const index = sorted.findIndex((item) => item.id === insertId);
+      if (index < 0) return;
+      const target = sorted[index];
+      const prev = index > 0 ? sorted[index - 1] : null;
+      const next = index + 1 < sorted.length ? sorted[index + 1] : null;
+      const lower = prev ? prev.end + 0.02 : 0;
+      const upper = next ? next.start - 0.02 : clipDuration;
+      const start = clamp(activeCue.start, lower, Math.max(lower, upper - 0.2));
+      const maxEndForVideo =
+        target.kind === "video" && target.sourceDuration !== null
+          ? start + Math.max(0, target.sourceDuration - target.sourceStart)
+          : upper;
+      const end = clamp(activeCue.end, start + 0.2, Math.min(upper, maxEndForVideo));
+      if (end - start < 0.2) {
+        toast.error("No room to match this subtitle line", {
+          description: "Adjacent insert footage blocks this time range.",
+        });
+        return;
+      }
+      pushHistory(selectedClipId, latestCues, undefined, latestInserts);
+      setInserts(
+        selectedClipId,
+        latestInserts
+          .map((item) => (item.id === insertId ? { ...item, start, end } : item))
+          .sort((a, b) => a.start - b.start || a.end - b.end),
+      );
+      monitorRef.current?.pause();
+      setOverlayMode("playhead");
+      monitorRef.current?.seekTo(clipStart + start + 0.02);
+      setPlayhead(start + 0.02);
+    },
+    [activeCue, clipDuration, clipStart, pushHistory, selectedClipId, setInserts],
+  );
+
+  const replaceInsertFile = useCallback(
+    async (insertId: string) => {
+      if (!selectedClipId) return;
+      const picks = await openInsertMediaFiles();
+      const pick = picks[0];
+      if (!pick) return;
+      let meta: { duration: number | null; width: number | null; height: number | null };
+      try {
+        meta = await probeInsertMedia(pick.path, pick.kind);
+      } catch (error) {
+        toast.error("Could not load media", {
+          description: `${pick.name}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        return;
+      }
+      if (
+        pick.kind === "video" &&
+        (meta.duration === null || meta.duration > clipDuration + 0.001)
+      ) {
+        toast.error("Video is too long for this clip", {
+          description: `${pick.name} cannot replace this insert because it is longer than the clip.`,
+        });
+        return;
+      }
+      const projectNow = useProjectStore.getState().project;
+      const latestCues = projectNow?.subtitles[selectedClipId] ?? [];
+      const latestInserts = projectNow?.inserts?.[selectedClipId] ?? [];
+      const target = latestInserts.find((item) => item.id === insertId);
+      if (!target) return;
+      const end =
+        pick.kind === "video" && meta.duration !== null
+          ? Math.min(target.end, target.start + meta.duration)
+          : target.end;
+      pushHistory(selectedClipId, latestCues, undefined, latestInserts);
+      setInserts(
+        selectedClipId,
+        latestInserts.map((item) =>
+          item.id === insertId
+            ? {
+                ...item,
+                kind: pick.kind,
+                path: pick.path,
+                name: pick.name,
+                sourceStart: 0,
+                sourceDuration: meta.duration,
+                end,
+                naturalWidth: meta.width,
+                naturalHeight: meta.height,
+              }
+            : item,
+        ),
+      );
+    },
+    [clipDuration, pushHistory, selectedClipId, setInserts],
+  );
+
+  const deleteInsert = useCallback(
+    (insertId: string) => {
+      if (!selectedClipId) return;
+      const projectNow = useProjectStore.getState().project;
+      const owningProjectId = projectNow?.id ?? null;
+      const latestCues = projectNow?.subtitles[selectedClipId] ?? [];
+      const latestInserts = projectNow?.inserts?.[selectedClipId] ?? [];
+      const removed = latestInserts.find((item) => item.id === insertId);
+      if (!removed) return;
+      const next = latestInserts.filter((item) => item.id !== insertId);
+      pushHistory(selectedClipId, latestCues, undefined, latestInserts);
+      setInserts(selectedClipId, next);
+      setInsertPopoverOpen(false);
+      setSelectedInsertId((prev) => (prev === insertId ? null : prev));
+
+      toast("Insert removed", {
+        description: removed.name,
+        action: {
+          label: "Undo",
+          onClick: () => {
+            const current = useProjectStore.getState().project;
+            if (!owningProjectId || current?.id !== owningProjectId) return;
+            const list = current.inserts?.[selectedClipId] ?? [];
+            if (list.some((item) => item.id === removed.id)) return;
+            useProjectStore
+              .getState()
+              .setInserts(
+                selectedClipId,
+                [...list, removed].sort((a, b) => a.start - b.start || a.end - b.end),
+              );
+            setSelectedInsertId(removed.id);
+          },
+        },
+      });
+    },
+    [pushHistory, selectedClipId, setInserts],
+  );
+
+  // Native file drag-drop when Step 3 is active without modal overlays.
+  useEffect(() => {
+    if (!selectedClipId || settingsOpen || configStep !== null) return;
+    return subscribeNativeDrops({
+      onEnter: () => setInsertDragOver(true),
+      onLeave: () => setInsertDragOver(false),
+      onDrop: (paths) => {
+        setInsertDragOver(false);
+        const picks: InsertMediaPick[] = [];
+        for (const path of paths) {
+          const kind = classifyInsertFile(path);
+          if (kind) {
+            picks.push({ path, name: path.split(/[\\/]/).pop() || path, kind });
+          }
+        }
+        if (picks.length === 0) {
+          toast.error("Unsupported media type", {
+            description: "Drop PNG, JPG, WebP images or MP4, MOV, MKV, WebM videos.",
+          });
+          return;
+        }
+        void addInsertMediaPicks(picks);
+      },
+    });
+  }, [addInsertMediaPicks, configStep, selectedClipId, settingsOpen]);
+
+  // Literal Ctrl+V paste for copied Explorer files or screenshots/images.
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent) => {
+      if (settingsOpen || configStep !== null || !selectedClipId || clipDuration <= 0) return;
+      if (
+        document.querySelector(
+          '[data-slot="dialog-content"][data-state="open"], [data-vaul-drawer][data-state="open"], [data-slot="popover-content"][data-state="open"], [data-slot="select-content"][data-state="open"]',
+        )
+      ) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      const inTextInput = Boolean(
+        target &&
+          (target.isContentEditable ||
+            ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)),
+      );
+      if (inTextInput) return;
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (
+        activeEl &&
+        (activeEl.isContentEditable ||
+          ["INPUT", "TEXTAREA", "SELECT"].includes(activeEl.tagName))
+      ) {
+        return;
+      }
+
+      const projectId = useProjectStore.getState().project?.id ?? "default";
+      const items = Array.from(event.clipboardData?.items ?? []);
+      const files = Array.from(event.clipboardData?.files ?? []);
+
+      const blobs: File[] = [];
+      for (const item of items) {
+        if (item.kind === "file") {
+          const f = item.getAsFile();
+          if (f) blobs.push(f);
+        }
+      }
+      for (const file of files) {
+        if (!blobs.some((b) => b.name === file.name && b.size === file.size && b.type === file.type)) {
+          blobs.push(file);
+        }
+      }
+
+      if (blobs.length > 0) {
+        event.preventDefault();
+        void (async () => {
+          const picks: InsertMediaPick[] = [];
+          for (const blob of blobs) {
+            const diskPath = (blob as File & { path?: string }).path;
+            if (diskPath) {
+              const kind = classifyInsertFile(diskPath);
+              if (kind) {
+                picks.push({ path: diskPath, name: blob.name || diskPath, kind });
+                continue;
+              }
+            }
+            if (blob.type.startsWith("image/") || classifyInsertFile(blob.name) === "image") {
+              try {
+                const saved = await saveClipboardImage(projectId, blob, blob.name);
+                if (saved) picks.push(saved);
+              } catch (error) {
+                toast.error("Could not paste image", {
+                  description: error instanceof Error ? error.message : String(error),
+                });
+              }
+            } else if (blob.type.startsWith("video/") || classifyInsertFile(blob.name) === "video") {
+              picks.push({
+                path: URL.createObjectURL(blob),
+                name: blob.name || "pasted-video.mp4",
+                kind: "video",
+              });
+            }
+          }
+          if (picks.length > 0) {
+            await addInsertMediaPicks(picks);
+          } else {
+            toast.error("Nothing supported to paste", {
+              description: "Copy an image, screenshot, or video file first.",
+            });
+          }
+        })();
+        return;
+      }
+
+      if (isTauriRuntime()) {
+        void (async () => {
+          const paths = await readClipboardFilePaths();
+          const picks: InsertMediaPick[] = [];
+          for (const path of paths) {
+            const kind = classifyInsertFile(path);
+            if (kind) {
+              picks.push({ path, name: path.split(/[\\/]/).pop() || path, kind });
+            }
+          }
+          if (picks.length > 0) {
+            await addInsertMediaPicks(picks);
+          }
+        })();
+      }
+    };
+
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [addInsertMediaPicks, clipDuration, configStep, selectedClipId, settingsOpen]);
+
   /**
    * Ctrl+Enter (or the Split button) cuts the line at the textarea caret: the
-   * edited line is cut exactly where the cursor sits, the other language line
-   * is cut at the same relative position, and the time range is divided by the
-   * same ratio.
+   * edited line is cut where the cursor sits, the other language line is cut at
+   * a safe word boundary, and the time range follows the speech cascade.
    */
   const handleSplit = useCallback(
-    (cueId: string, field: CueField, cursor: number) => {
+    (
+      cueId: string,
+      field: CueField,
+      cursor: number,
+      explicitTime?: number | null,
+    ) => {
       if (!selectedClipId) return;
       setRebuildHint(false);
-      const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
+      const projectNow = useProjectStore.getState().project;
+      const latest = projectNow?.subtitles[selectedClipId] ?? [];
       const cue = latest.find((item) => item.id === cueId);
       if (!cue) return;
 
@@ -1269,8 +1969,8 @@ export function Step3Subtitles() {
         return;
       }
 
-      const editedFirst = edited.slice(0, offset).trim();
-      const editedSecond = edited.slice(offset).trim();
+      const editedFirst = unwrapLines(edited.slice(0, offset));
+      const editedSecond = unwrapLines(edited.slice(offset));
       if (!editedFirst || !editedSecond) {
         toast.error("Both halves need text", {
           description: "Move the cursor away from the edge of the line and try again.",
@@ -1278,7 +1978,9 @@ export function Step3Subtitles() {
         return;
       }
 
-      const ratio = offset / edited.length;
+      const firstWeight = spokenWeight(editedFirst, field);
+      const secondWeight = spokenWeight(editedSecond, field);
+      const ratio = firstWeight / Math.max(1, firstWeight + secondWeight);
       const other = field === "arabic" ? cue.thai : cue.arabic;
       // The counterpart is cut at a word boundary, never at a character ratio:
       // a proportional slice severs Thai word clusters and pulls Arabic Harakat
@@ -1287,8 +1989,8 @@ export function Step3Subtitles() {
       const otherOffset = other.trim()
         ? splitAtWordBoundary(other, ratio, field === "arabic" ? "thai" : "arabic")
         : 0;
-      const otherFirst = other.slice(0, otherOffset).trim();
-      const otherSecond = other.slice(otherOffset).trim();
+      const otherFirst = unwrapLines(other.slice(0, otherOffset));
+      const otherSecond = unwrapLines(other.slice(otherOffset));
       if (other.trim() && (!otherFirst || !otherSecond)) {
         toast.error("Can't split this pair of lines here", {
           description:
@@ -1298,27 +2000,36 @@ export function Step3Subtitles() {
       }
 
       const duration = cue.end - cue.start;
-      if (duration < 0.2) {
+      if (duration < MIN_SPLITTABLE_DURATION - 0.001) {
         toast.error("This line is too short to split", {
           description: "Make the surrounding lines longer first.",
         });
         return;
       }
-      const mid = Math.round((cue.start + duration * ratio) * 100) / 100;
-      const clampedMid = clamp(
-        mid,
-        Math.round((cue.start + 0.05) * 100) / 100,
-        Math.round((cue.end - 0.05) * 100) / 100,
-      );
-      const firstEnd =
-        duration >= 0.22 ? Math.max(cue.start + 0.05, clampedMid - 0.01) : clampedMid;
-      const secondStart =
-        duration >= 0.22 ? Math.min(cue.end - 0.05, clampedMid + 0.01) : clampedMid;
+
+      const timing = resolveSplitTiming({
+        cueStart: cue.start,
+        cueEnd: cue.end,
+        clipStart,
+        lectureDuration: projectNow?.duration ?? null,
+        field,
+        firstText: editedFirst,
+        secondText: editedSecond,
+        segments: projectNow?.transcript?.segments ?? null,
+        peaks: projectNow?.transcript?.peaks ?? null,
+        explicitTime,
+      });
+      if (!timing) {
+        toast.error("This line is too short to split", {
+          description: "Make the surrounding lines longer first.",
+        });
+        return;
+      }
 
       const first: SubtitleCue = {
         ...cue,
         id: crypto.randomUUID(),
-        end: Math.round(firstEnd * 100) / 100,
+        end: timing.firstEnd,
         arabic: wrapArabicText(
           field === "arabic" ? editedFirst : otherFirst,
           arabicMaxCharsPerLine,
@@ -1333,11 +2044,12 @@ export function Step3Subtitles() {
         originalText: undefined,
         translation: undefined,
         reviewed: false,
+        edited: true,
       };
       const second: SubtitleCue = {
         ...cue,
         id: crypto.randomUUID(),
-        start: Math.round(secondStart * 100) / 100,
+        start: timing.secondStart,
         arabic: wrapArabicText(
           field === "arabic" ? editedSecond : otherSecond,
           arabicMaxCharsPerLine,
@@ -1352,12 +2064,14 @@ export function Step3Subtitles() {
         originalText: undefined,
         translation: undefined,
         reviewed: false,
+        edited: true,
       };
 
       const index = latest.findIndex((item) => item.id === cueId);
       const next = [...latest];
       next.splice(index, 1, first, second);
       manualEditClipsRef.current.add(selectedClipId);
+      caretRef.current = null;
       if (index === 0) {
         // Splitting line 0 gives it a fresh id; keep the park key synced so
         // editing the split does not jump the monitor back to start.
@@ -1367,33 +2081,166 @@ export function Step3Subtitles() {
       setSubtitles(selectedClipId, next);
       setActiveCueId(second.id);
       setOverlayMode("cue");
-      monitorRef.current?.seekTo((selectedClip?.start ?? 0) + second.start + 0.02);
-      setPlayhead(second.start + 0.02);
+      monitorRef.current?.pause();
+      const seekOffset = Math.min(0.02, Math.max(0, (second.end - second.start) * 0.1));
+      monitorRef.current?.seekTo((selectedClip?.start ?? 0) + second.start + seekOffset);
+      setPlayhead(second.start + seekOffset);
+
+      const methodLabel =
+        timing.method === "playhead"
+          ? "at playhead"
+          : timing.method === "words" || timing.method === "segments"
+            ? "matched to speech"
+            : timing.method === "peaks"
+              ? "snapped to pause"
+              : "estimated";
       toast.success("Line split", {
-        description: `Split at ${formatClock(clampedMid - cue.start, true)} into the line · ${editedFirst.length} / ${editedSecond.length} characters.`,
+        description: `Cut at ${formatClock(timing.mid - cue.start, true)} (${methodLabel}) · ${editedFirst.length} / ${editedSecond.length} characters.`,
       });
     },
-    [arabicMaxCharsPerLine, maxCharsPerLine, pushHistory, selectedClip, selectedClipId, setSubtitles],
+    [
+      arabicMaxCharsPerLine,
+      clipStart,
+      maxCharsPerLine,
+      pushHistory,
+      selectedClip,
+      selectedClipId,
+      setSubtitles,
+    ],
   );
 
-  /** Split the active line at the last caret position, or at the midpoint. */
+  /** Split the active line at the live textarea cursor, last caret, or midpoint. */
   const splitCue = useCallback(
     (cue: SubtitleCue) => {
+      const row = listRef.current?.querySelector<HTMLElement>(
+        `[data-cue-row="${cue.id}"]`,
+      );
+      const activeEl = document.activeElement;
+      if (row && activeEl instanceof HTMLTextAreaElement && row.contains(activeEl)) {
+        const activeField: CueField = activeEl.lang === "ar" ? "arabic" : "thai";
+        const liveText = activeEl.value;
+        const liveOffset = activeEl.selectionStart ?? 0;
+        if (liveText.trim() && liveOffset > 0 && liveOffset < liveText.length) {
+          handleSplit(cue.id, activeField, liveOffset);
+          return;
+        }
+      }
+
       const caret = caretRef.current;
-      const preferred: CueField =
-        caret && caret.cueId === cue.id
-          ? caret.field
-          : cue.thai.trim()
-            ? "thai"
-            : "arabic";
+      const caretFieldValid =
+        caret &&
+        caret.cueId === cue.id &&
+        cue[caret.field].trim().length > 0 &&
+        caret.offset > 0 &&
+        caret.offset < cue[caret.field].length;
+      const preferred: CueField = caretFieldValid
+        ? caret.field
+        : cue.thai.trim()
+          ? "thai"
+          : "arabic";
       const text = cue[preferred];
-      const offset =
-        caret && caret.cueId === cue.id && caret.field === preferred
-          ? caret.offset
-          : splitAtWordBoundary(text, 0.5, preferred) || Math.floor(text.length / 2);
+      const offset = caretFieldValid
+        ? caret.offset
+        : splitAtWordBoundary(text, 0.5, preferred) || Math.floor(text.length / 2);
       handleSplit(cue.id, preferred, offset);
     },
     [handleSplit],
+  );
+
+  /** Split the active line right at the video playhead timestamp. */
+  const handleSplitAtPlayhead = useCallback(
+    (cue: SubtitleCue) => {
+      if (!selectedClipId) return;
+      if (cue.end - cue.start < MIN_SPLITTABLE_DURATION - 0.001) {
+        toast.error("This line is too short to split", {
+          description: "Make the surrounding lines longer first.",
+        });
+        return;
+      }
+      if (
+        playhead < cue.start + MIN_CUE_SECONDS - 0.001 ||
+        playhead > cue.end - MIN_CUE_SECONDS + 0.001
+      ) {
+        toast.error("Move the playhead inside this line first", {
+          description: "Drag the top ruler on the subtitle track where the next line starts.",
+        });
+        return;
+      }
+      const row = listRef.current?.querySelector<HTMLElement>(
+        `[data-cue-row="${cue.id}"]`,
+      );
+      const activeEl = document.activeElement;
+      let preferred: CueField | null = null;
+      let offset = 0;
+      if (row && activeEl instanceof HTMLTextAreaElement && row.contains(activeEl)) {
+        const activeField: CueField = activeEl.lang === "ar" ? "arabic" : "thai";
+        const pos = activeEl.selectionStart ?? 0;
+        if (activeEl.value.trim() && pos > 0 && pos < activeEl.value.length) {
+          preferred = activeField;
+          offset = pos;
+        }
+      }
+      if (!preferred) {
+        const caret = caretRef.current;
+        if (
+          caret &&
+          caret.cueId === cue.id &&
+          cue[caret.field].trim().length > 0 &&
+          caret.offset > 0 &&
+          caret.offset < cue[caret.field].length
+        ) {
+          preferred = caret.field;
+          offset = caret.offset;
+        }
+      }
+      if (!preferred) {
+        preferred = cue.thai.trim() ? "thai" : "arabic";
+        const text = cue[preferred];
+        if (!text.trim()) {
+          toast.error("This line has no text to split");
+          return;
+        }
+        offset = resolveTextSplitOffsetForTime({
+          cueStart: cue.start,
+          cueEnd: cue.end,
+          clipStart,
+          playhead,
+          field: preferred,
+          text,
+          segments: useProjectStore.getState().project?.transcript?.segments ?? null,
+        });
+      }
+      handleSplit(cue.id, preferred, offset, playhead);
+    },
+    [clipStart, handleSplit, playhead, selectedClipId],
+  );
+
+  const handleSetEdgeToPlayhead = useCallback(
+    (cue: SubtitleCue, edge: "start" | "end") => {
+      if (!selectedClipId) return;
+      const latest = useProjectStore.getState().project?.subtitles[selectedClipId] ?? [];
+      const sorted = [...latest].sort((a, b) => a.start - b.start);
+      const index = sorted.findIndex((item) => item.id === cue.id);
+      if (index < 0) return;
+      const prev = index > 0 ? sorted[index - 1] : null;
+      const next = index + 1 < sorted.length ? sorted[index + 1] : null;
+      const lowerBound = prev ? prev.end + NEIGHBOUR_GAP : 0;
+      const upperBound = next ? next.start - NEIGHBOUR_GAP : clipDuration;
+      const target = roundTime(playhead);
+
+      if (edge === "start") {
+        const maxStart = roundTime(cue.end - MIN_CUE_SECONDS);
+        if (lowerBound > maxStart + 0.001) return;
+        const nextStart = clamp(target, roundTime(lowerBound), maxStart);
+        updateCueTime(cue.id, nextStart, cue.end);
+        return;
+      }
+      const minEnd = roundTime(cue.start + MIN_CUE_SECONDS);
+      if (minEnd > upperBound + 0.001) return;
+      const nextEnd = clamp(target, minEnd, roundTime(upperBound));
+      updateCueTime(cue.id, cue.start, nextEnd);
+    },
+    [clipDuration, playhead, selectedClipId, updateCueTime],
   );
 
   const handleMerge = useCallback(
@@ -1426,6 +2273,7 @@ export function Step3Subtitles() {
         originalText: undefined,
         translation: undefined,
         reviewed: false,
+        edited: true,
       };
       const next = latest
         .filter((item) => item.id !== following.id)
@@ -1818,6 +2666,11 @@ export function Step3Subtitles() {
 
       if ((event.ctrlKey || event.metaKey) && !event.altKey) {
         const key = event.key.toLowerCase();
+        if (key === "enter" && event.shiftKey && activeCue) {
+          event.preventDefault();
+          handleSplitAtPlayhead(activeCue);
+          return;
+        }
         if (key === "z" && !event.shiftKey) {
           event.preventDefault();
           handleUndo();
@@ -1841,9 +2694,22 @@ export function Step3Subtitles() {
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
 
-      if (event.key === "Escape" && previewFocus && !event.defaultPrevented) {
+      if (event.key === "Escape") {
+        if (selectedInsertId) {
+          event.preventDefault();
+          setSelectedInsertId(null);
+          return;
+        }
+        if (previewFocus && !event.defaultPrevented) {
+          event.preventDefault();
+          setPreviewFocus(false);
+          return;
+        }
+      }
+
+      if ((event.key === "Delete" || event.key === "Backspace") && selectedInsertId) {
         event.preventDefault();
-        setPreviewFocus(false);
+        deleteInsert(selectedInsertId);
         return;
       }
 
@@ -1893,13 +2759,16 @@ export function Step3Subtitles() {
   }, [
     activeCue,
     configStep,
+    deleteInsert,
     handleRedo,
+    handleSplitAtPlayhead,
     handleUndo,
     moveCue,
     nextUnchecked,
     pauseShuttle,
     previewFocus,
     selectCue,
+    selectedInsertId,
     setReviewed,
     settingsOpen,
     shuttle,
@@ -2199,32 +3068,40 @@ export function Step3Subtitles() {
                     </p>
                   </div>
                 ) : (
-                  visibleCues.map(({ cue, index }) => (
-                    <SubtitleCueRow
-                      key={cue.id}
-                      cue={cue}
-                      index={index}
-                      active={activeCue?.id === cue.id}
-                      hasFollowing={
-                        Boolean(cues[index + 1]) &&
-                        (filter === "all" || !cues[index + 1]?.reviewed)
-                      }
-                      canPlay={canPlay}
-                      verifyingThis={verifyingIds.has(cue.id)}
-                      verifyAll={Boolean(verifyAll)}
-                      onPlayCue={playCue}
-                      onSelectCue={selectCue}
-                      onToggleReviewed={toggleReviewed}
-                      onCueChange={handleCueChange}
-                      onCueBlur={handleCueBlur}
-                      onSelectCaret={handleSelectCaret}
-                      onSplitAt={handleSplit}
-                      onVerify={handleVerify}
-                      onSplitCue={splitCue}
-                      onMerge={handleMerge}
-                      onDelete={handleDelete}
-                    />
-                  ))
+                  visibleCues.map(({ cue, index }) => {
+                    const isActive = activeCue?.id === cue.id;
+                    return (
+                      <SubtitleCueRow
+                        key={cue.id}
+                        cue={cue}
+                        index={index}
+                        active={isActive}
+                        hasFollowing={
+                          Boolean(cues[index + 1]) &&
+                          (filter === "all" || !cues[index + 1]?.reviewed)
+                        }
+                        canPlay={canPlay}
+                        verifyingThis={verifyingIds.has(cue.id)}
+                        verifyAll={Boolean(verifyAll)}
+                        onPlayCue={playCue}
+                        onSelectCue={selectCue}
+                        onToggleReviewed={toggleReviewed}
+                        onCueChange={handleCueChange}
+                        onCueBlur={handleCueBlur}
+                        onSelectCaret={handleSelectCaret}
+                        onSplitAt={handleSplit}
+                        onVerify={handleVerify}
+                        onSplitCue={splitCue}
+                        canSplitAtPlayhead={isActive && canSplitAtPlayhead}
+                        canSetStartToPlayhead={isActive && canSetStartToPlayhead}
+                        canSetEndToPlayhead={isActive && canSetEndToPlayhead}
+                        onSplitAtPlayhead={handleSplitAtPlayhead}
+                        onSetEdgeToPlayhead={handleSetEdgeToPlayhead}
+                        onMerge={handleMerge}
+                        onDelete={handleDelete}
+                      />
+                    );
+                  })
                 )}
               </div>
             </div>
@@ -2274,228 +3151,496 @@ export function Step3Subtitles() {
               </Button>
             </div>
           ) : null}
-          <div className="flex min-h-0 flex-1 flex-col gap-2 px-3 py-2">
-            {/* Output shape sits above the picture it changes: the editor
-                frames the clip while looking at the frame. */}
-            <div className="flex shrink-0 flex-wrap items-start gap-2">
-              <div className="min-w-[136px] flex-1 space-y-1">
-                <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                  {L("Aspect ratio")}
-                </p>
-                <SegmentedToggle<Resolution>
-                  label={L("Aspect ratio")}
-                  value={resolution}
-                  options={[
-                    { value: "1080x1920", label: "9:16", hint: "1080 x 1920, vertical" },
-                    { value: "1920x1080", label: "16:9", hint: "1920 x 1080, widescreen" },
-                  ]}
-                  onChange={(value) => updateExportSettings({ resolution: value })}
-                />
-              </div>
-              <div className="min-w-[136px] flex-1 space-y-1">
-                <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                  {L("Framing mode")}
-                </p>
-                <SegmentedToggle<FramingMode>
-                  label={L("Framing mode")}
-                  value={framing}
-                  disabled={!portrait}
-                  options={[
-                    {
-                      value: "blur-fill",
-                      label: FRAMING_LABELS["blur-fill"],
-                      hint: "Keeps the slide visible inside blurred bars",
-                    },
-                    {
-                      value: "center-crop",
-                      label: FRAMING_LABELS["center-crop"],
-                      hint: "Crops to fill the frame",
-                    },
-                  ]}
-                  onChange={(value) => updateExportSettings({ framing: value })}
-                />
-              </div>
-            </div>
-            {portrait ? null : (
-              <p className="shrink-0 text-[10px] leading-relaxed text-muted-foreground">
-                16:9 uses the whole frame, so framing applies to 9:16 only.
-              </p>
-            )}
-
-            <SubtitleMonitor
-              ref={monitorRef}
-              resolution={resolution}
-              framing={framing}
-              sourcePath={project.sourcePath}
-              clipStart={clipStart}
-              clipEnd={selectedClip.end}
-              cues={cues}
-              selectedCueId={activeCue?.id ?? null}
-              overlayMode={overlayMode}
-              playhead={playhead}
-              styles={styles}
-              safeZone={safeZone}
-              muted={muted}
-              interactive
-              offsets={{
-                arabic: arabicSettings.verticalOffset,
-                thai: thaiSettings.verticalOffset,
-              }}
-              onNudgeLine={nudgeMonitorLine}
-              onTimeUpdate={handleMonitorTime}
-              onPlayingChange={setPlaying}
-              onTogglePlay={togglePlay}
-            />
-
-            <div className="flex shrink-0 items-center justify-between gap-1">
-              <div className="flex items-center gap-0.5">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label={L("Undo")}
-                  title={`${L("Undo")} (Ctrl+Z)`}
-                  disabled={!canUndo}
-                  onClick={handleUndo}
-                >
-                  <Undo2 className="size-3.5" />
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label={L("Redo")}
-                  title={`${L("Redo")} (Ctrl+Y)`}
-                  disabled={!canRedo}
-                  onClick={handleRedo}
-                >
-                  <Redo2 className="size-3.5" />
-                </Button>
-              </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                className="gap-1 text-[11px] text-muted-foreground hover:text-foreground"
-                title={L("Reset subtitles to default")}
-                disabled={(project.transcript?.segments.length ?? 0) === 0}
-                onClick={() => setResetDialogMode("reset")}
-              >
-                <RotateCcw className="size-3" />
-                {L("Reset subtitles")}
-              </Button>
-            </div>
-
-            <CueRibbon
-              cues={cues}
-              duration={clipDuration}
-              selectedId={activeCue?.id ?? null}
-              playhead={playhead}
-              onSelect={(cueId) => {
-                const cue = cues.find((item) => item.id === cueId);
-                if (cue) selectCue(cue);
-              }}
-              onSeek={(seconds) => {
-                monitorRef.current?.pause();
-                setOverlayMode("playhead");
-                monitorRef.current?.seekTo(clipStart + seconds);
-                setPlayhead(seconds);
-              }}
-              onChangeTime={updateCueTime}
-            />
-
-            <div className="flex shrink-0 flex-wrap items-center gap-x-1 gap-y-1">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label={
-                  playing
-                    ? L("Pause")
-                    : continuousPlay
-                      ? L("Play continuously")
-                      : "Play the selected line"
-                }
-                disabled={!canPlay || clipDuration <= 0 || (!continuousPlay && !activeCue)}
-                onClick={togglePlay}
-              >
-                {playing ? <Pause className="size-4" /> : <Play className="size-4" />}
-              </Button>
-              <Button
-                variant={continuousPlay ? "default" : "outline"}
-                size="xs"
-                aria-pressed={continuousPlay}
-                title={
-                  continuousPlay
-                    ? L("Continuous playback on — plays without stopping at subtitle block ends")
-                    : L("Play continuously without stopping at the selected subtitle block's end")
-                }
-                className="gap-1 text-[11px]"
-                disabled={clipDuration <= 0}
-                onClick={toggleContinuousPlay}
-              >
-                <Play className={cn("size-3", continuousPlay && "fill-current")} />
-                {L("Play clip")}
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                aria-label={L("Previous line")}
-                disabled={!activeCue}
-                onClick={() => moveCue(-1)}
-              >
-                <ChevronLeft className="size-4" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                aria-label={L("Next line")}
-                disabled={!activeCue}
-                onClick={() => moveCue(1)}
-              >
-                <ChevronRight className="size-4" />
-              </Button>
-
-              <span className="ml-1 text-[11px] tabular-nums text-muted-foreground">
-                <TimeFlow value={playhead} tenths />
-              </span>
-              <span className="text-[10px] text-muted-foreground/60">/</span>
-              <span className="text-[11px] tabular-nums text-muted-foreground">
-                <TimeFlow value={clipDuration} />
-              </span>
-
-              <div className="ml-auto flex items-center gap-1">
-                <span className="text-[10px] tabular-nums text-muted-foreground">
-                  <NumberFlow
-                    value={rate}
-                    suffix="×"
-                    locales="en-US"
-                    format={{ maximumFractionDigits: 2 }}
+          <ResizablePanelGroup
+            orientation="vertical"
+            className="min-h-0 flex-1"
+            disabled={settingsOpen || configStep !== null}
+            resizeTargetMinimumSize={{ fine: 8, coarse: 16 }}
+            defaultLayout={defaultPreviewSplit}
+            onLayoutChanged={(_layout, meta) => {
+              if (!meta.isUserInteraction) return;
+              try {
+                window.localStorage.setItem(
+                  STEP3_PREVIEW_SPLIT_STORAGE_KEY,
+                  JSON.stringify(meta.requestedLayout),
+                );
+              } catch {
+                /* Ignore storage quota errors. */
+              }
+            }}
+          >
+            <ResizablePanel
+              id={STEP3_MONITOR_PANE_ID}
+              minSize={STEP3_MONITOR_MIN_PX}
+              className="flex min-h-0 flex-col gap-1.5 px-3 pt-1.5 pb-1"
+              style={{ overflow: "hidden" }}
+            >
+              {/* Output shape sits above the picture it changes: the editor
+                  frames the clip while looking at the frame. */}
+              <div className="flex shrink-0 flex-wrap items-start gap-2">
+                <div className="min-w-[136px] flex-1 space-y-0.5">
+                  <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                    {L("Aspect ratio")}
+                  </p>
+                  <SegmentedToggle<Resolution>
+                    label={L("Aspect ratio")}
+                    value={resolution}
+                    options={[
+                      { value: "1080x1920", label: "9:16", hint: "1080 x 1920, vertical" },
+                      { value: "1920x1080", label: "16:9", hint: "1920 x 1080, widescreen" },
+                    ]}
+                    onChange={(value) => updateExportSettings({ resolution: value })}
                   />
-                </span>
+                </div>
+                <div className="min-w-[136px] flex-1 space-y-0.5">
+                  <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                    {L("Framing mode")}
+                  </p>
+                  <SegmentedToggle<FramingMode>
+                    label={L("Framing mode")}
+                    value={framing}
+                    disabled={!portrait}
+                    options={[
+                      {
+                        value: "blur-fill",
+                        label: FRAMING_LABELS["blur-fill"],
+                        hint: "Keeps the slide visible inside blurred bars",
+                      },
+                      {
+                        value: "center-crop",
+                        label: FRAMING_LABELS["center-crop"],
+                        hint: "Crops to fill the frame",
+                      },
+                    ]}
+                    onChange={(value) => updateExportSettings({ framing: value })}
+                  />
+                </div>
+              </div>
+              {portrait ? null : (
+                <p className="shrink-0 text-[10px] leading-tight text-muted-foreground">
+                  16:9 uses the whole frame, so framing applies to 9:16 only.
+                </p>
+              )}
+
+              <SubtitleMonitor
+                ref={monitorRef}
+                resolution={resolution}
+                framing={framing}
+                sourcePath={project.sourcePath}
+                clipStart={clipStart}
+                clipEnd={selectedClip.end}
+                cues={cues}
+                selectedCueId={activeCue?.id ?? null}
+                overlayMode={overlayMode}
+                playhead={playhead}
+                styles={styles}
+                safeZone={safeZone}
+                muted={muted}
+                interactive
+                offsets={{
+                  arabic: arabicSettings.verticalOffset,
+                  thai: thaiSettings.verticalOffset,
+                }}
+                onNudgeLine={nudgeMonitorLine}
+                inserts={inserts}
+                selectedInsertId={selectedInsertId}
+                onSelectInsert={setSelectedInsertId}
+                onCommitInsertRect={updateInsertRect}
+                onTimeUpdate={handleMonitorTime}
+                onPlayingChange={setPlaying}
+                onTogglePlay={togglePlay}
+              />
+            </ResizablePanel>
+
+            <ResizableHandle
+              id="step3-timeline-split"
+              withHandle
+              disabled={settingsOpen || configStep !== null}
+              aria-label={L("Resize preview and timeline")}
+              title={L("Drag to resize · Double-click to reset")}
+            />
+
+            <ResizablePanel
+              id={STEP3_TIMELINE_PANE_ID}
+              defaultSize={STEP3_TIMELINE_DEFAULT_PX}
+              minSize={STEP3_TIMELINE_MIN_PX}
+              className="flex min-h-0 flex-col gap-1 px-3 pt-1 pb-1.5"
+              style={{ overflow: "hidden" }}
+            >
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-1">
+                <div className="flex min-w-0 items-center gap-0.5">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={L("Undo")}
+                    title={`${L("Undo")} (Ctrl+Z)`}
+                    disabled={!canUndo}
+                    onClick={handleUndo}
+                  >
+                    <Undo2 className="size-3.5" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={L("Redo")}
+                    title={`${L("Redo")} (Ctrl+Y)`}
+                    disabled={!canRedo}
+                    onClick={handleRedo}
+                  >
+                    <Redo2 className="size-3.5" />
+                  </Button>
+                  {clipDuration > 0 ? (
+                    <>
+                      <Separator orientation="vertical" className="mx-0.5 h-3.5" />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label="Zoom out subtitle track"
+                        title="Zoom out timeline (or scroll down over tracks)"
+                        disabled={ribbonZoom <= 1.001}
+                        onClick={() => {
+                          const prev = [...CUE_RIBBON_ZOOM_LEVELS]
+                            .reverse()
+                            .find((level) => level < ribbonZoom - 0.05);
+                          setRibbonZoom(prev ?? 1);
+                        }}
+                      >
+                        <ZoomOut className="size-3" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        className="px-1 text-[11px] tabular-nums text-muted-foreground"
+                        aria-label="Reset subtitle track zoom"
+                        title="Reset timeline zoom"
+                        disabled={ribbonZoom <= 1.001}
+                        onClick={() => setRibbonZoom(1)}
+                      >
+                        {Number.isInteger(ribbonZoom) ? ribbonZoom : ribbonZoom.toFixed(1)}×
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label="Zoom in subtitle track"
+                        title="Zoom in timeline (or scroll up over tracks)"
+                        disabled={
+                          ribbonZoom >=
+                          CUE_RIBBON_ZOOM_LEVELS[CUE_RIBBON_ZOOM_LEVELS.length - 1] - 0.01
+                        }
+                        onClick={() => {
+                          const next = CUE_RIBBON_ZOOM_LEVELS.find(
+                            (level) => level > ribbonZoom + 0.05,
+                          );
+                          setRibbonZoom(
+                            next ?? CUE_RIBBON_ZOOM_LEVELS[CUE_RIBBON_ZOOM_LEVELS.length - 1],
+                          );
+                        }}
+                      >
+                        <ZoomIn className="size-3" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="xs"
+                        aria-label={L("Add media")}
+                        title="Add image or video insert (or drag & drop / Ctrl+V)"
+                        className="ml-0.5 gap-1 px-1.5 text-[11px]"
+                        onClick={() => void handleBrowseInsertMedia()}
+                      >
+                        <ImagePlus className="size-3" />
+                        {L("Media")}
+                      </Button>
+                      {selectedInsert ? (
+                        <Popover open={insertPopoverOpen} onOpenChange={setInsertPopoverOpen}>
+                          <PopoverTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="xs"
+                              aria-label={L("Edit selected insert")}
+                              className="max-w-[62px] gap-1 px-1.5 text-[11px]"
+                            >
+                              {selectedInsert.kind === "video" ? (
+                                <Film className="size-3 shrink-0" />
+                              ) : (
+                                <ImageIcon className="size-3 shrink-0" />
+                              )}
+                              <span className="truncate">{selectedInsert.name}</span>
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent align="start" side="top" className="w-80 space-y-2.5">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <p className="truncate text-xs font-medium text-foreground">
+                                  {selectedInsert.name}
+                                </p>
+                                <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] tabular-nums text-muted-foreground">
+                                  <span className="font-mono">
+                                    <TimeFlow value={selectedInsert.start} hundredths /> →{" "}
+                                    <TimeFlow value={selectedInsert.end} hundredths />
+                                  </span>
+                                  <span>·</span>
+                                  <NumberFlow
+                                    value={Math.max(
+                                      0,
+                                      Math.round((selectedInsert.end - selectedInsert.start) * 10) /
+                                        10,
+                                    )}
+                                    suffix="s"
+                                    locales="en-US"
+                                    format={{ maximumFractionDigits: 1 }}
+                                  />
+                                  {selectedInsert.kind === "video" &&
+                                  selectedInsert.sourceDuration !== null ? (
+                                    <span className="text-[10px] text-muted-foreground/80">
+                                      (in {selectedInsert.sourceStart.toFixed(1)}s /{" "}
+                                      {selectedInsert.sourceDuration.toFixed(1)}s)
+                                    </span>
+                                  ) : null}
+                                </div>
+                              </div>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="xs"
+                                onClick={() => void replaceInsertFile(selectedInsert.id)}
+                              >
+                                {L("Replace")}
+                              </Button>
+                            </div>
+
+                            {missingInsertIds.has(selectedInsert.id) ? (
+                              <p className="flex items-center gap-1.5 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+                                <AlertTriangle className="size-3.5 shrink-0" />
+                                File not found on disk. Click Replace to reconnect it.
+                              </p>
+                            ) : null}
+
+                            <div className="space-y-1">
+                              <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                                Frame fit
+                              </p>
+                              <SegmentedToggle<InsertFit>
+                                label="Insert frame fit"
+                                value={selectedInsert.fit}
+                                options={[
+                                  { value: "cover", label: "Fill", hint: "Crop to fill box" },
+                                  {
+                                    value: "blur-fill",
+                                    label: "Blur fill",
+                                    hint: "Blurred edges around whole frame",
+                                  },
+                                  { value: "contain", label: "Fit", hint: "Show whole image/PNG" },
+                                ]}
+                                onChange={(fit) => updateInsertMeta(selectedInsert.id, { fit })}
+                              />
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="flex items-center gap-1.5 text-xs text-foreground">
+                                <Sparkles className="size-3 text-muted-foreground" />
+                                Subtle fade (0.25s)
+                              </span>
+                              <Switch
+                                checked={(selectedInsert.fade ?? 0) > 0}
+                                aria-label="Subtle fade"
+                                onCheckedChange={(checked) =>
+                                  updateInsertMeta(selectedInsert.id, { fade: checked ? 0.25 : 0 })
+                                }
+                              />
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                              <Button
+                                type="button"
+                                size="xs"
+                                variant="outline"
+                                disabled={!activeCue}
+                                onClick={() => matchInsertToActiveCue(selectedInsert.id)}
+                              >
+                                {L("Match subtitle")}
+                              </Button>
+                              <Button
+                                type="button"
+                                size="xs"
+                                variant="outline"
+                                disabled={isFullFrameRect(selectedInsert.rect)}
+                                onClick={() =>
+                                  updateInsertMeta(selectedInsert.id, {
+                                    rect: { ...DEFAULT_INSERT_RECT },
+                                  })
+                                }
+                              >
+                                {L("Reset full frame")}
+                              </Button>
+                              <Button
+                                type="button"
+                                size="xs"
+                                variant="ghost"
+                                className="ml-auto gap-1 text-destructive"
+                                onClick={() => deleteInsert(selectedInsert.id)}
+                              >
+                                <Trash2 className="size-3" />
+                                Delete
+                              </Button>
+                            </div>
+                          </PopoverContent>
+                        </Popover>
+                      ) : null}
+                    </>
+                  ) : null}
+                </div>
                 <Button
+                  type="button"
                   variant="ghost"
-                  size="icon-xs"
-                  aria-label={muted ? L("Unmute") : L("Mute")}
-                  onClick={() => setMuted((value) => !value)}
+                  size="xs"
+                  aria-label={L("Reset subtitles")}
+                  className="gap-1 px-1.5 text-[11px] text-muted-foreground hover:text-foreground"
+                  title={L("Reset subtitles to default")}
+                  disabled={(project.transcript?.segments.length ?? 0) === 0}
+                  onClick={() => setResetDialogMode("reset")}
                 >
-                  {muted ? <VolumeX className="size-3.5" /> : <Volume2 className="size-3.5" />}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label={previewFocus ? "Back to editing" : "Focus the preview"}
-                  aria-pressed={previewFocus}
-                  onClick={() => setPreviewFocus((value) => !value)}
-                >
-                  {previewFocus ? (
-                    <Minimize2 className="size-3.5" />
-                  ) : (
-                    <Maximize2 className="size-3.5" />
-                  )}
+                  <RotateCcw className="size-3" />
+                  {L("Reset")}
                 </Button>
               </div>
-            </div>
-          </div>
+
+              <TimelineTracks
+                cues={cues}
+                inserts={inserts}
+                duration={clipDuration}
+                selectedCueId={activeCue?.id ?? null}
+                playingCueId={playingCueId}
+                selectedInsertId={selectedInsertId}
+                playhead={playhead}
+                zoom={ribbonZoom}
+                missingInsertIds={missingInsertIds}
+                insertDragOver={insertDragOver}
+                onZoomChange={setRibbonZoom}
+                onSelectCue={(cueId) => {
+                  const cue = cues.find((item) => item.id === cueId);
+                  if (cue) selectCue(cue);
+                }}
+                onSelectCueOnly={(cueId) => {
+                  setActiveCueId(cueId);
+                }}
+                onSelectInsert={setSelectedInsertId}
+                onSeek={(seconds) => {
+                  monitorRef.current?.pause();
+                  setOverlayMode("playhead");
+                  monitorRef.current?.seekTo(clipStart + seconds);
+                  setPlayhead(seconds);
+                }}
+                onScrubEdge={(seconds) => {
+                  monitorRef.current?.pause();
+                  setOverlayMode("playhead");
+                  monitorRef.current?.seekTo(clipStart + seconds);
+                  setPlayhead(seconds);
+                }}
+                onChangeCueTime={updateCueTime}
+                onChangeCuePair={updateCuePair}
+                onChangeInsert={updateInsertTiming}
+                onDropInsertFiles={(files) => void handleDropInsertFiles(files)}
+              />
+
+              <div className="flex shrink-0 flex-wrap items-center gap-x-1 gap-y-1">
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={
+                    playing
+                      ? L("Pause")
+                      : continuousPlay
+                        ? L("Play continuously")
+                        : "Play the selected line"
+                  }
+                  disabled={!canPlay || clipDuration <= 0 || (!continuousPlay && !activeCue)}
+                  onClick={togglePlay}
+                >
+                  {playing ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
+                </Button>
+                <Button
+                  variant={continuousPlay ? "default" : "outline"}
+                  size="xs"
+                  aria-pressed={continuousPlay}
+                  title={
+                    continuousPlay
+                      ? L("Continuous playback on — plays without stopping at subtitle block ends")
+                      : L("Play continuously without stopping at the selected subtitle block's end")
+                  }
+                  className="gap-1 text-[11px]"
+                  disabled={clipDuration <= 0}
+                  onClick={toggleContinuousPlay}
+                >
+                  <Play className={cn("size-3", continuousPlay && "fill-current")} />
+                  {L("Play clip")}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={L("Previous line")}
+                  disabled={!activeCue}
+                  onClick={() => moveCue(-1)}
+                >
+                  <ChevronLeft className="size-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={L("Next line")}
+                  disabled={!activeCue}
+                  onClick={() => moveCue(1)}
+                >
+                  <ChevronRight className="size-4" />
+                </Button>
+
+                <span className="ml-1 text-[11px] tabular-nums text-muted-foreground">
+                  <TimeFlow value={playhead} tenths />
+                </span>
+                <span className="text-[10px] text-muted-foreground/60">/</span>
+                <span className="text-[11px] tabular-nums text-muted-foreground">
+                  <TimeFlow value={clipDuration} />
+                </span>
+
+                <div className="ml-auto flex items-center gap-1">
+                  <span className="text-[10px] tabular-nums text-muted-foreground">
+                    <NumberFlow
+                      value={rate}
+                      suffix="×"
+                      locales="en-US"
+                      format={{ maximumFractionDigits: 2 }}
+                    />
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={muted ? L("Unmute") : L("Mute")}
+                    onClick={() => setMuted((value) => !value)}
+                  >
+                    {muted ? <VolumeX className="size-3.5" /> : <Volume2 className="size-3.5" />}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={previewFocus ? "Back to editing" : "Focus the preview"}
+                    aria-pressed={previewFocus}
+                    onClick={() => setPreviewFocus((value) => !value)}
+                  >
+                    {previewFocus ? (
+                      <Minimize2 className="size-3.5" />
+                    ) : (
+                      <Maximize2 className="size-3.5" />
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </ResizablePanel>
+          </ResizablePanelGroup>
 
           <div className="shrink-0 border-t border-border px-3 py-2">
             <Popover open={styleOpen} onOpenChange={setStyleOpen}>

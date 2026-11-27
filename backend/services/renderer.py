@@ -288,17 +288,39 @@ def escape_filter_path(path: str | Path) -> str:
     return text
 
 
+@dataclass(slots=True)
+class InsertSpec:
+    """Visual insert footage (image or muted video) overlaid on the clip."""
+
+    path: Path
+    kind: str  # "image" | "video"
+    start: float
+    end: float
+    source_start: float = 0.0
+    x: float = 0.0
+    y: float = 0.0
+    width: float = 1.0
+    height: float = 1.0
+    fit: str = "cover"  # "cover" | "blur-fill" | "contain"
+    muted: bool = True
+    fade: float = 0.0
+
+
 def build_filtergraph(
     *,
     resolution: str,
     framing: str,
     ass_path: str | Path,
     fonts_dir: str | Path,
+    inserts: tuple[InsertSpec, ...] = (),
 ) -> str:
     """Return the ``-filter_complex`` graph for one clip.
 
     ``blur-fill`` (plan default) preserves the lecture slide inside a blurred
     9:16 background; ``center-crop`` fills the frame by cropping.
+    When ``inserts`` are provided, each insert is scaled/positioned into its
+    export box and overlaid before the final ``ass`` burn-in so subtitles
+    always stay on top.
     """
     width, height = subtitle_gen.parse_resolution(resolution)
     ass = (
@@ -306,23 +328,96 @@ def build_filtergraph(
         f":fontsdir='{escape_filter_path(fonts_dir)}'"
     )
 
+    if not inserts:
+        if framing == "blur-fill":
+            return (
+                f"[0:v]split=2[main][bg];"
+                f"[bg]scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},boxblur=20:5,setsar=1[blurred];"
+                f"[main]scale={width}:{height}:force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2:flags=lanczos,setsar=1[fg];"
+                f"[blurred][fg]overlay=(W-w)/2:(H-h)/2,{ass}[outv]"
+            )
+
+        if framing == "center-crop":
+            return (
+                f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},setsar=1,{ass}[outv]"
+            )
+
+        raise RenderError(f"Unsupported framing mode '{framing}'")
+
+    parts: list[str] = []
     if framing == "blur-fill":
-        return (
+        parts.append(
             f"[0:v]split=2[main][bg];"
             f"[bg]scale={width}:{height}:force_original_aspect_ratio=increase,"
             f"crop={width}:{height},boxblur=20:5,setsar=1[blurred];"
             f"[main]scale={width}:{height}:force_original_aspect_ratio=decrease:"
             f"force_divisible_by=2:flags=lanczos,setsar=1[fg];"
-            f"[blurred][fg]overlay=(W-w)/2:(H-h)/2,{ass}[outv]"
+            f"[blurred][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[base0]"
         )
-
-    if framing == "center-crop":
-        return (
+    elif framing == "center-crop":
+        parts.append(
             f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},setsar=1,{ass}[outv]"
+            f"crop={width}:{height},setsar=1[base0]"
+        )
+    else:
+        raise RenderError(f"Unsupported framing mode '{framing}'")
+
+    for idx, ins in enumerate(inserts):
+        input_idx = idx + 1
+        bw = max(2, min(width, round(ins.width * width / 2) * 2))
+        bh = max(2, min(height, round(ins.height * height / 2) * 2))
+        bx = max(0, min(width - bw, round(ins.x * width)))
+        by = max(0, min(height - bh, round(ins.y * height)))
+
+        ins_label = f"ins_{idx}"
+        if ins.fit == "blur-fill":
+            blur_r = max(1, min(20, min(bw, bh) // 4 - 1))
+            parts.append(
+                f"[{input_idx}:v]split=2[ib_m_{idx}][ib_b_{idx}];"
+                f"[ib_b_{idx}]scale={bw}:{bh}:force_original_aspect_ratio=increase,"
+                f"crop={bw}:{bh},boxblur={blur_r}:5,setsar=1[ib_blur_{idx}];"
+                f"[ib_m_{idx}]scale={bw}:{bh}:force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2:flags=lanczos,setsar=1[ib_fg_{idx}];"
+                f"[ib_blur_{idx}][ib_fg_{idx}]overlay=(W-w)/2:(H-h)/2,setsar=1[{ins_label}_raw]"
+            )
+        elif ins.fit == "contain":
+            parts.append(
+                f"[{input_idx}:v]scale={bw}:{bh}:force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2:flags=lanczos,setsar=1[{ins_label}_raw]"
+            )
+        else:
+            parts.append(
+                f"[{input_idx}:v]scale={bw}:{bh}:force_original_aspect_ratio=increase:"
+                f"flags=lanczos,crop={bw}:{bh},setsar=1[{ins_label}_raw]"
+            )
+
+        post_filters = ["format=yuva420p", f"setpts=PTS-STARTPTS+{ins.start:.3f}/TB"]
+        dur = max(0.05, ins.end - ins.start)
+        if ins.fade > 0 and dur >= 0.1:
+            fade_d = min(ins.fade, dur / 2.0)
+            out_st = max(ins.start, ins.end - fade_d)
+            post_filters.append(
+                f"fade=t=in:st={ins.start:.3f}:d={fade_d:.3f}:alpha=1,"
+                f"fade=t=out:st={out_st:.3f}:d={fade_d:.3f}:alpha=1"
+            )
+        parts.append(f"[{ins_label}_raw]{','.join(post_filters)}[{ins_label}]")
+
+        if ins.fit == "contain":
+            ox = f"{bx}+({bw}-overlay_w)/2"
+            oy = f"{by}+({bh}-overlay_h)/2"
+        else:
+            ox = str(bx)
+            oy = str(by)
+        parts.append(
+            f"[base{idx}][{ins_label}]overlay=x={ox}:y={oy}:shortest=0:"
+            f"eof_action=pass:enable='between(t,{ins.start:.3f},{ins.end:.3f})'[base{idx + 1}]"
         )
 
-    raise RenderError(f"Unsupported framing mode '{framing}'")
+    parts.append(f"[base{len(inserts)}]{ass}[outv]")
+    return ";".join(parts)
 
 
 # --------------------------------------------------------------------------- #
@@ -383,6 +478,7 @@ def build_ffmpeg_args(
     encoder: str,
     audio_bitrate: str = "192k",
     threads: int = 0,
+    inserts: tuple[InsertSpec, ...] = (),
 ) -> list[str]:
     args = [
         ffmpeg,
@@ -397,6 +493,30 @@ def build_ffmpeg_args(
         f"{max(0.05, duration):.3f}",
         "-i",
         str(source),
+    ]
+    for ins in inserts:
+        ins_dur = max(0.05, ins.end - ins.start)
+        if ins.kind == "image":
+            args += [
+                "-framerate",
+                "25",
+                "-loop",
+                "1",
+                "-t",
+                f"{ins_dur:.3f}",
+                "-i",
+                str(ins.path),
+            ]
+        else:
+            args += [
+                "-ss",
+                f"{max(0.0, ins.source_start):.3f}",
+                "-t",
+                f"{ins_dur:.3f}",
+                "-i",
+                str(ins.path),
+            ]
+    args += [
         "-filter_complex",
         filtergraph,
         "-map",
@@ -442,6 +562,7 @@ class RenderJob:
     use_nvenc: bool = True
     audio_bitrate: str = "192k"
     timeout: float | None = None
+    inserts: tuple[InsertSpec, ...] = ()
 
 
 def _drain_stderr(stream, sink: deque[str]) -> None:
@@ -492,6 +613,7 @@ def _run_once(job: RenderJob, encoder: str, ffmpeg: str) -> Iterator[dict]:
         framing=job.framing,
         ass_path=job.ass_path,
         fonts_dir=job.fonts_dir,
+        inserts=job.inserts,
     )
     # Render into a hidden sibling file in the same directory so a failed,
     # cancelled, or timed-out FFmpeg run never leaves a truncated target MP4 or
@@ -508,6 +630,7 @@ def _run_once(job: RenderJob, encoder: str, ffmpeg: str) -> Iterator[dict]:
         duration=job.duration,
         encoder=encoder,
         audio_bitrate=job.audio_bitrate,
+        inserts=job.inserts,
     )
 
     try:
@@ -639,6 +762,9 @@ def render(job: RenderJob) -> Iterator[dict]:
         raise RenderError(f"Source video not found: {job.source}")
     if not job.ass_path.is_file():
         raise RenderError(f"Subtitle file not found: {job.ass_path}")
+    for ins in job.inserts:
+        if not ins.path.is_file():
+            raise RenderError(f"Insert media not found: {ins.path}")
 
     attempts: list[str] = []
     if job.use_nvenc:

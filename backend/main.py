@@ -365,6 +365,12 @@ class TranscribeRequest(BaseModel):
         return value
 
 
+class TranscriptWord(BaseModel):
+    text: str
+    start: float
+    end: float
+
+
 class TranscriptSegment(BaseModel):
     id: int
     start: float
@@ -378,6 +384,7 @@ class TranscriptSegment(BaseModel):
     confidence: float | None = None
     original_text: str | None = None
     translation: str | None = None
+    words: list[TranscriptWord] | None = None
 
 
 class TranscribeResponse(BaseModel):
@@ -622,10 +629,43 @@ class SubtitleStyles(BaseModel):
     thai: StyleSpec = Field(default_factory=StyleSpec)
 
 
+class RenderInsert(BaseModel):
+    """Visual insert footage (image or video) overlaid over the clip."""
+
+    path: str = Field(description="Absolute path to the image or video insert.")
+    kind: Literal["image", "video"]
+    start: float = Field(ge=0.0, description="Clip-relative start in seconds.")
+    end: float = Field(gt=0.0, description="Clip-relative end in seconds.")
+    source_start: float = Field(
+        default=0.0, ge=0.0, description="Front-trim offset into video inserts (seconds)."
+    )
+    x: float = Field(default=0.0, ge=0.0, le=1.0)
+    y: float = Field(default=0.0, ge=0.0, le=1.0)
+    width: float = Field(default=1.0, gt=0.0, le=1.0)
+    height: float = Field(default=1.0, gt=0.0, le=1.0)
+    fit: Literal["cover", "blur-fill", "contain"] = Field(default="cover")
+    muted: bool = Field(default=True)
+    fade: float = Field(default=0.0, ge=0.0, le=2.0)
+
+    @field_validator("path")
+    @classmethod
+    def _non_empty_path(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Insert 'path' must not be empty.")
+        return value
+
+    @model_validator(mode="after")
+    def _ordered(self) -> RenderInsert:
+        if self.end <= self.start:
+            raise ValueError("Insert 'end' must be greater than 'start'.")
+        return self
+
+
 class RenderClip(BaseModel):
     start: float = Field(ge=0.0, description="Clip start in the source video (seconds).")
     end: float = Field(gt=0.0, description="Clip end in the source video (seconds).")
     subtitles: list[SubtitleCue] = Field(default_factory=list)
+    inserts: list[RenderInsert] = Field(default_factory=list, max_length=64)
     title: str = Field(default="clip", description="Used by the filename template.")
     output_path: str | None = Field(
         default=None, description="Absolute path or filename inside output_dir."
@@ -735,6 +775,16 @@ def _persist_transcript(record: TranscriptRecord) -> None:
                 "confidence": segment.confidence,
                 "original_text": segment.original_text,
                 "translation": segment.translation,
+                **(
+                    {
+                        "words": [
+                            {"text": word.text, "start": word.start, "end": word.end}
+                            for word in segment.words
+                        ]
+                    }
+                    if segment.words
+                    else {}
+                ),
             }
             for segment in record.segments
         ],
@@ -793,6 +843,11 @@ def _load_transcript(transcript_id: str) -> TranscriptRecord | None:
                 confidence=item.get("confidence"),
                 original_text=item.get("original_text"),
                 translation=item.get("translation"),
+                words=transcriber._normalize_segment_words(
+                    item.get("words"),
+                    seg_start=float(item["start"]),
+                    seg_end=float(item["end"]),
+                ),
             )
             for item in payload.get("segments") or []
         ]
@@ -2046,6 +2101,7 @@ def _apply_phase_b_corpus_short_circuit(
             segment.confidence = span.score_orthographic
             segment.translation = translation
             segment.original_text = text
+            segment.words = None
             updated.append(segment)
             resolved_segments.append(segment)
 
@@ -2419,6 +2475,16 @@ async def extract_and_transcribe(body: TranscribeRequest, request: Request) -> A
                     confidence=segment.confidence,
                     original_text=segment.original_text,
                     translation=segment.translation,
+                    words=[
+                        TranscriptWord(
+                            text=word.text,
+                            start=round(word.start, 3),
+                            end=round(word.end, 3),
+                        )
+                        for word in segment.words
+                    ]
+                    if segment.words
+                    else None,
                 )
                 for segment in result.segments
             ],
@@ -2732,6 +2798,7 @@ class _PreparedClip:
     ass_path: Path
     srt_path: Path | None
     output_path: Path
+    inserts: tuple[renderer.InsertSpec, ...] = ()
 
 
 def _resolve_source(body: RenderBatchRequest) -> Path:
@@ -2953,6 +3020,35 @@ def _prepare_clips(
             srt_path = output_path.with_suffix(".srt")
             subtitle_gen.write_srt(srt_path, cues, clip_duration=duration)
 
+        inserts_for_clip: list[renderer.InsertSpec] = []
+        for item in sorted(clip.inserts, key=lambda entry: (entry.start, entry.end)):
+            ins_path = Path(item.path)
+            if not ins_path.is_file():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Insert media not found: {ins_path}",
+                )
+            start = max(0.0, min(duration, float(item.start)))
+            end = max(0.0, min(duration, float(item.end)))
+            if end - start < 0.05:
+                continue
+            inserts_for_clip.append(
+                renderer.InsertSpec(
+                    path=ins_path,
+                    kind=item.kind,
+                    start=start,
+                    end=end,
+                    source_start=max(0.0, float(item.source_start)) if item.kind == "video" else 0.0,
+                    x=item.x,
+                    y=item.y,
+                    width=item.width,
+                    height=item.height,
+                    fit=item.fit,
+                    muted=item.muted,
+                    fade=item.fade,
+                )
+            )
+
         prepared.append(
             _PreparedClip(
                 index=index,
@@ -2961,6 +3057,7 @@ def _prepare_clips(
                 ass_path=ass_path,
                 srt_path=srt_path,
                 output_path=output_path,
+                inserts=tuple(inserts_for_clip),
             )
         )
 
@@ -3018,6 +3115,7 @@ def _stream_batch(
             ass_path=item.ass_path,
             fonts_dir=config.fonts_dir(),
             use_nvenc=body.use_nvenc,
+            inserts=item.inserts,
         )
 
         encoder = "unknown"

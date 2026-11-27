@@ -371,7 +371,7 @@ fn validate_atomic_project_path(app: &tauri::AppHandle, path: &Path) -> Result<(
     ))
 }
 
-fn atomic_replace_file(target: &Path, contents: &str) -> Result<(), String> {
+fn atomic_replace_bytes(target: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = target
         .parent()
         .ok_or_else(|| "Target path has no parent directory".to_string())?;
@@ -392,7 +392,7 @@ fn atomic_replace_file(target: &Path, contents: &str) -> Result<(), String> {
 
     let write_res = (|| -> Result<(), String> {
         let mut file = std::fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
-        file.write_all(contents.as_bytes()).map_err(|e| e.to_string())?;
+        file.write_all(bytes).map_err(|e| e.to_string())?;
         file.sync_all().map_err(|e| e.to_string())?;
         Ok(())
     })();
@@ -443,6 +443,142 @@ fn atomic_replace_file(target: &Path, contents: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn atomic_replace_file(target: &Path, contents: &str) -> Result<(), String> {
+    atomic_replace_bytes(target, contents.as_bytes())
+}
+
+const MAX_CLIPBOARD_ASSET_BYTES: usize = 50 * 1024 * 1024;
+
+fn sanitize_asset_project_id(project_id: &str) -> String {
+    let cleaned: String = project_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+        .take(64)
+        .collect();
+    if cleaned.is_empty() {
+        "default".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn normalize_asset_extension(extension: &str) -> Result<&'static str, String> {
+    match extension.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+        "png" => Ok("png"),
+        "jpg" | "jpeg" => Ok("jpg"),
+        "webp" => Ok("webp"),
+        other => Err(format!("Unsupported clipboard image format: {other}")),
+    }
+}
+
+fn save_clipboard_asset_to_root(
+    base_dir: &Path,
+    project_id: &str,
+    extension: &str,
+    bytes: &[u8],
+) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("Clipboard image is empty".to_string());
+    }
+    if bytes.len() > MAX_CLIPBOARD_ASSET_BYTES {
+        return Err("Clipboard image exceeds the 50 MB limit".to_string());
+    }
+    let ext = normalize_asset_extension(extension)?;
+    let safe_project = sanitize_asset_project_id(project_id);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let target = base_dir
+        .join("assets")
+        .join(safe_project)
+        .join(format!("paste-{nanos}-{}.{ext}", std::process::id()));
+    atomic_replace_bytes(&target, bytes)?;
+    target
+        .to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Saved asset path is not valid UTF-8".to_string())
+}
+
+/// Save raw pasted image bytes into `%LOCALAPPDATA%\Tafseer Clipper\assets\<projectId>/`.
+#[tauri::command]
+fn save_clipboard_asset(
+    app: tauri::AppHandle,
+    project_id: String,
+    extension: String,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    let root = local_app_data_dir(&app).join("Tafseer Clipper");
+    save_clipboard_asset_to_root(&root, &project_id, &extension, &bytes)
+}
+
+#[cfg(windows)]
+fn read_clipboard_hdrop_paths() -> Result<Vec<String>, String> {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn OpenClipboard(hwnd_new_owner: *mut core::ffi::c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn GetClipboardData(format: u32) -> *mut core::ffi::c_void;
+    }
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn DragQueryFileW(
+            hdrop: *mut core::ffi::c_void,
+            i_file: u32,
+            lpsz_file: *mut u16,
+            cch: u32,
+        ) -> u32;
+    }
+    const CF_HDROP: u32 = 15;
+    struct ClipboardGuard;
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            // SAFETY: Paired with a successful `OpenClipboard` call.
+            unsafe {
+                CloseClipboard();
+            }
+        }
+    }
+    // SAFETY: `null_mut()` opens the clipboard for the current task.
+    if unsafe { OpenClipboard(core::ptr::null_mut()) } == 0 {
+        return Ok(Vec::new());
+    }
+    let _guard = ClipboardGuard;
+    // SAFETY: Clipboard is open; `CF_HDROP` returns an HDROP handle when files are copied.
+    let hdrop = unsafe { GetClipboardData(CF_HDROP) };
+    if hdrop.is_null() {
+        return Ok(Vec::new());
+    }
+    // SAFETY: `u32::MAX` with null buffer queries the dropped file count.
+    let count = unsafe { DragQueryFileW(hdrop, u32::MAX, core::ptr::null_mut(), 0) };
+    let mut paths = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        // SAFETY: Null buffer queries UTF-16 character length excluding NUL.
+        let len = unsafe { DragQueryFileW(hdrop, index, core::ptr::null_mut(), 0) };
+        if len == 0 {
+            continue;
+        }
+        let mut buf = vec![0u16; (len as usize) + 1];
+        // SAFETY: `buf` has capacity `len + 1` UTF-16 code units.
+        let copied = unsafe { DragQueryFileW(hdrop, index, buf.as_mut_ptr(), len + 1) };
+        if copied > 0 {
+            paths.push(String::from_utf16_lossy(&buf[..copied as usize]));
+        }
+    }
+    Ok(paths)
+}
+
+#[cfg(not(windows))]
+fn read_clipboard_hdrop_paths() -> Result<Vec<String>, String> {
+    Ok(Vec::new())
+}
+
+/// Read copied Explorer file paths (CF_HDROP) on Ctrl+V in the desktop app.
+#[tauri::command]
+fn read_clipboard_file_paths() -> Result<Vec<String>, String> {
+    read_clipboard_hdrop_paths()
 }
 
 /// Write a `.tafseer` snapshot via a sibling temp file, fsync, and atomic replace.
@@ -511,6 +647,8 @@ pub fn run() {
             acceleration::download_acceleration_pack,
             grant_project_folder_scope,
             write_project_file_atomic,
+            save_clipboard_asset,
+            read_clipboard_file_paths,
             secrets::protect_secret,
             secrets::unprotect_secret,
             set_running_jobs,
@@ -634,7 +772,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::atomic_replace_file;
+    use super::{atomic_replace_file, save_clipboard_asset_to_root};
 
     #[test]
     fn atomic_replace_creates_and_overwrites_without_temp_leftovers() {
@@ -657,6 +795,28 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
             .collect();
         assert!(leftovers.is_empty(), "unexpected temp files left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_clipboard_asset_validates_extension_empty_and_sanitizes_project_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "tafseer-clipboard-asset-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(save_clipboard_asset_to_root(&dir, "proj-1", "png", &[]).is_err());
+        assert!(save_clipboard_asset_to_root(&dir, "proj-1", "exe", b"MZ").is_err());
+
+        let saved = save_clipboard_asset_to_root(&dir, "../../evil/proj_1", "PNG", b"\x89PNG\r\n")
+            .expect("valid png write");
+        let saved_path = std::path::Path::new(&saved);
+        assert!(saved_path.is_file());
+        assert!(saved_path.starts_with(dir.join("assets").join("evilproj_1")));
+        assert_eq!(saved_path.extension().and_then(|e| e.to_str()), Some("png"));
+        assert_eq!(std::fs::read(saved_path).unwrap(), b"\x89PNG\r\n");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

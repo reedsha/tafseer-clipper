@@ -15,6 +15,7 @@ import { toast } from "sonner";
 import {
   FileVideo2,
   FolderOpen,
+  PanelLeftClose,
   Pencil,
   Plus,
   Trash2,
@@ -39,6 +40,7 @@ import { formatLectureDuration, relativeTime } from "@/lib/format";
 import { openProjectFile } from "@/lib/projectFile";
 import { STEP_LABELS, type RecentProject } from "@/lib/projectTypes";
 import { useProjectStore } from "@/store/projectStore";
+import { useUiStore } from "@/store/uiStore";
 
 /** L("Today") / L("Yesterday") / L("Earlier") bucket for the list separators. */
 function dayBucket(timestamp: number): string {
@@ -71,6 +73,8 @@ export function SessionsSidebar() {
   const removeRecent = useProjectStore((state) => state.removeRecent);
   const renameSession = useProjectStore((state) => state.renameSession);
   const createProject = useProjectStore((state) => state.createProject);
+  const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
+  const toggleSidebar = useUiStore((state) => state.toggleSidebar);
 
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -131,6 +135,8 @@ export function SessionsSidebar() {
     (a, b) => activityOf(b) - activityOf(a),
   );
 
+  if (sidebarCollapsed) return null;
+
   return (
     <aside
       aria-label={L("Sessions")}
@@ -166,6 +172,15 @@ export function SessionsSidebar() {
             onClick={() => void handleOpenFile()}
           >
             <FolderOpen className="size-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label={L("Collapse sessions")}
+            title="Collapse sessions (Ctrl+B)"
+            onClick={toggleSidebar}
+          >
+            <PanelLeftClose className="size-3.5" />
           </Button>
         </div>
       </div>

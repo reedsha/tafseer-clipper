@@ -13,7 +13,7 @@
  * character-level STT still reconstructs whole Thai words with real timings.
  */
 
-import type { SubtitleCue, TranscriptSegment } from "@/lib/projectTypes";
+import type { SubtitleCue, TranscriptSegment, TranscriptWord } from "@/lib/projectTypes";
 import {
   arabicVisualLength,
   wordBoundaries,
@@ -143,6 +143,23 @@ function snapOffsetToWordBoundary(
   return target;
 }
 
+function joinRawWords(words: readonly { text: string }[]): string {
+  let out = "";
+  let previous = "";
+  for (const word of words) {
+    const text = word.text.trim();
+    if (!text) continue;
+    if (!out) {
+      out = text;
+    } else {
+      const space = !(isThai(previous.slice(-1)) && isThai(text.charAt(0)));
+      out += space ? ` ${text}` : text;
+    }
+    previous = text;
+  }
+  return out.trim();
+}
+
 function trimSegmentToClip(
   segment: TranscriptSegment,
   clipStart: number,
@@ -164,9 +181,31 @@ function trimSegmentToClip(
     return null;
   }
 
+  if (segment.words && segment.words.length > 0) {
+    const kept: TranscriptWord[] = [];
+    for (const word of segment.words) {
+      if (word.end <= overlapStart + 0.01 || word.start >= overlapEnd - 0.01) continue;
+      const wStart = Math.max(overlapStart, word.start);
+      const wEnd = Math.min(overlapEnd, Math.max(wStart, word.end));
+      kept.push({ text: word.text, start: wStart, end: wEnd });
+    }
+    if (kept.length > 0) {
+      const slicedByWords = joinRawWords(kept);
+      if (slicedByWords) {
+        return {
+          ...segment,
+          start: overlapStart,
+          end: overlapEnd,
+          text: slicedByWords,
+          words: kept,
+        };
+      }
+    }
+  }
+
   const rawText = segment.text;
   if (!rawText.trim() || segDur <= 0) {
-    return { ...segment, start: overlapStart, end: overlapEnd };
+    return { ...segment, start: overlapStart, end: overlapEnd, words: undefined };
   }
 
   const isAr = segment.language === "ar" || arabicRatio(rawText) >= 0.6;
@@ -189,6 +228,7 @@ function trimSegmentToClip(
     start: overlapStart,
     end: overlapEnd,
     text: sliced,
+    words: undefined,
   };
 }
 
@@ -253,6 +293,7 @@ function normalizeSegmentsByScript(
           end: nextTime,
           text: piece.text,
           language: piece.arabic ? "ar" : segment.language === "ar" ? "th" : segment.language,
+          words: undefined,
           ...(piece.arabic
             ? {}
             : {
@@ -278,6 +319,61 @@ function arabicSource(text: string): string {
   return (text.match(ARABIC_RUN) ?? []).join(" ");
 }
 
+function pushSpanLetters(
+  letters: Letter[],
+  source: string,
+  start: number,
+  end: number,
+  sentenceId: number | null,
+  segmentId: number,
+  pick: "thai" | "arabic",
+): void {
+  const last = letters[letters.length - 1];
+  const first = source.charAt(0);
+  const needsSpace =
+    pick === "arabic" || (last && !isThai(last.char) && !isThai(first));
+  if (last && needsSpace && last.char !== " " && first !== " ") {
+    letters.push({
+      char: " ",
+      start,
+      end: start + 0.001,
+      sentenceId,
+      segmentId,
+    });
+  }
+
+  // Segment into grapheme clusters so combining marks share their base
+  // character's timestamp window instead of receiving acoustic duration, while
+  // keeping one Letter entry per UTF-16 code unit so Intl.Segmenter indices
+  // align even when astral code points are present.
+  let graphemes: string[] = [];
+  if (GRAPHEME_SEGMENTER) {
+    try {
+      graphemes = [...GRAPHEME_SEGMENTER.segment(source)].map((part) => part.segment);
+    } catch {
+      graphemes = [];
+    }
+  }
+  if (graphemes.length === 0) {
+    graphemes = Array.from(source);
+  }
+  const graphemeCount = graphemes.length;
+  for (let g = 0; g < graphemeCount; g += 1) {
+    const cluster = graphemes[g];
+    const clusterStart = start + ((end - start) * g) / graphemeCount;
+    const clusterEnd = start + ((end - start) * (g + 1)) / graphemeCount;
+    for (let c = 0; c < cluster.length; c += 1) {
+      letters.push({
+        char: cluster[c],
+        start: clusterStart,
+        end: clusterEnd,
+        sentenceId,
+        segmentId,
+      });
+    }
+  }
+}
+
 function buildLetters(
   segments: TranscriptSegment[],
   options: BuildCuesOptions,
@@ -299,6 +395,39 @@ function buildLetters(
           : arabicSource(segment.text);
     if (!source.trim()) continue;
 
+    // Use real word-level timestamps when available and aligned with `source`.
+    const segWords = segment.words?.filter((word) => word.text.trim().length > 0) ?? [];
+    if (
+      segWords.length > 0 &&
+      segWords.map((word) => word.text.trim()).join("").replace(/\s+/g, "") ===
+        source.replace(/\s+/g, "")
+    ) {
+      for (const word of segWords) {
+        const wText = word.text.trim();
+        let wStart = clamp(word.start - options.clipStart, 0, clipDuration);
+        let wEnd = clamp(word.end - options.clipStart, 0, clipDuration);
+        if (!(wEnd > wStart)) {
+          wStart = Math.max(wStart, cursor);
+          wEnd = wStart + estimateSeconds(wText);
+        }
+        wStart = Math.max(wStart, cursor);
+        if (wEnd <= wStart) wEnd = wStart + MIN_FRAGMENT_SECONDS;
+        wEnd = clamp(wEnd, 0, clipDuration);
+        if (wEnd <= wStart) continue;
+        pushSpanLetters(
+          letters,
+          wText,
+          wStart,
+          wEnd,
+          segment.sentence_id ?? null,
+          segment.id,
+          pick,
+        );
+        cursor = wEnd;
+      }
+      continue;
+    }
+
     let start = clamp(segment.start - options.clipStart, 0, clipDuration);
     let end = clamp(segment.end - options.clipStart, 0, clipDuration);
     if (!(end > start)) {
@@ -310,50 +439,15 @@ function buildLetters(
     end = clamp(end, 0, clipDuration);
     if (end <= start) continue;
 
-    const last = letters[letters.length - 1];
-    const first = source.charAt(0);
-    const needsSpace =
-      pick === "arabic" || (last && !isThai(last.char) && !isThai(first));
-    if (last && needsSpace && last.char !== " " && first !== " ") {
-      letters.push({
-        char: " ",
-        start,
-        end: start + 0.001,
-        sentenceId: segment.sentence_id ?? null,
-        segmentId: segment.id,
-      });
-    }
-
-    // Segment into grapheme clusters so combining marks share their base
-    // character's timestamp window instead of receiving acoustic duration, while
-    // keeping one Letter entry per UTF-16 code unit so Intl.Segmenter indices
-    // align even when astral code points are present.
-    let graphemes: string[] = [];
-    if (GRAPHEME_SEGMENTER) {
-      try {
-        graphemes = [...GRAPHEME_SEGMENTER.segment(source)].map((part) => part.segment);
-      } catch {
-        graphemes = [];
-      }
-    }
-    if (graphemes.length === 0) {
-      graphemes = Array.from(source);
-    }
-    const graphemeCount = graphemes.length;
-    for (let g = 0; g < graphemeCount; g += 1) {
-      const cluster = graphemes[g];
-      const clusterStart = start + ((end - start) * g) / graphemeCount;
-      const clusterEnd = start + ((end - start) * (g + 1)) / graphemeCount;
-      for (let c = 0; c < cluster.length; c += 1) {
-        letters.push({
-          char: cluster[c],
-          start: clusterStart,
-          end: clusterEnd,
-          sentenceId: segment.sentence_id ?? null,
-          segmentId: segment.id,
-        });
-      }
-    }
+    pushSpanLetters(
+      letters,
+      source,
+      start,
+      end,
+      segment.sentence_id ?? null,
+      segment.id,
+      pick,
+    );
     cursor = end;
   }
 

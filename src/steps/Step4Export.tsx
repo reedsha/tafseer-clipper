@@ -1,5 +1,5 @@
 import { L } from "@/lib/i18n";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import NumberFlow from "@number-flow/react";
 import { toast } from "sonner";
 import {
@@ -9,6 +9,7 @@ import {
   Cpu,
   Crop,
   FileVideo2,
+  Film,
   FolderOpen,
   Gauge,
   HardDrive,
@@ -50,7 +51,13 @@ import {
   encodingUnavailableText,
   isGpuEncodingAvailable,
 } from "@/lib/acceleration";
-import { openDirectory, openPathInShell } from "@/lib/media";
+import {
+  isTauriRuntime,
+  openDirectory,
+  openPathInShell,
+  probeMediaSrc,
+  toMediaSrc,
+} from "@/lib/media";
 import type { FramingMode, ProjectClip, Resolution } from "@/lib/projectTypes";
 import { FRAMING_LABELS } from "@/lib/projectTypes";
 import { resolveAssStyles, stylesOverlap } from "@/lib/subtitleStyles";
@@ -220,6 +227,42 @@ export function Step4Export() {
     [approvedClips, project?.subtitles],
   );
 
+  const [missingInserts, setMissingInserts] = useState<string[]>([]);
+  useEffect(() => {
+    if (!isTauriRuntime() || !project?.inserts) {
+      setMissingInserts([]);
+      return;
+    }
+    const paths = new Set<string>();
+    for (const clip of approvedClips) {
+      for (const ins of project.inserts[clip.id] ?? []) {
+        if (ins.path && !/^(https?:|data:|blob:)/i.test(ins.path)) {
+          paths.add(ins.path);
+        }
+      }
+    }
+    if (paths.size === 0) {
+      setMissingInserts([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const missing: string[] = [];
+      for (const path of paths) {
+        const src = toMediaSrc(path);
+        if (!src) continue;
+        const probe = await probeMediaSrc(src);
+        if (!probe.ok && probe.status !== null) {
+          missing.push(path.split(/[\\/]/).pop() || path);
+        }
+      }
+      if (!cancelled) setMissingInserts(missing);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [approvedClips, project?.inserts]);
+
   /* ------------------------------ guards ------------------------------ */
   if (!project) {
     return (
@@ -365,6 +408,7 @@ export function Step4Export() {
                 const cues = (project.subtitles[clip.id] ?? []).filter(
                   (cue) => cue.arabic || cue.thai,
                 ).length;
+                const insertCount = (project.inserts?.[clip.id] ?? []).length;
                 return (
                   <li
                     key={clip.id}
@@ -396,6 +440,12 @@ export function Step4Export() {
                             <Type className="size-3" />
                             {cues} line{cues === 1 ? "" : "s"}
                           </span>
+                          {insertCount > 0 ? (
+                            <span className="flex items-center gap-1">
+                              <Film className="size-3" />
+                              {insertCount} insert{insertCount === 1 ? "" : "s"}
+                            </span>
+                          ) : null}
                           <span className="flex items-center gap-1">
                             <MonitorPlay className="size-3" />
                             {resolutionLabel}
@@ -641,6 +691,18 @@ export function Step4Export() {
                   {clipsWithoutSubtitles} approved clip
                   {clipsWithoutSubtitles === 1 ? " has" : "s have"} no subtitles. They will render
                   without burned-in text.
+                </span>
+              </div>
+            ) : null}
+
+            {missingInserts.length > 0 ? (
+              <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-2 text-xs leading-relaxed text-destructive">
+                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                <span>
+                  Missing insert file{missingInserts.length === 1 ? "" : "s"}:{" "}
+                  {missingInserts.slice(0, 3).join(", ")}
+                  {missingInserts.length > 3 ? ` (+${missingInserts.length - 3} more)` : ""}.
+                  Replace or remove them in Step 3 before rendering.
                 </span>
               </div>
             ) : null}
