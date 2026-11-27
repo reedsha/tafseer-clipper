@@ -150,6 +150,7 @@ export async function seedProjectFile(
   const recent = {
     id: String(project.id),
     name: String(project.name),
+    ...(project.mode === "subtitle-only" ? { mode: "subtitle-only" } : {}),
     sourceFileName: (project.sourceFileName as string | null) ?? null,
     step: (project.step as number | undefined) ?? 1,
     duration: (project.duration as number | null) ?? null,

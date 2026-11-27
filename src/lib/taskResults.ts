@@ -13,11 +13,16 @@
  * can import it without a cycle.
  */
 
-import type {
-  ProjectClip,
-  ProjectData,
-  SubtitleCue,
-  TranscriptData,
+import {
+  buildFullVideoClip,
+  effectiveTranscriptDuration,
+} from "@/lib/clipMath";
+import {
+  isSubtitleOnlyProject,
+  type ProjectClip,
+  type ProjectData,
+  type SubtitleCue,
+  type TranscriptData,
 } from "@/lib/projectTypes";
 
 export type TaskKind = "transcribe" | "discovery" | "verify";
@@ -68,6 +73,45 @@ function applyTranscribe(
   project: ProjectData,
   payload: Extract<TaskResultPayload, { kind: "transcribe" }>,
 ): ProjectData {
+  if (isSubtitleOnlyProject(project)) {
+    const duration = effectiveTranscriptDuration(
+      payload.duration,
+      payload.transcript.segments,
+    );
+    const fullClip = buildFullVideoClip({
+      name: project.name,
+      sourceFileName: project.sourceFileName,
+      duration,
+    });
+    if (fullClip) {
+      return {
+        ...project,
+        transcriptId: payload.transcriptId,
+        transcript: payload.transcript,
+        duration: payload.duration ?? duration,
+        audioPath: payload.audioPath,
+        clips: [fullClip],
+        selectedClipId: fullClip.id,
+        // A new transcript invalidates every cue keyed by the old timing/text.
+        subtitles: {},
+        inserts: undefined,
+        step: project.step < 3 ? 3 : project.step,
+      };
+    }
+    return {
+      ...project,
+      transcriptId: payload.transcriptId,
+      transcript: payload.transcript,
+      duration: payload.duration,
+      audioPath: payload.audioPath,
+      clips: [],
+      selectedClipId: null,
+      subtitles: {},
+      inserts: undefined,
+      step: 1,
+    };
+  }
+
   return {
     ...project,
     transcriptId: payload.transcriptId,

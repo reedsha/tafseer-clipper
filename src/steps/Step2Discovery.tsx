@@ -67,7 +67,7 @@ import { toMediaSrc } from "@/lib/media";
 import { relinkLecture } from "@/lib/sourceLink";
 import { clamp, formatClock } from "@/lib/format";
 import { proposalToClip } from "@/lib/importClips";
-import type { ProjectClip, ProjectData } from "@/lib/projectTypes";
+import { isSubtitleOnlyProject, type ProjectClip, type ProjectData } from "@/lib/projectTypes";
 import { buildProviderFor, describeProviderGap } from "@/lib/providers";
 import { coerceToRange, NUMERIC_LIMITS } from "@/lib/settingsLimits";
 import { useAiActivityStore } from "@/store/aiActivityStore";
@@ -788,6 +788,38 @@ export function Step2Discovery() {
         title={L("No project open")}
         description="Create or resume a lecture on Step 1 to start finding clips."
         action={<Button onClick={() => setStep(1)}>{L("Go to Step 1")}</Button>}
+      />
+    );
+  }
+
+  if (isSubtitleOnlyProject(project)) {
+    const hasReadyClip = Boolean(
+      project.transcript && project.clips.some((clip) => clip.approved),
+    );
+    const clipEnd = project.duration ?? project.clips[0]?.end ?? 0;
+    return (
+      <StepEmptyState
+        icon={Captions}
+        title={L("Skipped in Subtitles-only mode")}
+        description={
+          hasReadyClip
+            ? `This video is treated as one complete clip (0:00 → ${formatClock(
+                clipEnd,
+              )}). Want to trim the edges or split it into multiple clips?`
+            : L(
+                "Subtitles-only mode skips clip finding and goes straight to Subtitles after transcription. Switch to the full workflow if you want to cut clips from a longer lecture.",
+              )
+        }
+        action={
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <Button onClick={() => useProjectStore.getState().setProjectMode("lecture")}>
+              {L("Switch to full workflow")}
+            </Button>
+            <Button variant="outline" onClick={() => setStep(hasReadyClip ? 3 : 1)}>
+              {hasReadyClip ? L("Go to Subtitles") : L("Back to upload")}
+            </Button>
+          </div>
+        }
       />
     );
   }

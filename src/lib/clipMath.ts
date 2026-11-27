@@ -7,7 +7,8 @@
  *    configurable auto-pad buffer.
  */
 
-import { clamp } from "./format";
+import { clamp, stripExtension } from "./format";
+import type { ProjectClip, Resolution } from "./projectTypes";
 
 export const MIN_CLIP_SECONDS = 1;
 
@@ -104,4 +105,84 @@ export function rangesOverlap(
   bEnd: number,
 ): boolean {
   return aStart < bEnd && aEnd > bStart;
+}
+
+/** Resolve duration from an explicit value or fall back to the last transcript segment end. */
+export function effectiveTranscriptDuration(
+  duration: number | null | undefined,
+  segments?: ReadonlyArray<{ end: number }>,
+): number | null {
+  if (typeof duration === "number" && Number.isFinite(duration) && duration > 0) {
+    return duration;
+  }
+  if (!segments?.length) return null;
+  let maxEnd = 0;
+  for (const segment of segments) {
+    if (Number.isFinite(segment.end) && segment.end > maxEnd) {
+      maxEnd = segment.end;
+    }
+  }
+  return maxEnd > 0 ? maxEnd : null;
+}
+
+/** Synthesize one approved full-duration clip for a pre-clipped video, or `null` if too short. */
+export function buildFullVideoClip(input: {
+  name: string;
+  sourceFileName: string | null;
+  duration: number | null;
+  existingId?: string;
+}): ProjectClip | null {
+  if (
+    typeof input.duration !== "number" ||
+    !Number.isFinite(input.duration) ||
+    input.duration < MIN_RENDERABLE_CLIP_SECONDS
+  ) {
+    return null;
+  }
+  const end = roundSeconds(input.duration);
+  const title =
+    input.name.trim() ||
+    (input.sourceFileName ? stripExtension(input.sourceFileName).trim() : "") ||
+    "Clip";
+  const id =
+    input.existingId ??
+    (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `clip-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  return {
+    id,
+    title,
+    rationale: "",
+    start: 0,
+    end,
+    speechStart: 0,
+    speechEnd: end,
+    approved: true,
+    createdAt: Date.now(),
+  };
+}
+
+/** True when a clip already spans the whole video from 0 to `duration`. */
+export function isFullVideoClip(clip: ProjectClip, duration: number | null): boolean {
+  if (clip.start > 0.25) return false;
+  if (duration === null || !Number.isFinite(duration) || duration <= 0) return true;
+  return Math.abs(clip.end - duration) <= 0.25;
+}
+
+/** Pick 16:9 or 9:16 from natural video dimensions, or `null` when unknown. */
+export function resolutionForDimensions(
+  width: number | null | undefined,
+  height: number | null | undefined,
+): Resolution | null {
+  if (
+    typeof width !== "number" ||
+    typeof height !== "number" ||
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return null;
+  }
+  return width > height ? "1920x1080" : "1080x1920";
 }

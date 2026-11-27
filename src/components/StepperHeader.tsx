@@ -18,7 +18,7 @@ import {
 } from "@/components/SidecarStatusDot";
 import { describeAcceleration } from "@/lib/acceleration";
 import { useAppVersion } from "@/lib/appVersion";
-import { STEP_LABELS, type WizardStep } from "@/lib/projectTypes";
+import { isSubtitleOnlyProject, STEP_LABELS, type WizardStep } from "@/lib/projectTypes";
 import { useAiActivityStore } from "@/store/aiActivityStore";
 import { useProjectStore } from "@/store/projectStore";
 import { useRenderStore } from "@/store/renderStore";
@@ -41,7 +41,7 @@ function stepCompletion(
     case 1:
       return Boolean(project.transcriptId && project.transcript);
     case 2:
-      return project.clips.some((clip) => clip.approved);
+      return !isSubtitleOnlyProject(project) && project.clips.some((clip) => clip.approved);
     case 3: {
       const approved = project.clips.filter((clip) => clip.approved);
       return (
@@ -76,6 +76,7 @@ export function StepperHeader() {
   const appVersion = useAppVersion();
 
   const currentStep = project?.step ?? 1;
+  const subtitleOnly = isSubtitleOnlyProject(project);
   const renderJob = useRenderStore((state) => state.job);
   const renderDoneForProject =
     renderJob.projectId !== null &&
@@ -118,7 +119,54 @@ export function StepperHeader() {
           {STEPS.map((step) => {
             const active = currentStep === step;
             const done = stepCompletion(step, project, renderDoneForProject);
+            const skipped = step === 2 && subtitleOnly;
             const disabled = project === null && step !== 1;
+            const stepButton = (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  // Clicking a stage always leaves configuration mode and
+                  // shows that stage.
+                  closeConfig();
+                  setStep(step);
+                }}
+                disabled={disabled}
+                aria-current={active ? "step" : undefined}
+                aria-label={`${step}. ${STEP_LABELS[step]}${
+                  skipped ? ", skipped" : done ? ", complete" : ""
+                }`}
+                className={cn(
+                  "h-auto gap-2.5 px-4 py-2 text-xs font-normal hover:bg-transparent",
+                  active
+                    ? "text-foreground hover:bg-transparent"
+                    : "text-muted-foreground hover:text-foreground",
+                  skipped && !active && "opacity-65",
+                )}
+              >
+                <span
+                  className={cn(
+                    "flex size-5 items-center justify-center rounded-full border text-[10px] tabular-nums",
+                    active
+                      ? "border-ring/50 bg-secondary text-foreground"
+                      : done
+                        ? "border-border bg-secondary/60 text-foreground"
+                        : "border-border text-muted-foreground",
+                  )}
+                >
+                  {done ? <Check className="size-3" /> : skipped ? "—" : step}
+                </span>
+                <span className="whitespace-nowrap">
+                  {step}. {STEP_LABELS[step]}
+                </span>
+                {skipped ? (
+                  <span className="rounded border border-border/80 bg-muted/40 px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                    {L("Skipped")}
+                  </span>
+                ) : null}
+              </Button>
+            );
             return (
               <div
                 key={step}
@@ -129,63 +177,41 @@ export function StepperHeader() {
                     : "border-transparent hover:bg-accent/30",
                 )}
               >
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    // Clicking a stage always leaves configuration mode and
-                    // shows that stage.
-                    closeConfig();
-                    setStep(step);
-                  }}
-                  disabled={disabled}
-                  aria-current={active ? "step" : undefined}
-                  aria-label={`${step}. ${STEP_LABELS[step]}${done ? ", complete" : ""}`}
-                  className={cn(
-                    "h-auto gap-2.5 px-4 py-2 text-xs font-normal hover:bg-transparent",
-                    active
-                      ? "text-foreground hover:bg-transparent"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "flex size-5 items-center justify-center rounded-full border text-[10px] tabular-nums",
-                      active
-                        ? "border-ring/50 bg-secondary text-foreground"
-                        : done
-                          ? "border-border bg-secondary/60 text-foreground"
-                          : "border-border text-muted-foreground",
-                    )}
-                  >
-                    {done ? <Check className="size-3" /> : step}
-                  </span>
-                  <span className="whitespace-nowrap">
-                    {step}. {STEP_LABELS[step]}
-                  </span>
-                </Button>
-                <Separator orientation="vertical" className={cn("h-4", !active && "opacity-50")} />
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label={`Step ${step} configuration`}
-                      onClick={() => openConfig(step)}
-                      className={cn(
-                        "mr-1 hover:text-foreground",
-                        active ? "text-muted-foreground" : "text-muted-foreground/70",
-                      )}
-                    >
-                      <Settings2 className="size-3.5" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="text-xs">
-                    {STEP_LABELS[step]} configuration
-                  </TooltipContent>
-                </Tooltip>
+                {skipped ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>{stepButton}</TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-64 text-xs">
+                      {L("Skipped in Subtitles-only mode — click to switch to the full workflow")}
+                    </TooltipContent>
+                  </Tooltip>
+                ) : (
+                  stepButton
+                )}
+                {!skipped ? (
+                  <>
+                    <Separator orientation="vertical" className={cn("h-4", !active && "opacity-50")} />
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Step ${step} configuration`}
+                          onClick={() => openConfig(step)}
+                          className={cn(
+                            "mr-1 hover:text-foreground",
+                            active ? "text-muted-foreground" : "text-muted-foreground/70",
+                          )}
+                        >
+                          <Settings2 className="size-3.5" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" className="text-xs">
+                        {STEP_LABELS[step]} configuration
+                      </TooltipContent>
+                    </Tooltip>
+                  </>
+                ) : null}
               </div>
             );
           })}

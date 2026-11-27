@@ -10,6 +10,7 @@
 
 import { toast } from "sonner";
 
+import { resolutionForDimensions } from "@/lib/clipMath";
 import { L } from "@/lib/i18n";
 import {
   hasLectureExtension,
@@ -18,6 +19,7 @@ import {
   toMediaSrc,
   type MediaFailureKind,
 } from "@/lib/media";
+import { isSubtitleOnlyProject, type ProjectData } from "@/lib/projectTypes";
 import { useProjectStore } from "@/store/projectStore";
 
 /** Actionable, honest copy for a failed preview (never blames the asset protocol). */
@@ -38,14 +40,20 @@ export function mediaFailureMessage(kind: MediaFailureKind): string {
   }
 }
 
-/** Read a video's duration from a throwaway metadata-only element. */
-function probeDuration(src: string): Promise<number | null> {
+export interface SourceVideoMetadata {
+  duration: number | null;
+  width: number | null;
+  height: number | null;
+}
+
+/** Read a video's duration and dimensions from a throwaway metadata-only element. */
+export function probeVideoMetadata(src: string): Promise<SourceVideoMetadata> {
   return new Promise((resolve) => {
     const video = document.createElement("video");
     video.preload = "metadata";
     video.muted = true;
     let timer = 0;
-    const finish = (value: number | null) => {
+    const finish = (value: SourceVideoMetadata) => {
       window.clearTimeout(timer);
       video.onloadedmetadata = null;
       video.onerror = null;
@@ -53,10 +61,22 @@ function probeDuration(src: string): Promise<number | null> {
       video.load();
       resolve(value);
     };
-    timer = window.setTimeout(() => finish(null), 8_000);
+    timer = window.setTimeout(
+      () => finish({ duration: null, width: null, height: null }),
+      8_000,
+    );
     video.onloadedmetadata = () =>
-      finish(Number.isFinite(video.duration) ? video.duration : null);
-    video.onerror = () => finish(null);
+      finish({
+        duration:
+          Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null,
+        width:
+          Number.isFinite(video.videoWidth) && video.videoWidth > 0 ? video.videoWidth : null,
+        height:
+          Number.isFinite(video.videoHeight) && video.videoHeight > 0
+            ? video.videoHeight
+            : null,
+      });
+    video.onerror = () => finish({ duration: null, width: null, height: null });
     video.src = src;
   });
 }
@@ -73,6 +93,44 @@ export function recordSourceSize(path: string): void {
     const current = useProjectStore.getState().project;
     if (current?.sourcePath !== path) return;
     useProjectStore.getState().updateProject({ sourceSize: probe.size });
+  });
+}
+
+/**
+ * Probe size, duration, and video dimensions right after staging a file in
+ * Step 1. When the project is in Subtitles-only mode, automatically match the
+ * project's export orientation unless the user already chose one manually.
+ */
+export function recordSourceMetadata(
+  path: string,
+  options?: { shouldAutoMatchResolution?: () => boolean },
+): void {
+  recordSourceSize(path);
+  const src = toMediaSrc(path);
+  if (!src) return;
+  void probeVideoMetadata(src).then(({ duration, width, height }) => {
+    const current = useProjectStore.getState().project;
+    if (current?.sourcePath !== path) return;
+    const patch: Partial<ProjectData> = {};
+    if (width && width > 0) patch.sourceWidth = Math.round(width);
+    if (height && height > 0) patch.sourceHeight = Math.round(height);
+    if (current.duration === null && duration && duration > 0) {
+      patch.duration = duration;
+    }
+    if (Object.keys(patch).length > 0) {
+      useProjectStore.getState().updateProject(patch);
+    }
+    if (
+      isSubtitleOnlyProject(current) &&
+      width &&
+      height &&
+      options?.shouldAutoMatchResolution?.() !== false
+    ) {
+      const detected = resolutionForDimensions(width, height);
+      if (detected && detected !== current.export.resolution) {
+        useProjectStore.getState().applyExportDefaults({ resolution: detected });
+      }
+    }
   });
 }
 
@@ -108,7 +166,7 @@ export async function relinkLecture(): Promise<boolean> {
 
   // Timings assume one source: warn when the replacement is a different length.
   if (previousDuration !== null) {
-    const actual = await probeDuration(src);
+    const { duration: actual } = await probeVideoMetadata(src);
     if (actual !== null && Math.abs(actual - previousDuration) > 1) {
       toast.warning(L("Different lecture length"), {
         description: L(

@@ -6,6 +6,10 @@
 
 export type WizardStep = 1 | 2 | 3 | 4;
 
+export type ProjectMode = "lecture" | "subtitle-only";
+
+export const SUBTITLE_ONLY_FILENAME_TEMPLATE = "{LectureName}_subtitled.mp4";
+
 export type AspectRatio = "16:9" | "9:16";
 
 export type FramingMode = "blur-fill" | "center-crop";
@@ -139,6 +143,12 @@ export interface ProjectData {
   schemaVersion: 1;
   id: string;
   name: string;
+  /**
+   * Workflow mode: `"lecture"` (default, omitted in older saves) cuts a long
+   * video into clips in Step 2; `"subtitle-only"` treats the whole video as one
+   * pre-clipped item and jumps straight from Step 1 to Step 3.
+   */
+  mode?: ProjectMode;
   sourcePath: string | null;
   sourceFileName: string | null;
   /**
@@ -146,6 +156,9 @@ export interface ProjectData {
    * match a moved lecture on another volume by size. Absent in older projects.
    */
   sourceSize?: number | null;
+  /** Natural video dimensions in pixels, when probed. Additive. */
+  sourceWidth?: number | null;
+  sourceHeight?: number | null;
   /** Lecture duration in seconds, when known. */
   duration: number | null;
   step: WizardStep;
@@ -186,6 +199,7 @@ export interface ProjectData {
 export interface RecentProject {
   id: string;
   name: string;
+  mode?: ProjectMode;
   sourceFileName: string | null;
   step: WizardStep;
   duration: number | null;
@@ -193,6 +207,12 @@ export interface RecentProject {
   updatedAt: number;
   /** Mirrors `ProjectData.lastActivityAt`; falls back to `updatedAt`. */
   lastActivityAt: number;
+}
+
+export function isSubtitleOnlyProject(
+  project: Pick<ProjectData, "mode"> | null | undefined,
+): boolean {
+  return project?.mode === "subtitle-only";
 }
 
 export const DEFAULT_EXPORT_SETTINGS: ProjectExportSettings = {

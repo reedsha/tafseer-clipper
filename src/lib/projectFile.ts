@@ -281,11 +281,26 @@ function normalizeProject(raw: unknown): ProjectData {
     schemaVersion: 1,
     id: str(project.id) || crypto.randomUUID(),
     name: str(project.name, "Untitled session"),
+    ...(project.mode === "subtitle-only"
+      ? { mode: "subtitle-only" as const }
+      : project.mode === "lecture"
+        ? { mode: "lecture" as const }
+        : {}),
     sourcePath: strOrNull(project.sourcePath),
     sourceFileName: strOrNull(project.sourceFileName),
     // Additive field: absent in every project saved before it existed.
     ...(typeof project.sourceSize === "number" && Number.isFinite(project.sourceSize)
       ? { sourceSize: project.sourceSize }
+      : {}),
+    ...(typeof project.sourceWidth === "number" &&
+    Number.isFinite(project.sourceWidth) &&
+    project.sourceWidth > 0
+      ? { sourceWidth: Math.round(project.sourceWidth) }
+      : {}),
+    ...(typeof project.sourceHeight === "number" &&
+    Number.isFinite(project.sourceHeight) &&
+    project.sourceHeight > 0
+      ? { sourceHeight: Math.round(project.sourceHeight) }
       : {}),
     duration:
       typeof project.duration === "number" && Number.isFinite(project.duration)
@@ -346,6 +361,7 @@ export function toRecentProject(project: ProjectData): RecentProject {
   return {
     id: project.id,
     name: project.name,
+    ...(project.mode === "subtitle-only" ? { mode: "subtitle-only" as const } : {}),
     sourceFileName: project.sourceFileName,
     step: project.step,
     duration: project.duration,

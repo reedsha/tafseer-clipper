@@ -38,7 +38,7 @@ import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { formatLectureDuration, relativeTime } from "@/lib/format";
 import { openProjectFile } from "@/lib/projectFile";
-import { STEP_LABELS, type RecentProject } from "@/lib/projectTypes";
+import { isSubtitleOnlyProject, STEP_LABELS, type RecentProject } from "@/lib/projectTypes";
 import { useProjectStore } from "@/store/projectStore";
 import { useUiStore } from "@/store/uiStore";
 
@@ -286,8 +286,15 @@ export function SessionsSidebar() {
                             className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground"
                             title={`Step ${item.step} of ${STEP_COUNT} · ${STEP_LABELS[item.step]}`}
                           >
-                            {STEP_LABELS[item.step]} · {item.clipCount} clip
-                            {item.clipCount === 1 ? "" : "s"}
+                            {STEP_LABELS[item.step]} ·{" "}
+                            {isSubtitleOnlyProject(item) ? (
+                              L("Subtitles only")
+                            ) : (
+                              <>
+                                {item.clipCount} clip
+                                {item.clipCount === 1 ? "" : "s"}
+                              </>
+                            )}
                             {duration ? (
                               <>
                                 {" · "}

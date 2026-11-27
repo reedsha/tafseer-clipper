@@ -98,6 +98,7 @@ import {
 } from "@/lib/media";
 import {
   FRAMING_LABELS,
+  isSubtitleOnlyProject,
   type FramingMode,
   type InsertFit,
   type InsertRect,
@@ -615,6 +616,7 @@ export function Step3Subtitles() {
   const resolution: Resolution = project?.export.resolution ?? "1080x1920";
   const framing: FramingMode = project?.export.framing ?? "blur-fill";
   const portrait = resolution === "1080x1920";
+  const subtitleOnly = isSubtitleOnlyProject(project);
 
   const approvedClips = useMemo(
     () => (project?.clips ?? []).filter((clip) => clip.approved),
@@ -2795,11 +2797,12 @@ export function Step3Subtitles() {
         <Languages className="size-5 text-muted-foreground" />
         <p className="text-sm font-medium text-foreground">{L("No approved clips")}</p>
         <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-          Approve clips in Find Clips first — each approved clip gets its own bilingual subtitle
-          track.
+          {subtitleOnly
+            ? L("Upload and transcribe your clip on Step 1 to start editing subtitles.")
+            : "Approve clips in Find Clips first — each approved clip gets its own bilingual subtitle track."}
         </p>
-        <Button className="mt-1" size="sm" onClick={() => setStep(2)}>
-          {L("Back to clip discovery")}
+        <Button className="mt-1" size="sm" onClick={() => setStep(subtitleOnly ? 1 : 2)}>
+          {subtitleOnly ? L("Back to upload") : L("Back to clip discovery")}
         </Button>
       </div>
     );
@@ -3044,12 +3047,19 @@ export function Step3Subtitles() {
                       {L("No subtitle lines for this clip")}
                     </p>
                     <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-                      The transcript has no speech inside this clip. Widen the cut in Find Clips,
-                      or add a line where the playhead sits.
+                      {subtitleOnly
+                        ? L(
+                            "No speech was found in this clip. Re-transcribe on Step 1, or add a line where the playhead sits.",
+                          )
+                        : "The transcript has no speech inside this clip. Widen the cut in Find Clips, or add a line where the playhead sits."}
                     </p>
                     <div className="mt-1 flex items-center gap-2">
-                      <Button size="sm" variant="outline" onClick={() => setStep(2)}>
-                        Adjust clip
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setStep(subtitleOnly ? 1 : 2)}
+                      >
+                        {subtitleOnly ? L("Back to upload") : "Adjust clip"}
                       </Button>
                       <Button size="sm" className="gap-1.5" onClick={handleAdd}>
                         <Plus className="size-3.5" />
@@ -3933,8 +3943,8 @@ export function Step3Subtitles() {
           </span>
         </div>
         <div className="flex items-center gap-1.5">
-          <Button variant="ghost" size="sm" onClick={() => setStep(2)}>
-            {L("Back to clip discovery")}
+          <Button variant="ghost" size="sm" onClick={() => setStep(subtitleOnly ? 1 : 2)}>
+            {subtitleOnly ? L("Back to upload") : L("Back to clip discovery")}
           </Button>
           <Button
             size="sm"
