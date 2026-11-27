@@ -543,6 +543,11 @@ export const SHORTCUTS = [
     where: "Step 3 · Subtitle lines editor",
   },
   {
+    keys: "Ctrl Shift Enter",
+    action: "Split subtitle at playhead",
+    where: "Step 3 · Subtitle lines editor",
+  },
+  {
     keys: "Ctrl Z / Ctrl Y",
     action: "Undo / redo subtitle edits",
     where: "Step 3 · Subtitle lines & track",

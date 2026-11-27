@@ -1,5 +1,5 @@
 import { L } from "@/lib/i18n";
-import { Check, History, Settings, Settings2 } from "lucide-react";
+import { Check, History, PanelLeftOpen, Settings, Settings2 } from "lucide-react";
 import { cn } from "cn";
 
 import { AiActivityLine } from "@/components/AiActivityLine";
@@ -65,6 +65,8 @@ export function StepperHeader() {
   const openSettings = useUiStore((state) => state.openSettings);
   const aiActivityOpen = useUiStore((state) => state.aiActivityOpen);
   const setAiActivityOpen = useUiStore((state) => state.setAiActivityOpen);
+  const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
+  const toggleSidebar = useUiStore((state) => state.toggleSidebar);
   const aiEntries = useAiActivityStore((state) => state.entries);
 
   const sidecar = useSettingsStore((state) => state.sidecar);
@@ -87,6 +89,26 @@ export function StepperHeader() {
     <header className="relative flex h-14 shrink-0 items-center gap-3 bg-card/30 px-4">
       {/* The rule the active stage tab sits on (and visually erases). */}
       <div aria-hidden className="absolute inset-x-0 bottom-0 h-px bg-border" />
+
+      {sidebarCollapsed ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={L("Show sessions")}
+              onClick={toggleSidebar}
+              className="relative -ml-1 text-muted-foreground hover:text-foreground"
+            >
+              <PanelLeftOpen className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="text-xs">
+            Show sessions (Ctrl+B)
+          </TooltipContent>
+        </Tooltip>
+      ) : null}
 
       {/* No session yet: keep the chrome (engine status, AI activity, Settings)
           but hide the step tabs — there is nothing to step through until a

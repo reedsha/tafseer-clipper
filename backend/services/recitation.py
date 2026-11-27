@@ -387,10 +387,23 @@ async def recover_arabic(
                 seg_dur = max(1e-6, segment.end - segment.start)
                 removed.append(segment)
                 if segment.start < start - 0.2 and segment.end > start:
-                    lead_text = _slice_text_by_ratio(
-                        segment.text,
-                        end_ratio=(start - segment.start) / seg_dur,
-                    )
+                    lead_words: list[transcriber.WordTiming] = []
+                    if segment.words:
+                        lead_words = [
+                            transcriber.WordTiming(
+                                text=word.text,
+                                start=round(max(segment.start, word.start), 3),
+                                end=round(max(max(segment.start, word.start), min(start, word.end)), 3),
+                            )
+                            for word in segment.words
+                            if (word.start + word.end) * 0.5 <= start + 0.001
+                        ]
+                        lead_text = transcriber.join_word_timings(lead_words)
+                    else:
+                        lead_text = _slice_text_by_ratio(
+                            segment.text,
+                            end_ratio=(start - segment.start) / seg_dur,
+                        )
                     if lead_text:
                         split_segments.append(
                             transcriber.Segment(
@@ -405,13 +418,27 @@ async def recover_arabic(
                                 confidence=segment.confidence,
                                 original_text=segment.original_text,
                                 translation=segment.translation,
+                                words=lead_words or None,
                             )
                         )
                 if segment.end > end + 0.2 and segment.start < end:
-                    trail_text = _slice_text_by_ratio(
-                        segment.text,
-                        start_ratio=(end - segment.start) / seg_dur,
-                    )
+                    trail_words: list[transcriber.WordTiming] = []
+                    if segment.words:
+                        trail_words = [
+                            transcriber.WordTiming(
+                                text=word.text,
+                                start=round(max(end, word.start), 3),
+                                end=round(max(max(end, word.start), min(segment.end, word.end)), 3),
+                            )
+                            for word in segment.words
+                            if (word.start + word.end) * 0.5 >= end - 0.001
+                        ]
+                        trail_text = transcriber.join_word_timings(trail_words)
+                    else:
+                        trail_text = _slice_text_by_ratio(
+                            segment.text,
+                            start_ratio=(end - segment.start) / seg_dur,
+                        )
                     if trail_text:
                         split_segments.append(
                             transcriber.Segment(
@@ -426,6 +453,7 @@ async def recover_arabic(
                                 confidence=segment.confidence,
                                 original_text=segment.original_text,
                                 translation=segment.translation,
+                                words=trail_words or None,
                             )
                         )
             if not removed:

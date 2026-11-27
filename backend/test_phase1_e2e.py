@@ -1160,6 +1160,131 @@ def run_http_checks(
             crop_detail,
         )
 
+        # ---- 3e. render-batch with visual inserts (image + video) ---------- #
+        ins_dir = renders / "inserts"
+        ins_img = ARTIFACTS / "insert_card.png"
+        ins_vid = ARTIFACTS / "insert_broll.mp4"
+        subprocess.run(
+            [
+                ffmpeg_bin(),
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=#e03c31:s=320x240:d=0.04",
+                "-frames:v",
+                "1",
+                str(ins_img),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                ffmpeg_bin(),
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=#1e90ff:s=320x240:r=25:d=2.0",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(ins_vid),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        ins_batch = {
+            "project_name": "phase1-inserts",
+            "source_path": str(source),
+            "resolution": "1080x1920",
+            "framing": "blur-fill",
+            "use_nvenc": False,
+            "export_srt": False,
+            "output_dir": str(ins_dir),
+            "styles": {"thai": {"color": "#FFFFFF", "size": 46}},
+            "clips": [
+                {
+                    "start": 0.0,
+                    "end": 2.5,
+                    "title": "with inserts",
+                    "subtitles": [
+                        {"start": 0.2, "end": 2.3, "thai": THAI_TEXT},
+                    ],
+                    "inserts": [
+                        {
+                            "path": str(ins_img),
+                            "kind": "image",
+                            "start": 0.2,
+                            "end": 0.9,
+                            "x": 0.1,
+                            "y": 0.1,
+                            "width": 0.5,
+                            "height": 0.3,
+                            "fit": "contain",
+                            "muted": True,
+                            "fade": 0.15,
+                        },
+                        {
+                            "path": str(ins_vid),
+                            "kind": "video",
+                            "start": 1.1,
+                            "end": 2.1,
+                            "source_start": 0.4,
+                            "x": 0.0,
+                            "y": 0.0,
+                            "width": 1.0,
+                            "height": 1.0,
+                            "fit": "cover",
+                            "muted": True,
+                            "fade": 0.0,
+                        },
+                    ],
+                }
+            ],
+        }
+        ins_events = stream_sse(client, "/render-batch", ins_batch)
+        ins_done = next((e for e in ins_events if e["_event"] == "done"), {})
+        ins_mp4 = next(iter(sorted(ins_dir.glob("*.mp4"))), None)
+        ins_ok = False
+        ins_detail = "missing output"
+        if ins_mp4 and ins_done.get("status") == "completed" and ins_done.get("failed_clips") == 0:
+            ins_media = probe(ins_mp4)
+            ins_video = next(
+                (s for s in ins_media["streams"] if s.get("codec_type") == "video"), {}
+            )
+            ins_audio = next(
+                (s for s in ins_media["streams"] if s.get("codec_type") == "audio"), None
+            )
+            ins_dur = float(ins_media["format"].get("duration", 0.0))
+            ins_frame_vid = load_rgb(
+                extract_frame(ffmpeg_bin(), ins_mp4, 1.5, ARTIFACTS / "frame_insert_vid.png")
+            )
+            ins_stats = subtitle_band_stats(ins_frame_vid)
+            # During the full-frame blue video insert at 1.5s, top half is blue-dominant
+            # while white Thai subtitles still burn cleanly on top.
+            top_rgb = ins_frame_vid[:400, :, :].mean(axis=(0, 1))
+            blue_dominant = float(top_rgb[2]) > float(top_rgb[0]) + 40.0
+            ins_ok = (
+                ins_video.get("width") == 1080
+                and ins_video.get("height") == 1920
+                and ins_audio is not None
+                and 2.0 <= ins_dur <= 3.0
+                and blue_dominant
+                and ins_stats["white"] > 200
+            )
+            ins_detail = (
+                f"{ins_video.get('width')}x{ins_video.get('height')} dur={ins_dur:.2f}s "
+                f"top_rgb=({top_rgb[0]:.0f},{top_rgb[1]:.0f},{top_rgb[2]:.0f}) white={ins_stats['white']}"
+            )
+        check(
+            "POST /render-batch: image + front-trimmed video inserts render beneath subtitles",
+            ins_ok,
+            ins_detail,
+        )
+
         # ---- 4. /verify-arabic --------------------------------------------- #
         verify = client.post(
             "/verify-arabic",
@@ -1286,6 +1411,57 @@ def run_http_checks(
             "POST /render-batch: missing source_path/transcript_id -> 400",
             no_source.status_code == 400,
             f"{no_source.status_code}",
+        )
+        missing_insert = client.post(
+            "/render-batch",
+            json={
+                "source_path": str(source),
+                "clips": [
+                    {
+                        "start": 0.0,
+                        "end": 2.0,
+                        "inserts": [
+                            {
+                                "path": str(ARTIFACTS / "missing_insert.png"),
+                                "kind": "image",
+                                "start": 0.2,
+                                "end": 1.2,
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        check(
+            "POST /render-batch: missing insert file -> 400",
+            missing_insert.status_code == 400
+            and "Insert media not found" in (missing_insert.json().get("detail") or ""),
+            f"{missing_insert.status_code}",
+        )
+        bad_insert_range = client.post(
+            "/render-batch",
+            json={
+                "source_path": str(source),
+                "clips": [
+                    {
+                        "start": 0.0,
+                        "end": 2.0,
+                        "inserts": [
+                            {
+                                "path": str(ins_img),
+                                "kind": "image",
+                                "start": 1.5,
+                                "end": 1.0,
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        check(
+            "POST /render-batch: invalid insert range -> 422",
+            bad_insert_range.status_code == 422,
+            f"{bad_insert_range.status_code}",
         )
 
         # ---- 8. content-negotiated SSE progress for Steps 1 and 2 ---------- #
@@ -1532,6 +1708,57 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
         and "fontsdir=" in graph
         and "\\:" in graph,
         graph[:110] + "...",
+    )
+    ins_specs = (
+        renderer.InsertSpec(
+            path=Path(r"C:\Temp\card.png"),
+            kind="image",
+            start=0.5,
+            end=2.5,
+            x=0.1,
+            y=0.1,
+            width=0.5,
+            height=0.3,
+            fit="contain",
+            fade=0.2,
+        ),
+        renderer.InsertSpec(
+            path=Path(r"C:\Temp\broll.mp4"),
+            kind="video",
+            start=3.0,
+            end=5.0,
+            source_start=1.25,
+            fit="cover",
+        ),
+    )
+    ins_graph = renderer.build_filtergraph(
+        resolution="1080x1920",
+        framing="blur-fill",
+        ass_path=r"C:\Users\muham\OneDrive\Documents\tafseer-clipper\backend\.e2e\clip 01.ass",
+        fonts_dir=r"C:\Users\muham\OneDrive\Documents\tafseer-clipper\backend\fonts",
+        inserts=ins_specs,
+    )
+    ins_args = renderer.build_ffmpeg_args(
+        ffmpeg="ffmpeg",
+        source=Path("lecture.mp4"),
+        output=Path("out.mp4"),
+        filtergraph=ins_graph,
+        start=10.0,
+        duration=6.0,
+        encoder="libx264",
+        inserts=ins_specs,
+    )
+    check(
+        "renderer.build_filtergraph + build_ffmpeg_args: overlays inserts before ass burn-in",
+        "[base0]" in ins_graph
+        and "[base1]" in ins_graph
+        and "enable='between(t,0.500,2.500)'" in ins_graph
+        and "enable='between(t,3.000,5.000)'" in ins_graph
+        and "fade=t=in:st=0.500" in ins_graph
+        and ins_graph.index("overlay=") < ins_graph.index("ass=filename=")
+        and "-loop" in ins_args
+        and "1.250" in ins_args,
+        ins_graph[-90:],
     )
     atomic_target = work / "atomic_preserved.mp4"
     atomic_target.write_bytes(b"EXISTING_VALID_MP4")
@@ -4541,6 +4768,201 @@ def run_decision_checks(work: Path, source: Path) -> None:
             and engine.loaded is False
             and engine.events == ["load", "infer", "infer"],
             f"released={released} again={released_again} loaded={engine.loaded}",
+        )
+
+        # ---- H. Word-level timestamps (Layer 3) --------------------------- #
+        class _WordProbeEngine(transcriber.WhisperTranscriber):
+            def __init__(self) -> None:
+                super().__init__(model_size="tiny", device="cpu", compute_type="int8")
+
+            def _ensure_model(self):
+                return object()
+
+            def _run_transcribe(self, model, audio_path, prompt, language, vad):  # noqa: ARG002
+                words = [
+                    type("Word", (), {"word": " สวัสดี", "start": 0.1, "end": 0.55})(),
+                    type("Word", (), {"word": "ครับ", "start": 0.6, "end": 0.95})(),
+                ]
+                item = type(
+                    "Item",
+                    (),
+                    {"text": "สวัสดีครับ", "start": 0.1, "end": 0.95, "words": words},
+                )()
+                info = type(
+                    "Info",
+                    (),
+                    {"language": "th", "duration": 1.0, "language_probability": 0.95},
+                )()
+                return iter([item]), info
+
+        word_engine = _WordProbeEngine()
+        word_res = word_engine.transcribe(source, auto_unload=False, vad_filter=False)
+        check(
+            "transcriber: local whisper populates normalized Segment.words",
+            len(word_res.segments) == 1
+            and word_res.segments[0].words is not None
+            and [(w.text, w.start, w.end) for w in word_res.segments[0].words]
+            == [("สวัสดี", 0.1, 0.55), ("ครับ", 0.6, 0.95)],
+            str(word_res.segments[0].words),
+        )
+
+        gl_keep = transcriber.apply_glossary_to_segments(
+            [
+                transcriber.Segment(
+                    id=0,
+                    start=0.0,
+                    end=2.0,
+                    text="อัลเลาะห์เมตตา",
+                    language="th",
+                    words=[
+                        transcriber.WordTiming(text="อัลเลาะห์", start=0.0, end=1.0),
+                        transcriber.WordTiming(text="เมตตา", start=1.0, end=2.0),
+                    ],
+                )
+            ],
+            {"อัลเลาะห์": "อัลลอฮฺ"},
+        )
+        gl_drop = transcriber.apply_glossary_to_segments(
+            [
+                transcriber.Segment(
+                    id=0,
+                    start=0.0,
+                    end=2.0,
+                    text="อัล ลอฮ",
+                    language="th",
+                    words=[
+                        transcriber.WordTiming(text="อัล", start=0.0, end=1.0),
+                        transcriber.WordTiming(text="ลอฮ", start=1.0, end=2.0),
+                    ],
+                )
+            ],
+            {"อัล ลอฮ": "อัลลอฮฺ ผู้ทรงสูงส่ง"},
+        )
+        check(
+            "transcriber: apply_glossary_to_segments keeps aligned words and clears mismatched words",
+            gl_keep[0].words is not None
+            and [w.text for w in gl_keep[0].words] == ["อัลลอฮฺ", "เมตตา"]
+            and gl_drop[0].words is None,
+            f"keep={gl_keep[0].words} drop={gl_drop[0].words}",
+        )
+
+        cloud_segs, _cloud_dur = transcriber._segments_from_cloud_payload(
+            {
+                "duration": 4.0,
+                "language": "th",
+                "segments": [
+                    {"start": 0.0, "end": 2.0, "text": "คำแรก คำสอง"},
+                ],
+                "words": [
+                    {"word": "คำแรก", "start": 0.1, "end": 0.7},
+                    {"word": "คำสอง", "start": 1.2, "end": 1.9},
+                ],
+            },
+            offset=10.0,
+        )
+        check(
+            "transcriber: _segments_from_cloud_payload attaches top-level words with timeline offset",
+            len(cloud_segs) == 1
+            and cloud_segs[0].words is not None
+            and [(w.text, w.start, w.end) for w in cloud_segs[0].words]
+            == [("คำแรก", 10.1, 10.7), ("คำสอง", 11.2, 11.9)],
+            str(cloud_segs[0].words),
+        )
+
+        gran_requests: list[bool] = []
+
+        class _MockGranHandler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                return
+
+            def do_POST(self):
+                length = int(self.headers.get("content-length") or 0)
+                body_text = self.rfile.read(length).decode("latin-1", errors="ignore")
+                has_gran = "timestamp_granularities[]" in body_text
+                gran_requests.append(has_gran)
+                if has_gran:
+                    payload = b"timestamp_granularities[] unsupported"
+                    self.send_response(400)
+                    self.send_header("content-type", "text/plain")
+                    self.send_header("content-length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+                payload = json.dumps(
+                    {
+                        "duration": 1.5,
+                        "language": "th",
+                        "segments": [{"start": 0.0, "end": 1.5, "text": "สวัสดี"}],
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        gran_server = ThreadingHTTPServer(("127.0.0.1", 0), _MockGranHandler)
+        gran_thread = threading.Thread(target=gran_server.serve_forever, daemon=True)
+        gran_thread.start()
+        gran_port = int(gran_server.server_address[1])
+        real_prep_gran = transcriber._prepare_cloud_upload
+        transcriber._prepare_cloud_upload = lambda *_a, **_kw: (
+            [transcriber._CloudChunk(offset=0.0, duration=1.5, path=wave_path, temporary=False)],
+            [],
+        )
+        try:
+            gran_res = asyncio.run(
+                transcriber.transcribe_cloud(
+                    wave_path,
+                    base_url=f"http://127.0.0.1:{gran_port}/v1",
+                    api_key="k",
+                    model="whisper-1",
+                )
+            )
+        finally:
+            transcriber._prepare_cloud_upload = real_prep_gran
+            gran_server.shutdown()
+            gran_server.server_close()
+        check(
+            "transcriber: cloud STT drops timestamp_granularities[] on 400 and keeps verbose_json",
+            gran_requests == [True, False]
+            and len(gran_res.segments) == 1
+            and gran_res.segments[0].text == "สวัสดี",
+            f"requests={gran_requests} segs={gran_res.segments}",
+        )
+
+        tid = "a" * 32
+        rec = sidecar_main.TranscriptRecord(
+            transcript_id=tid,
+            source_path=str(source),
+            duration=2.0,
+            language="th",
+            segments=[
+                transcriber.Segment(
+                    id=0,
+                    start=0.0,
+                    end=2.0,
+                    text="หนึ่ง สอง",
+                    language="th",
+                    words=[
+                        transcriber.WordTiming(text="หนึ่ง", start=0.1, end=0.5),
+                        transcriber.WordTiming(text="สอง", start=1.2, end=1.8),
+                    ],
+                )
+            ],
+            created_at=1.0,
+            waveform_peaks=[0.1, 0.2],
+        )
+        sidecar_main._persist_transcript(rec)
+        loaded_rec = sidecar_main._load_transcript(tid)
+        check(
+            "main: _persist_transcript / _load_transcript round-trips Segment.words",
+            loaded_rec is not None
+            and len(loaded_rec.segments) == 1
+            and loaded_rec.segments[0].words is not None
+            and [(w.text, w.start, w.end) for w in loaded_rec.segments[0].words]
+            == [("หนึ่ง", 0.1, 0.5), ("สอง", 1.2, 1.8)],
+            str(loaded_rec),
         )
     except ImportError as exc:  # pragma: no cover - fastapi is a sidecar dependency
         check(

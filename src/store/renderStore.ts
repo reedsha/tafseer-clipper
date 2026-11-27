@@ -10,10 +10,15 @@
 import { create } from "zustand";
 import { toast } from "sonner";
 
-import { streamRenderBatch, type RenderCue, type RenderEvent } from "@/lib/api";
+import {
+  streamRenderBatch,
+  type RenderCue,
+  type RenderEvent,
+  type RenderInsert,
+} from "@/lib/api";
 import { defaultOutputDirectory } from "@/lib/filenameTemplate";
 import { formatClock } from "@/lib/format";
-import type { SubtitleCue } from "@/lib/projectTypes";
+import type { MediaInsert, SubtitleCue } from "@/lib/projectTypes";
 import { buildCuesFromTranscript } from "@/lib/subtitleCues";
 import { assStyleToSpec, resolveAssStyles } from "@/lib/subtitleStyles";
 import { wrapArabicText, wrapSubtitleText } from "@/lib/subtitleWrap";
@@ -97,6 +102,37 @@ function toRenderCues(
     });
   }
   return { cues: valid, skipped };
+}
+
+function toRenderInserts(
+  inserts: MediaInsert[],
+  clipDuration: number,
+): RenderInsert[] {
+  const valid: RenderInsert[] = [];
+  const limit = Math.max(0, clipDuration);
+  for (const item of inserts) {
+    if (!item.path?.trim()) continue;
+    const start = Math.max(0, Number(item.start));
+    const end = Math.min(limit, Number(item.end));
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < 0.05) {
+      continue;
+    }
+    valid.push({
+      path: item.path,
+      kind: item.kind,
+      start,
+      end,
+      source_start: Math.max(0, Number(item.sourceStart) || 0),
+      x: item.rect.x,
+      y: item.rect.y,
+      width: item.rect.width,
+      height: item.rect.height,
+      fit: item.fit,
+      muted: item.muted !== false,
+      fade: Math.max(0, Number(item.fade) || 0),
+    });
+  }
+  return valid;
 }
 
 /** The in-flight stream; module-level so it survives step unmounts. */
@@ -196,11 +232,14 @@ export const useRenderStore = create<RenderState>()((set) => ({
         arabicMaxCharsPerLine,
       );
       skippedCues += skipped;
+      const rawInserts = current.inserts?.[clip.id] ?? [];
+      const renderInserts = toRenderInserts(rawInserts, clip.end - clip.start);
       return {
         start: clip.start,
         end: clip.end,
         title: clip.title,
         subtitles: cues,
+        ...(renderInserts.length > 0 ? { inserts: renderInserts } : {}),
       };
     });
 

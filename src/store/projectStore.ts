@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import {
+  type MediaInsert,
   type ProjectClip,
   type ProjectData,
   type ProjectExportSettings,
@@ -82,6 +83,7 @@ export interface ProjectState {
   selectClip: (id: string | null) => void;
   setSubtitles: (clipId: string, cues: SubtitleCue[]) => void;
   setSubtitlesBatch: (patch: Record<string, SubtitleCue[]>) => void;
+  setInserts: (clipId: string, inserts: MediaInsert[]) => void;
   setBasePrompt: (prompt: string) => void;
   setPromptPreset: (presetId: string | null) => void;
   setSessionGuide: (guide: string) => void;
@@ -283,6 +285,79 @@ export function clampCuesToDuration(
   return { ...subtitles, [clipId]: next };
 }
 
+/** Pure: shift one clip's inserts when clip.start moves, adjusting video `sourceStart`. */
+export function rebaseInsertsForClip(
+  insertsMap: Record<string, MediaInsert[]> | undefined,
+  clipId: string,
+  delta: number,
+  clipDuration: number,
+): Record<string, MediaInsert[]> | undefined {
+  if (!insertsMap || !Number.isFinite(delta) || Math.abs(delta) < CUE_REBASE_EPSILON) {
+    return insertsMap;
+  }
+  const items = insertsMap[clipId];
+  if (!items || items.length === 0) return insertsMap;
+  const duration = Math.max(0, clipDuration);
+  if (duration < MIN_CUE_WINDOW) {
+    return { ...insertsMap, [clipId]: [] };
+  }
+  const shifted: MediaInsert[] = [];
+  for (const item of items) {
+    const rawStart = item.start + delta;
+    const rawEnd = item.end + delta;
+    if (rawEnd <= 0 || rawStart >= duration) continue;
+    let sourceStart = item.sourceStart;
+    if (rawStart < 0 && item.kind === "video") {
+      const clippedFront = -rawStart;
+      sourceStart = Math.max(0, sourceStart + clippedFront);
+      if (item.sourceDuration !== null && sourceStart >= item.sourceDuration - MIN_CUE_WINDOW) {
+        continue;
+      }
+    }
+    const start = Math.max(0, rawStart);
+    const maxEndFromSource =
+      item.kind === "video" && item.sourceDuration !== null
+        ? start + Math.max(0, item.sourceDuration - sourceStart)
+        : duration;
+    const end = Math.min(duration, maxEndFromSource, rawEnd);
+    if (end - start < MIN_CUE_WINDOW) continue;
+    shifted.push({ ...item, start, end, sourceStart });
+  }
+  return { ...insertsMap, [clipId]: shifted };
+}
+
+/** Pure: keep one clip's inserts inside `[0, duration]`. */
+export function clampInsertsToDuration(
+  insertsMap: Record<string, MediaInsert[]> | undefined,
+  clipId: string,
+  duration: number,
+): Record<string, MediaInsert[]> | undefined {
+  const items = insertsMap?.[clipId];
+  if (!insertsMap || !items?.length) return insertsMap;
+  const limit = Math.max(0, duration);
+  const next: MediaInsert[] = [];
+  let changed = false;
+  for (const item of items) {
+    if (item.start >= limit - MIN_CUE_WINDOW) {
+      changed = true;
+      continue;
+    }
+    const end = Math.min(limit, item.end);
+    if (end - item.start < MIN_CUE_WINDOW) {
+      changed = true;
+      continue;
+    }
+    if (end !== item.end) {
+      changed = true;
+      next.push({ ...item, end });
+    } else {
+      next.push(item);
+    }
+  }
+  if (!changed) return insertsMap;
+  return { ...insertsMap, [clipId]: next };
+}
+
 /**
  * Drop the auto-saves of entries evicted from `recentProjects`. The localStorage
  * journal is cleaned synchronously; the durable disk copy is fire-and-forget.
@@ -480,14 +555,22 @@ export const useProjectStore = create<ProjectState>()(
       setClips: (clips) =>
         set((state) => {
           if (!state.project) return {};
-          // Re-base cues for existing clips whose start moved (trim commits and
-          // the Step-2 buffer re-apply arrive through here wholesale).
+          // Re-base cues & inserts for existing clips whose start moved (trim commits
+          // and the Step-2 buffer re-apply arrive through here wholesale).
           let subtitles = state.project.subtitles;
+          let inserts = state.project.inserts;
           for (const prev of state.project.clips) {
             const next = clips.find((clip) => clip.id === prev.id);
             subtitles = rebaseCuesForMovedClip(subtitles, prev, next);
-            if (next) {
+            if (prev && next) {
+              inserts = rebaseInsertsForClip(
+                inserts,
+                prev.id,
+                prev.start - next.start,
+                next.end - next.start,
+              );
               subtitles = clampCuesToDuration(subtitles, prev.id, next.end - next.start);
+              inserts = clampInsertsToDuration(inserts, prev.id, next.end - next.start);
             }
           }
           const selectedClipId = state.project.selectedClipId;
@@ -495,6 +578,7 @@ export const useProjectStore = create<ProjectState>()(
             project: touch(state.project, {
               clips,
               subtitles,
+              ...(inserts !== undefined ? { inserts } : {}),
               selectedClipId: clips.some((clip) => clip.id === selectedClipId)
                 ? selectedClipId
                 : (clips[0]?.id ?? null),
@@ -524,6 +608,7 @@ export const useProjectStore = create<ProjectState>()(
             clip.id === id ? { ...clip, ...patch } : clip,
           );
           let subtitles = state.project.subtitles;
+          let inserts = state.project.inserts;
           const nextClip = clips.find((clip) => clip.id === id);
           if (
             prev &&
@@ -532,10 +617,17 @@ export const useProjectStore = create<ProjectState>()(
             Math.abs(prev.start - patch.start) >= CUE_REBASE_EPSILON
           ) {
             subtitles = rebaseCuesForMovedClip(subtitles, prev, nextClip);
+            if (nextClip) {
+              inserts = rebaseInsertsForClip(
+                inserts,
+                id,
+                prev.start - nextClip.start,
+                nextClip.end - nextClip.start,
+              );
+            }
           }
-          // Shortening the cut-out leaves cues hanging past the end: they are
-          // orphaned, never rendered, and the only visible remedy used to be a
-          // full rebuild. Drop/clamp them here instead.
+          // Shortening the cut-out leaves cues/inserts hanging past the end:
+          // drop/clamp them here so they never drift or fail render.
           if (
             prev &&
             nextClip &&
@@ -546,9 +638,18 @@ export const useProjectStore = create<ProjectState>()(
               id,
               nextClip.end - nextClip.start,
             );
+            inserts = clampInsertsToDuration(
+              inserts,
+              id,
+              nextClip.end - nextClip.start,
+            );
           }
           return {
-            project: touch(state.project, { clips, subtitles }),
+            project: touch(state.project, {
+              clips,
+              subtitles,
+              ...(inserts !== undefined ? { inserts } : {}),
+            }),
             dirty: true,
           };
         }),
@@ -573,6 +674,11 @@ export const useProjectStore = create<ProjectState>()(
           const clips = state.project.clips.filter((clip) => clip.id !== id);
           const subtitles = { ...state.project.subtitles };
           delete subtitles[id];
+          let inserts = state.project.inserts;
+          if (inserts && Object.prototype.hasOwnProperty.call(inserts, id)) {
+            inserts = { ...inserts };
+            delete inserts[id];
+          }
           // A discarded clip is the strongest negative example a re-roll can
           // get, so it is kept (bounded) instead of vanishing without trace.
           const trashedClips = removed
@@ -582,6 +688,7 @@ export const useProjectStore = create<ProjectState>()(
             project: touch(state.project, {
               clips,
               subtitles,
+              ...(inserts !== undefined ? { inserts } : {}),
               ...(trashedClips ? { trashedClips } : {}),
               selectedClipId:
                 state.project.selectedClipId === id
@@ -615,6 +722,17 @@ export const useProjectStore = create<ProjectState>()(
           return {
             project: touch(state.project, {
               subtitles: { ...state.project.subtitles, ...patch },
+            }),
+            dirty: true,
+          };
+        }),
+
+      setInserts: (clipId, inserts) =>
+        set((state) => {
+          if (!state.project) return {};
+          return {
+            project: touch(state.project, {
+              inserts: { ...(state.project.inserts ?? {}), [clipId]: inserts },
             }),
             dirty: true,
           };

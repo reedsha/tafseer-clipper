@@ -18,6 +18,12 @@ export const FRAMING_LABELS: Record<FramingMode, string> = {
 
 export type Resolution = "1920x1080" | "1080x1920";
 
+export interface TranscriptWord {
+  text: string;
+  start: number;
+  end: number;
+}
+
 export interface TranscriptSegment {
   id: number;
   start: number;
@@ -35,6 +41,8 @@ export interface TranscriptSegment {
   original_text?: string | null;
   /** Qur'an translation used as a review reference (never burned in). */
   translation?: string | null;
+  /** Optional word-level timestamps from STT. */
+  words?: TranscriptWord[] | null;
 }
 
 export interface TranscriptData {
@@ -71,6 +79,8 @@ export interface SubtitleCue {
   thai: string;
   /** The editor has proof-read this line. Cleared when the text is edited. */
   reviewed?: boolean;
+  /** The editor manually modified, split, merged, or retimed this line. */
+  edited?: boolean;
   /** Arabic-only cue provenance (Quran verification / AI suggestion). */
   source?: string;
   reference?: string;
@@ -78,6 +88,41 @@ export interface SubtitleCue {
   originalText?: string;
   /** Review-only translation; not rendered in the burn-in. */
   translation?: string;
+}
+
+export type InsertKind = "image" | "video";
+
+export type InsertFit = "cover" | "blur-fill" | "contain";
+
+/** Normalized 0..1 position and size inside the export canvas. */
+export interface InsertRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface MediaInsert {
+  id: string;
+  kind: InsertKind;
+  path: string;
+  name: string;
+  /** Clip-relative start in seconds. */
+  start: number;
+  /** Clip-relative end in seconds. */
+  end: number;
+  /** Offset into the insert video when trimmed from the front (seconds, 0 for images). */
+  sourceStart: number;
+  /** Natural video duration in seconds, or null for still images. */
+  sourceDuration: number | null;
+  rect: InsertRect;
+  fit: InsertFit;
+  /** Muted by default so the lecturer's audio remains uninterrupted. */
+  muted: boolean;
+  /** Optional fade in/out duration in seconds (0 = hard cut). */
+  fade?: number;
+  naturalWidth?: number | null;
+  naturalHeight?: number | null;
 }
 
 export interface ProjectExportSettings {
@@ -125,6 +170,8 @@ export interface ProjectData {
   selectedClipId: string | null;
   /** Clip id -> bilingual cues. */
   subtitles: Record<string, SubtitleCue[]>;
+  /** Clip id -> visual insert footage (images or videos) layered over the lecture. */
+  inserts?: Record<string, MediaInsert[]>;
   export: ProjectExportSettings;
   createdAt: number;
   updatedAt: number;

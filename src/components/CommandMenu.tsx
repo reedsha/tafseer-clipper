@@ -12,6 +12,8 @@ import {
   KeyRound,
   Keyboard,
   Languages,
+  PanelLeftClose,
+  PanelLeftOpen,
   Save,
   Settings2,
 } from "lucide-react";
@@ -56,6 +58,8 @@ export function CommandMenu() {
   const openSettings = useUiStore((state) => state.openSettings);
   const openConfig = useUiStore((state) => state.openConfig);
   const setAiActivityOpen = useUiStore((state) => state.setAiActivityOpen);
+  const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
+  const toggleSidebar = useUiStore((state) => state.toggleSidebar);
 
   const project = useProjectStore((state) => state.project);
   const createProject = useProjectStore((state) => state.createProject);
@@ -73,11 +77,28 @@ export function CommandMenu() {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         toggleCommand();
+        return;
+      }
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "b"
+      ) {
+        const target = event.target as HTMLElement | null;
+        const inTextInput = Boolean(
+          target &&
+            (target.isContentEditable ||
+              ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)),
+        );
+        if (inTextInput) return;
+        event.preventDefault();
+        toggleSidebar();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [toggleCommand]);
+  }, [toggleCommand, toggleSidebar]);
 
   const run = (action: () => void | Promise<void>) => {
     setCommandOpen(false);
@@ -234,6 +255,13 @@ export function CommandMenu() {
         <CommandSeparator />
 
         <CommandGroup heading="Editor toggles">
+          <CommandItem
+            value="sessions sidebar toggle collapse expand"
+            onSelect={() => run(toggleSidebar)}
+          >
+            {sidebarCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+            {sidebarCollapsed ? "Show sessions sidebar" : "Hide sessions sidebar"}
+          </CommandItem>
           <CommandItem
             value={`aspect ratio ${aspectTarget}`}
             onSelect={() => run(() => setExportDefault({ resolution: nextResolution }))}

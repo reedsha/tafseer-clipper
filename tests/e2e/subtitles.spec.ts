@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { seedProjectFile } from "./fixtures";
 
@@ -951,11 +951,7 @@ test.describe("Step 3 undo/redo, continuous play, and reset", () => {
     expect(cueTimesFromLabel(await firstBlock.getAttribute("aria-label"))).toEqual(afterResize);
   });
 
-  test("Play clip highlights to play continuously and stops at block end when un-highlighted", async ({
-    page,
-  }) => {
-    // Deterministic fake <video> driver so Chromium headless does not need a
-    // codec file to test continuous vs stop-at-block-end transport logic.
+  async function installFakeVideoDriver(page: Page) {
     await page.addInitScript(() => {
       type VideoState = {
         src: string;
@@ -1074,6 +1070,14 @@ test.describe("Step 3 undo/redo, continuous play, and reset", () => {
         },
       });
     });
+  }
+
+  test("Play clip highlights to play continuously and stops at block end when un-highlighted", async ({
+    page,
+  }) => {
+    // Deterministic fake <video> driver so Chromium headless does not need a
+    // codec file to test continuous vs stop-at-block-end transport logic.
+    await installFakeVideoDriver(page);
 
     await page.route("https://media.example/**", async (route) => {
       await route.fulfill({
@@ -1346,5 +1350,437 @@ test.describe("Step 3 undo/redo, continuous play, and reset", () => {
       .toBeGreaterThanOrEqual(345);
     const resetBox = await previewPanel.boundingBox();
     expect(resetBox?.width ?? 0).toBeLessThanOrEqual(375);
+  });
+
+  test("Scissors button splits without blur race and CueRibbon cuts cleanly with no overlap", async ({
+    page,
+  }) => {
+    const longThai = "ความอดทนเป็นครึ่งหนึ่งของความศรัทธาและการอดกลั้นเป็นประตูสู่ความสำเร็จ";
+    const splitPoint = "ความอดทนเป็นครึ่งหนึ่งของความศรัทธา".length;
+    const base = makeStep3Project("e2e-scissors-split", "Scissors split lecture");
+    await seedProjectFile(page, {
+      ...base,
+      sourcePath: null,
+      subtitles: {
+        "e2e-scissors-split-clip": [
+          { id: "cue-single", start: 0, end: 10, arabic: "", thai: longThai },
+        ],
+      },
+    });
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Scissors split lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    const track = page.getByRole("group", { name: "Subtitle track" });
+    await expect(track.getByRole("button", { name: /^Subtitle line / })).toHaveCount(1);
+
+    const textarea = page.locator('textarea[lang="th"]');
+    await textarea.evaluate((el, pos) => {
+      const field = el as HTMLTextAreaElement;
+      field.focus();
+      field.setSelectionRange(pos, pos);
+    }, splitPoint);
+
+    // Clicking the Scissors button keeps the live caret offset instead of blurring first.
+    await page.getByRole("button", { name: "Split line at the cursor" }).click();
+
+    const rows = page.locator("[data-cue-row]");
+    await expect(rows).toHaveCount(2);
+    const blocks = track.getByRole("button", { name: /^Subtitle line / });
+    await expect(blocks).toHaveCount(2);
+
+    const box0 = await blocks.nth(0).boundingBox();
+    const box1 = await blocks.nth(1).boundingBox();
+    if (!box0 || !box1) throw new Error("Split ribbon blocks missing");
+    expect(box0.x + box0.width).toBeLessThanOrEqual(box1.x);
+
+    await rows.nth(0).getByRole("button", { name: "Subtitle line 1" }).click();
+    expect(await page.locator('textarea[lang="th"]').inputValue()).toBe(
+      longThai.slice(0, splitPoint),
+    );
+    await rows.nth(1).getByRole("button", { name: "Subtitle line 2" }).click();
+    const secondText = (await page.locator('textarea[lang="th"]').inputValue()).replace(/\n/g, "");
+    expect(secondText).toBe(longThai.slice(splitPoint));
+  });
+
+async function readRowClockRange(row: Locator): Promise<[string, string]> {
+  const clocks = row.locator("span.font-mono > span[aria-label]");
+  const start = await clocks.nth(0).getAttribute("aria-label");
+  const end = await clocks.nth(1).getAttribute("aria-label");
+  return [start ?? "", end ?? ""];
+}
+
+function parseClockLabel(label: string): number {
+  const parts = label.split(":").map(Number);
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return Number.NaN;
+}
+
+  test("rolling seam drag shifts both abutting blocks and undoes in one step", async ({
+    page,
+  }) => {
+    const base = makeStep3Project("e2e-rolling-seam", "Rolling seam lecture");
+    await seedProjectFile(page, {
+      ...base,
+      sourcePath: null,
+      subtitles: {
+        "e2e-rolling-seam-clip": [
+          { id: "cue-left", start: 0, end: 4, arabic: "", thai: "ครึ่งแรกของบรรทัด" },
+          { id: "cue-right", start: 4.02, end: 10, arabic: "", thai: "ครึ่งหลังของบรรทัด" },
+        ],
+      },
+    });
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Rolling seam lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    const track = page.getByRole("group", { name: "Subtitle track" });
+    const seam = track.getByRole("separator", { name: "Adjust cut between line 1 and line 2" });
+    await expect(seam).toBeVisible();
+    const trackBox = await track.boundingBox();
+    const seamBox = await seam.boundingBox();
+    if (!trackBox || !seamBox) throw new Error("Seam handle missing");
+
+    const startX = seamBox.x + seamBox.width / 2;
+    const centerY = seamBox.y + seamBox.height / 2;
+    await page.mouse.move(startX, centerY);
+    await page.mouse.down();
+    await page.mouse.move(startX + trackBox.width * 0.2, centerY, { steps: 6 });
+    await page.mouse.up();
+
+    const rows = page.locator("[data-cue-row]");
+    await expect
+      .poll(async () => {
+        const [start0, end0] = await readRowClockRange(rows.nth(0));
+        const [start1, end1] = await readRowClockRange(rows.nth(1));
+        const end0Sec = parseClockLabel(end0);
+        const start1Sec = parseClockLabel(start1);
+        return (
+          start0 === "0:00.00" &&
+          end1 === "0:10.00" &&
+          end0Sec >= 5.8 &&
+          end0Sec <= 6.2 &&
+          Math.abs(start1Sec - (end0Sec + 0.02)) < 0.005
+        );
+      })
+      .toBe(true);
+
+    await page.getByRole("button", { name: "Undo", exact: true }).click();
+    await expect.poll(() => readRowClockRange(rows.nth(0))).toEqual(["0:00.00", "0:04.00"]);
+    await expect.poll(() => readRowClockRange(rows.nth(1))).toEqual(["0:04.02", "0:10.00"]);
+  });
+
+  test("speech-aligned split uses segment pauses, word timings, and silence peaks", async ({
+    page,
+  }) => {
+    // 1. Segment pause boundary: 1.2s end -> 2.5s start (not linear ~0.83s).
+    const now = Date.now();
+    await seedProjectFile(page, {
+      schemaVersion: 1,
+      id: "e2e-seg-align",
+      name: "Segment align lecture",
+      sourcePath: null,
+      sourceFileName: "seg-align.mp4",
+      duration: 10,
+      step: 3,
+      transcriptId: "e2e-seg-align-t",
+      transcript: {
+        language: "th",
+        segments: [
+          { id: 0, start: 0.0, end: 1.2, text: "ประโยคแรก", language: "th" },
+          { id: 1, start: 2.5, end: 4.5, text: "ประโยคที่สองยาวมาก", language: "th" },
+        ],
+      },
+      audioPath: null,
+      basePrompt: "",
+      promptPresetId: null,
+      sessionGuide: "",
+      clips: [
+        {
+          id: "seg-clip",
+          title: "Pause clip",
+          rationale: "",
+          start: 0,
+          end: 6,
+          speechStart: 0,
+          speechEnd: 4.5,
+          approved: true,
+          createdAt: now,
+        },
+      ],
+      selectedClipId: "seg-clip",
+      subtitles: {
+        "seg-clip": [
+          { id: "cue-merged", start: 0, end: 4.5, arabic: "", thai: "ประโยคแรกประโยคที่สองยาวมาก" },
+        ],
+      },
+      export: {
+        resolution: "1080x1920",
+        framing: "blur-fill",
+        useNvenc: true,
+        exportSrt: true,
+        filenameTemplate: "{LectureName}_Clip{01}_{Title}.mp4",
+        outputDir: null,
+      },
+      createdAt: now,
+      updatedAt: now,
+      lastActivityAt: now,
+    });
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Segment align lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    const segTextarea = page.locator('textarea[lang="th"]');
+    await segTextarea.evaluate((el, offset) => {
+      const field = el as HTMLTextAreaElement;
+      field.focus();
+      field.setSelectionRange(offset, offset);
+    }, "ประโยคแรก".length);
+    await page.keyboard.press("Control+Enter");
+    const segRows = page.locator("[data-cue-row]");
+    await expect.poll(() => readRowClockRange(segRows.nth(0))).toEqual(["0:00.00", "0:01.20"]);
+    await expect.poll(() => readRowClockRange(segRows.nth(1))).toEqual(["0:02.50", "0:04.50"]);
+
+    // 2. Word-level timing inside a single segment: cuts at real word gap 0.90 -> 3.10.
+    await seedProjectFile(page, {
+      schemaVersion: 1,
+      id: "e2e-word-align",
+      name: "Word align lecture",
+      sourcePath: null,
+      sourceFileName: "word-align.mp4",
+      duration: 10,
+      step: 3,
+      transcriptId: "e2e-word-align-t",
+      transcript: {
+        language: "th",
+        segments: [
+          {
+            id: 0,
+            start: 0.2,
+            end: 4.2,
+            text: "สวัสดีทุกคน",
+            language: "th",
+            words: [
+              { text: "สวัสดี", start: 0.2, end: 0.9 },
+              { text: "ทุกคน", start: 3.1, end: 4.2 },
+            ],
+          },
+        ],
+      },
+      audioPath: null,
+      basePrompt: "",
+      promptPresetId: null,
+      sessionGuide: "",
+      clips: [
+        {
+          id: "word-clip",
+          title: "Word clip",
+          rationale: "",
+          start: 0,
+          end: 6,
+          speechStart: 0.2,
+          speechEnd: 4.2,
+          approved: true,
+          createdAt: now,
+        },
+      ],
+      selectedClipId: "word-clip",
+      subtitles: {
+        "word-clip": [{ id: "cue-w", start: 0.2, end: 4.2, arabic: "", thai: "สวัสดีทุกคน" }],
+      },
+      export: {
+        resolution: "1080x1920",
+        framing: "blur-fill",
+        useNvenc: true,
+        exportSrt: true,
+        filenameTemplate: "{LectureName}_Clip{01}_{Title}.mp4",
+        outputDir: null,
+      },
+      createdAt: now,
+      updatedAt: now,
+      lastActivityAt: now,
+    });
+    await page.reload();
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Word align lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+    await page.locator('textarea[lang="th"]').evaluate((el, offset) => {
+      const field = el as HTMLTextAreaElement;
+      field.focus();
+      field.setSelectionRange(offset, offset);
+    }, "สวัสดี".length);
+    await page.keyboard.press("Control+Enter");
+    const wordRows = page.locator("[data-cue-row]");
+    await expect.poll(() => readRowClockRange(wordRows.nth(0))).toEqual(["0:00.20", "0:00.90"]);
+    await expect.poll(() => readRowClockRange(wordRows.nth(1))).toEqual(["0:03.10", "0:04.20"]);
+
+    // 3. Silence valley fallback via transcript.peaks snaps cut away from 5.00s into 4.62s dip.
+    const peaks = Array.from({ length: 40 }, (_, i) => (i === 18 ? 0.02 : 0.8));
+    await seedProjectFile(page, {
+      schemaVersion: 1,
+      id: "e2e-peak-align",
+      name: "Peak align lecture",
+      sourcePath: null,
+      sourceFileName: "peak-align.mp4",
+      duration: 10,
+      step: 3,
+      transcriptId: "e2e-peak-align-t",
+      transcript: {
+        language: "th",
+        segments: [{ id: 0, start: 0, end: 10, text: "ท่อนแรกท่อนสอง", language: "th" }],
+        peaks,
+      },
+      audioPath: null,
+      basePrompt: "",
+      promptPresetId: null,
+      sessionGuide: "",
+      clips: [
+        {
+          id: "peak-clip",
+          title: "Peak clip",
+          rationale: "",
+          start: 0,
+          end: 10,
+          speechStart: 0,
+          speechEnd: 10,
+          approved: true,
+          createdAt: now,
+        },
+      ],
+      selectedClipId: "peak-clip",
+      subtitles: {
+        "peak-clip": [{ id: "cue-p", start: 0, end: 10, arabic: "", thai: "ท่อนแรกท่อนสอง" }],
+      },
+      export: {
+        resolution: "1080x1920",
+        framing: "blur-fill",
+        useNvenc: true,
+        exportSrt: true,
+        filenameTemplate: "{LectureName}_Clip{01}_{Title}.mp4",
+        outputDir: null,
+      },
+      createdAt: now,
+      updatedAt: now,
+      lastActivityAt: now,
+    });
+    await page.reload();
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Peak align lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+    await page.locator('textarea[lang="th"]').evaluate((el, offset) => {
+      const field = el as HTMLTextAreaElement;
+      field.focus();
+      field.setSelectionRange(offset, offset);
+    }, "ท่อนแรก".length);
+    await page.keyboard.press("Control+Enter");
+    const peakRows = page.locator("[data-cue-row]");
+    await expect
+      .poll(async () => {
+        const [start, end] = await readRowClockRange(peakRows.nth(0));
+        return start === "0:00.00" && /^0:04\.6\d$/.test(end);
+      })
+      .toBe(true);
+  });
+
+  test("scrubbing inside a block enables Split at playhead, and splitting pauses playback", async ({
+    page,
+  }) => {
+    await installFakeVideoDriver(page);
+    await page.route("https://media.example/**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { "content-length": "1024", "content-type": "video/mp4" },
+        body: "",
+      });
+    });
+
+    const base = makeStep3Project("e2e-playhead-split", "Playhead split lecture");
+    await seedProjectFile(page, {
+      ...base,
+      subtitles: {
+        "e2e-playhead-split-clip": [
+          {
+            id: "cue-full",
+            start: 0,
+            end: 10,
+            arabic: "",
+            thai: "ประโยคแรกของการบรรยาย ประโยคถัดมาของการบรรยาย",
+          },
+        ],
+      },
+    });
+    await page.goto("/");
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: /Playhead split lecture/ })
+      .first()
+      .click();
+    await expect(page.getByRole("heading", { name: "Subtitles" })).toBeVisible();
+
+    // Scrub the top ruler inside the single 0..10s cue to ~3.0s and click Split at playhead.
+    const ruler = page.getByLabel("Scrub timeline");
+    const rulerBox = await ruler.boundingBox();
+    if (!rulerBox) throw new Error("Scrub ruler missing");
+    await page.mouse.click(rulerBox.x + rulerBox.width * 0.3, rulerBox.y + rulerBox.height / 2);
+
+    await page.getByRole("button", { name: "Split line at playhead" }).click();
+    const rows = page.locator("[data-cue-row]");
+    await expect(rows).toHaveCount(2);
+    await expect
+      .poll(async () => {
+        const [start0, end0] = await readRowClockRange(rows.nth(0));
+        const [start1, end1] = await readRowClockRange(rows.nth(1));
+        const end0Sec = parseClockLabel(end0);
+        const start1Sec = parseClockLabel(start1);
+        return (
+          start0 === "0:00.00" &&
+          end1 === "0:10.00" &&
+          end0Sec >= 2.9 &&
+          end0Sec <= 3.1 &&
+          Math.abs(start1Sec - (end0Sec + 0.02)) < 0.005
+        );
+      })
+      .toBe(true);
+
+    // Start playing line 2 (which is active) and split it mid-playback: video must pause.
+    await page.getByRole("button", { name: "Play line 2" }).click();
+    await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
+    await expect
+      .poll(() => page.evaluate(() => document.querySelector("video")?.currentTime ?? 0))
+      .toBeGreaterThan(3.4);
+
+    await page.locator('textarea[lang="th"]').evaluate((el) => {
+      const field = el as HTMLTextAreaElement;
+      field.focus();
+      const mid = Math.floor(field.value.length / 2);
+      field.setSelectionRange(mid, mid);
+    });
+    await page.keyboard.press("Control+Enter");
+
+    await expect(rows).toHaveCount(3);
+    await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeHidden();
+    const pausedAfterSplit = await page.evaluate(
+      () => document.querySelector("video")?.paused ?? false,
+    );
+    expect(pausedAfterSplit).toBe(true);
   });
 });
