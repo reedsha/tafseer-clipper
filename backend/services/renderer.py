@@ -103,20 +103,74 @@ def encoder_available(encoder: str) -> bool:
     return re.search(rf"\s{re.escape(encoder)}\s", completed.stdout or "") is not None
 
 
-@lru_cache(maxsize=1)
-def nvenc_available() -> bool:
-    """Probe NVENC for real: compiled-in *and* a driver that accepts a frame.
+#: Machine-readable reasons ``nvenc_probe`` reports when hardware encoding is
+#: unavailable (additive ``/health.acceleration.encoding_reason``).
+NVENC_REASONS = (
+    "ffmpeg-missing",
+    "encoder-not-compiled",
+    "driver-too-old",
+    "no-capable-device",
+    "probe-timeout",
+    "probe-failed",
+)
 
-    A compiled-in encoder is not enough - old drivers report
-    ``Driver does not support the required nvenc API version`` only when the
-    encoder is actually opened, so a one-frame null encode is the only reliable
-    signal.  The result is cached for the process lifetime.
+_NVENC_PROBE_TIMEOUT = 30.0
+_NVENC_TRANSIENT_TTL = 15.0
+_nvenc_probe_lock = threading.Lock()
+_nvenc_probe_cache: dict | None = None
+
+
+def classify_nvenc_failure(stderr: str) -> str:
+    """Map FFmpeg's NVENC error output to one of :data:`NVENC_REASONS`.
+
+    Old drivers only reveal themselves when the encoder is opened
+    (``Driver does not support the required nvenc API version`` / ``minimum
+    required Nvidia driver``); adapters without an encoder report ``No capable
+    devices found`` or ``OpenEncodeSessionEx failed``.
     """
+    text = (stderr or "").lower()
+    if (
+        "required nvenc api version" in text
+        or "minimum required nvidia driver" in text
+        or "driver does not support" in text
+        or "nvenc api version" in text
+    ):
+        return "driver-too-old"
+    if (
+        "no capable devices found" in text
+        or "openencodesessionex failed" in text
+        or "no nvenc capable devices" in text
+        or ("cannot load" in text and ("cuda" in text or "nvencodeapi" in text))
+        or "cuinit" in text
+    ):
+        return "no-capable-device"
+    return "probe-failed"
+
+
+def _probe_detail(stderr: str) -> str | None:
+    """Last meaningful stderr line (diagnostics only, length-bounded)."""
+    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+    if not lines:
+        return None
+    # Prefer the line that names the actual failure over a trailing summary.
+    for line in lines:
+        lowered = line.lower()
+        if "driver" in lowered or "capable" in lowered or "nvenc" in lowered:
+            return line[:300]
+    return lines[-1][:300]
+
+
+def _run_nvenc_probe() -> dict:
+    if not config.ffmpeg_path():
+        return {"ok": False, "reason": "ffmpeg-missing", "detail": None, "cacheable": True}
     if not encoder_available("h264_nvenc"):
-        return False
+        return {
+            "ok": False,
+            "reason": "encoder-not-compiled",
+            "detail": "h264_nvenc is not compiled into the bundled FFmpeg",
+            "cacheable": True,
+        }
     ffmpeg = config.ffmpeg_path()
-    if not ffmpeg:
-        return False
     try:
         completed = subprocess.run(
             [
@@ -128,7 +182,11 @@ def nvenc_available() -> bool:
                 "-f",
                 "lavfi",
                 "-i",
-                "color=c=black:s=256x144:r=1:d=0.2",
+                "color=c=black:s=256x144:r=25",
+                "-frames:v",
+                "1",
+                "-pix_fmt",
+                "yuv420p",
                 "-c:v",
                 "h264_nvenc",
                 "-f",
@@ -138,18 +196,79 @@ def nvenc_available() -> bool:
             capture_output=True,
             text=True,
             errors="replace",
-            timeout=30,
+            timeout=_NVENC_PROBE_TIMEOUT,
             check=False,
             creationflags=CREATE_NO_WINDOW,
         )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return completed.returncode == 0
+    except subprocess.TimeoutExpired:
+        # A GPU waking from a low-power state can be slow once; never pin
+        # that to the whole session.
+        return {
+            "ok": False,
+            "reason": "probe-timeout",
+            "detail": f"test encode did not finish within {_NVENC_PROBE_TIMEOUT:.0f}s",
+            "cacheable": False,
+        }
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "reason": "probe-failed", "detail": str(exc)[:300], "cacheable": False}
+    if completed.returncode == 0:
+        return {"ok": True, "reason": None, "detail": None, "cacheable": True}
+    stderr = completed.stderr or ""
+    return {
+        "ok": False,
+        "reason": classify_nvenc_failure(stderr),
+        "detail": _probe_detail(stderr) or f"exit {completed.returncode}",
+        "cacheable": True,
+    }
+
+
+def nvenc_probe() -> dict:
+    """Probe NVENC for real and say *why* it is unavailable.
+
+    A compiled-in encoder is not enough - old drivers report
+    ``Driver does not support the required nvenc API version`` only when the
+    encoder is actually opened, so a one-frame null encode is the only reliable
+    signal.  Definite results are cached for the process lifetime (cleared by
+    :func:`clear_capability_cache`, i.e. ``/health?refresh=1``); timeouts and
+    spawn errors are held for only a few seconds so a slow first wake-up can
+    recover.
+
+    Returns ``{"ok": bool, "reason": str | None, "detail": str | None}``.
+    """
+    global _nvenc_probe_cache
+    with _nvenc_probe_lock:
+        if _nvenc_probe_cache is not None:
+            expires = _nvenc_probe_cache.get("_expires")
+            if expires is None or time.monotonic() < expires:
+                return {k: v for k, v in _nvenc_probe_cache.items() if k != "_expires"}
+        result = _run_nvenc_probe()
+        cacheable = result.pop("cacheable", False)
+        if result["ok"]:
+            logger.info("hardware encoding available (h264_nvenc)")
+        else:
+            logger.warning(
+                "hardware encoding unavailable: reason=%s detail=%s",
+                result["reason"],
+                result["detail"],
+            )
+        # Transient failures are held only briefly so concurrent /health
+        # callers share one probe, then retried on the next check.
+        _nvenc_probe_cache = dict(result)
+        if not cacheable:
+            _nvenc_probe_cache["_expires"] = time.monotonic() + _NVENC_TRANSIENT_TTL
+        return dict(result)
+
+
+def nvenc_available() -> bool:
+    """True when the hardware encoder accepted a test frame (see :func:`nvenc_probe`)."""
+    return bool(nvenc_probe()["ok"])
 
 
 def clear_capability_cache() -> None:
+    global _nvenc_probe_cache
     encoder_available.cache_clear()
-    nvenc_available.cache_clear()
+    with _nvenc_probe_lock:
+        _nvenc_probe_cache = None
 
 
 # --------------------------------------------------------------------------- #

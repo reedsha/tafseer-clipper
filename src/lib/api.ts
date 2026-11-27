@@ -401,6 +401,13 @@ export interface AccelerationStatus {
   pack_installed: boolean;
   /** Why acceleration is unavailable, when the sidecar knows. */
   reason: string | null;
+  /**
+   * Additive: why hardware encoding is unavailable (`null` when it works).
+   * Independent of the acceleration pack; absent on older sidecars.
+   */
+  encoding_reason?: string | null;
+  /** Additive: raw encoder message behind `encoding_reason` — diagnostics only. */
+  encoding_detail?: string | null;
 }
 
 export interface HealthResponse {

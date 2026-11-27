@@ -560,8 +560,8 @@ const TH_BY_EN: Record<string, string> = {
   // GPU pack
   "Could not enable GPU acceleration": "เปิดการเร่งด้วย GPU ไม่ได้",
   "GPU acceleration installed": "ติดตั้งการเร่งด้วย GPU แล้ว",
-  "Restart the app to switch transcription and encoding to the GPU.":
-    "รีสตาร์ทแอปเพื่อให้การถอดเสียงและการเข้ารหัสใช้ GPU",
+  "Restart the app to switch transcription to the GPU.":
+    "รีสตาร์ทแอปเพื่อให้การถอดเสียงใช้ GPU",
   "Could not restart": "รีสตาร์ทไม่ได้",
   "Restart to use the GPU": "รีสตาร์ทเพื่อใช้ GPU",
   "Until then everything keeps running on the CPU.": "จนกว่าจะรีสตาร์ท ทุกอย่างยังทำงานบน CPU",
@@ -723,6 +723,28 @@ const TH_BY_EN: Record<string, string> = {
   "outside the lecture": "อยู่นอกช่วงของบรรยาย",
   "under 15 seconds": "สั้นกว่า 15 วินาที",
   "Untitled clip": "ไม่มีชื่อคลิป",
+
+  // Hardware encoding (Step 4 + Settings) — independent of the GPU pack
+  "Your graphics driver is too old for hardware encoding. Update it, then click Check again. Rendering uses the CPU meanwhile.":
+    "ไดรเวอร์การ์ดจอเก่าเกินไปสำหรับการเข้ารหัสแบบฮาร์ดแวร์ อัปเดตไดรเวอร์แล้วกด ตรวจอีกครั้ง ระหว่างนี้จะเรนเดอร์ด้วย CPU",
+  "This computer can't encode video on the GPU. Rendering uses the CPU (slower).":
+    "คอมพิวเตอร์เครื่องนี้เข้ารหัสวิดีโอด้วย GPU ไม่ได้ จะเรนเดอร์ด้วย CPU (ช้ากว่า)",
+  "The video encoder is missing. Reinstall the app; rendering can't start until then.":
+    "ไม่พบตัวเข้ารหัสวิดีโอ ติดตั้งแอปใหม่ ระหว่างนี้จะเริ่มเรนเดอร์ไม่ได้",
+  "Hardware encoding didn't respond in time. Click Check again; rendering uses the CPU meanwhile.":
+    "การเข้ารหัสแบบฮาร์ดแวร์ไม่ตอบสนองทันเวลา กด ตรวจอีกครั้ง ระหว่างนี้จะเรนเดอร์ด้วย CPU",
+  "Hardware encoding couldn't start. Rendering uses the CPU (slower).":
+    "เริ่มการเข้ารหัสแบบฮาร์ดแวร์ไม่ได้ จะเรนเดอร์ด้วย CPU (ช้ากว่า)",
+  "Rendering uses the CPU until the engine reports GPU support.":
+    "จะเรนเดอร์ด้วย CPU จนกว่าเอนจินจะรายงานว่ารองรับ GPU",
+  "No supported GPU was detected. Rendering uses the CPU (slower).":
+    "ไม่พบ GPU ที่รองรับ จะเรนเดอร์ด้วย CPU (ช้ากว่า)",
+  "Hardware encoding isn't available. Rendering uses the CPU (slower).":
+    "ใช้การเข้ารหัสแบบฮาร์ดแวร์ไม่ได้ จะเรนเดอร์ด้วย CPU (ช้ากว่า)",
+  "Encoding (export)": "การเข้ารหัส (ส่งออก)",
+  "Transcription (upload)": "การถอดเสียง (อัปโหลด)",
+  "The GPU pack speeds up transcription only. Hardware encoding needs an up-to-date graphics driver.":
+    "แพ็ก GPU ช่วยเร่งเฉพาะการถอดเสียง การเข้ารหัสแบบฮาร์ดแวร์ต้องใช้ไดรเวอร์การ์ดจอเวอร์ชันล่าสุด",
 };
 
 let activeLocale: Locale = useSettingsStore.getState().uiLanguage;

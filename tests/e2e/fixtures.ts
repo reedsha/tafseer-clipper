@@ -33,7 +33,7 @@ const RECENT = [
   },
 ];
 
-const PROJECT = {
+export const PROJECT = {
   schemaVersion: 1,
   id: PROJECT_ID,
   name: PROJECT_NAME,

@@ -274,15 +274,20 @@ def cuda_runtime_ready() -> bool:
 # --------------------------------------------------------------------------- #
 # /health acceleration report
 # --------------------------------------------------------------------------- #
-def _encoding_available() -> bool:
-    """Whether FFmpeg can use the hardware encoder on this machine."""
+def _encoding_probe() -> dict[str, Any]:
+    """Whether FFmpeg can use the hardware encoder here, and why not."""
     try:
         # Local import: accel must stay importable before the services package.
         from services import renderer
 
-        return bool(renderer.nvenc_available())
-    except Exception:  # pragma: no cover - defensive
-        return False
+        return renderer.nvenc_probe()
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"ok": False, "reason": "probe-failed", "detail": str(exc)[:300]}
+
+
+def _encoding_available() -> bool:
+    """Whether FFmpeg can use the hardware encoder on this machine."""
+    return bool(_encoding_probe().get("ok"))
 
 
 def acceleration_report() -> dict[str, Any]:
@@ -298,6 +303,7 @@ def acceleration_report() -> dict[str, Any]:
     gpu_detected = gpu is not None
     pack_installed = bool(config.accel_dir())
     transcription_gpu = gpu_detected and runtime
+    encoding = _encoding_probe()
 
     if transcription_gpu:
         reason: str | None = None
@@ -310,12 +316,16 @@ def acceleration_report() -> dict[str, Any]:
 
     return {
         "transcription": "gpu" if transcription_gpu else "cpu",
-        "encoding": "gpu" if _encoding_available() else "cpu",
+        "encoding": "gpu" if encoding.get("ok") else "cpu",
         "gpu_detected": gpu_detected,
         "gpu_name": gpu.get("name") if gpu else None,
         "cuda_runtime": runtime,
         "pack_installed": pack_installed,
         "reason": reason,
+        # Additive: why hardware encoding is unavailable (None when it works).
+        # Independent of the acceleration pack, which powers transcription only.
+        "encoding_reason": None if encoding.get("ok") else encoding.get("reason"),
+        "encoding_detail": None if encoding.get("ok") else encoding.get("detail"),
     }
 
 

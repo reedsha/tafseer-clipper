@@ -308,6 +308,10 @@ export interface AccelerationSummary {
   cudaRuntime: boolean;
   packInstalled: boolean;
   reason: string | null;
+  /** Why hardware encoding is unavailable (null when it works or unknown). */
+  encodingReason: string | null;
+  /** Raw encoder message — diagnostics/tooltip only. */
+  encodingDetail: string | null;
 }
 
 const UNKNOWN_SUMMARY: AccelerationSummary = {
@@ -321,6 +325,8 @@ const UNKNOWN_SUMMARY: AccelerationSummary = {
   cudaRuntime: false,
   packInstalled: false,
   reason: null,
+  encodingReason: null,
+  encodingDetail: null,
 };
 
 /**
@@ -349,8 +355,20 @@ export function describeAcceleration(
   const gpuName = acceleration?.gpu_name ?? null;
   const packInstalled = acceleration ? acceleration.pack_installed : health.cuda_available;
   const reason = acceleration?.reason ?? null;
+  const encodingReason = encoding === "gpu" ? null : (acceleration?.encoding_reason ?? null);
+  const encodingDetail = encoding === "gpu" ? null : (acceleration?.encoding_detail ?? null);
 
-  const base = { transcription, encoding, gpuDetected, gpuName, cudaRuntime, packInstalled, reason };
+  const base = {
+    transcription,
+    encoding,
+    gpuDetected,
+    gpuName,
+    cudaRuntime,
+    packInstalled,
+    reason,
+    encodingReason,
+    encodingDetail,
+  };
 
   if (
     gpuDetected &&
@@ -423,6 +441,48 @@ const ACCELERATION_REASON_COPY: Record<string, string> = {
   "cuda-runtime-missing": "A GPU was detected, but the acceleration runtime is not installed.",
   "cuda-runtime-unusable": "The acceleration runtime is installed but could not be loaded.",
 };
+
+/**
+ * Why hardware encoding (Step 4) is unavailable, in editor vocabulary.
+ *
+ * Hardware encoding depends on the graphics driver, not on the acceleration
+ * pack (which powers transcription only), so this copy never points the user at
+ * the pack. Vendor-neutral per AGENTS.md §3; the raw encoder message stays in
+ * diagnostics (`encodingDetail`).
+ */
+const ENCODING_REASON_COPY: Record<string, string> = {
+  "driver-too-old":
+    "Your graphics driver is too old for hardware encoding. Update it, then click Check again. Rendering uses the CPU meanwhile.",
+  "no-capable-device": "This computer can't encode video on the GPU. Rendering uses the CPU (slower).",
+  "encoder-not-compiled": "This computer can't encode video on the GPU. Rendering uses the CPU (slower).",
+  "ffmpeg-missing": "The video encoder is missing. Reinstall the app; rendering can't start until then.",
+  "probe-timeout":
+    "Hardware encoding didn't respond in time. Click Check again; rendering uses the CPU meanwhile.",
+  "probe-failed": "Hardware encoding couldn't start. Rendering uses the CPU (slower).",
+};
+
+export function encodingUnavailableText(summary: AccelerationSummary): string {
+  if (summary.encodingReason) {
+    return (
+      ENCODING_REASON_COPY[summary.encodingReason] ??
+      "Hardware encoding couldn't start. Rendering uses the CPU (slower)."
+    );
+  }
+  if (summary.state === "unknown") return "Rendering uses the CPU until the engine reports GPU support.";
+  if (!summary.gpuDetected) return "No supported GPU was detected. Rendering uses the CPU (slower).";
+  return "Hardware encoding isn't available. Rendering uses the CPU (slower).";
+}
+
+/** True when re-checking could plausibly turn hardware encoding on. */
+export function canRecheckEncoding(summary: AccelerationSummary): boolean {
+  if (summary.encoding === "gpu") return false;
+  return (
+    summary.gpuDetected ||
+    summary.encodingReason === "driver-too-old" ||
+    summary.encodingReason === "probe-timeout" ||
+    summary.encodingReason === "probe-failed"
+  );
+}
 
 export function humanizeAccelerationReason(reason: string | null): string | null {
   if (!reason) return null;

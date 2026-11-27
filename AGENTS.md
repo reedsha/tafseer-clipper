@@ -65,7 +65,7 @@ These five libraries are pre-approved. Use each only for its assigned job:
 6. `POST /render-batch` (SSE progress stream)
 7. `POST /list-models` (model discovery for the Settings selectors — approved 2026-11; no hard-coded model lists may replace it)
 - Do **not** add further endpoints, GraphQL, WebSockets, LangGraph, or an agent framework. The architecture is a simple deterministic REST loop (Section 2 of the master plan).
-- `GET /health` may carry **additive, backward-compatible** blocks (`providers.ollama`, `providers.whisper_local`, `hardware.tier`), and that `GET /health` and `POST /list-models` both carry the additive `models_detail` field described below. Those are response enrichment of the existing endpoints, not new endpoints, and consumers must tolerate their absence.
+- `GET /health` may carry **additive, backward-compatible** blocks (`providers.ollama`, `providers.whisper_local`, `hardware.tier`, and `acceleration.encoding_reason` / `acceleration.encoding_detail` explaining why hardware encoding is unavailable — the GPU pack powers transcription only; encoding depends on the driver), and that `GET /health` and `POST /list-models` both carry the additive `models_detail` field described below. Those are response enrichment of the existing endpoints, not new endpoints, and consumers must tolerate their absence.
 - Do **not** call OpenAI-compatible APIs, Ollama, or Whisper directly from the frontend; all provider configuration flows through the sidecar.
 ### Internal decision tier (System One) — no new endpoints
 

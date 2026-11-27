@@ -227,6 +227,13 @@ class AccelerationStatus(BaseModel):
     cuda_runtime: bool = False
     pack_installed: bool = False
     reason: str | None = None
+    #: Additive: why hardware encoding is unavailable (``None`` when it works):
+    #: ``ffmpeg-missing``, ``encoder-not-compiled``, ``driver-too-old``,
+    #: ``no-capable-device``, ``probe-timeout`` or ``probe-failed``. Independent
+    #: of the acceleration pack, which powers transcription only.
+    encoding_reason: str | None = None
+    #: Raw FFmpeg message behind ``encoding_reason`` - diagnostics only.
+    encoding_detail: str | None = None
 
 
 class ModelDetail(BaseModel):

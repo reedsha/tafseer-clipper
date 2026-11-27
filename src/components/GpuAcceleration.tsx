@@ -17,6 +17,7 @@ import {
   accelerationProgressLabel,
   canEnableGpu,
   downloadAccelerationPack,
+  encodingUnavailableText,
   ensureAccelerationStatusLoaded,
   humanizeAccelerationReason,
   isGpuEncodingAvailable,
@@ -103,7 +104,7 @@ function GpuPackAction({ summary }: { summary: AccelerationSummary }) {
       return;
     }
     toast.success(L("GPU acceleration installed"), {
-      description: L("Restart the app to switch transcription and encoding to the GPU."),
+      description: L("Restart the app to switch transcription to the GPU."),
     });
   }
 
@@ -222,6 +223,50 @@ function GpuPackAction({ summary }: { summary: AccelerationSummary }) {
 }
 
 /**
+ * Transcription and encoding are separate GPU features: the pack powers
+ * transcription; hardware encoding depends on the graphics driver. Showing
+ * both stops "GPU ready" from implying the Step 4 switch will turn on.
+ */
+function GpuFeatureBreakdown({ summary }: { summary: AccelerationSummary }) {
+  const encodingGpu = isGpuEncodingAvailable(summary);
+  const encodingLine = (
+    <span className="text-[11px] leading-relaxed text-muted-foreground">
+      <span className="text-foreground/90">{L("Encoding (export)")}:</span>{" "}
+      {encodingGpu ? "GPU" : "CPU"}
+      {encodingGpu ? null : <> — {L(encodingUnavailableText(summary))}</>}
+    </span>
+  );
+
+  return (
+    <div className="space-y-1 rounded-md border border-border bg-card/40 px-2.5 py-2">
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        <span className="text-foreground/90">{L("Transcription (upload)")}:</span>{" "}
+        {summary.transcription === "gpu" ? "GPU" : "CPU"}
+      </p>
+      {summary.encodingDetail ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <p className="cursor-default">{encodingLine}</p>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-72 break-words text-xs">
+            {summary.encodingDetail}
+          </TooltipContent>
+        </Tooltip>
+      ) : (
+        <p>{encodingLine}</p>
+      )}
+      {!encodingGpu && summary.gpuDetected ? (
+        <p className="text-[10px] leading-relaxed text-muted-foreground/80">
+          {L(
+            "The GPU pack speeds up transcription only. Hardware encoding needs an up-to-date graphics driver.",
+          )}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * Full acceleration panel: status, explanation, CPU fallback and the one-click
  * GPU pack action. Used in Settings → Main.
  */
@@ -245,6 +290,8 @@ export function GpuAccelerationPanel({ summary }: { summary: AccelerationSummary
       {reason ? (
         <p className="text-[11px] leading-relaxed text-muted-foreground/80">{reason}</p>
       ) : null}
+
+      {summary.state !== "unknown" ? <GpuFeatureBreakdown summary={summary} /> : null}
 
       <GpuPackAction summary={summary} />
 

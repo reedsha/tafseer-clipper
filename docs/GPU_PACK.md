@@ -47,6 +47,15 @@ app shows the real size from the manifest before/while downloading. Only NVIDIA
 GPUs are accelerated; encoding is NVIDIA-only too (NVENC), with automatic
 `libx264` fallback.
 
+> **The pack powers transcription only.** Hardware encoding (the Step 4
+> "Hardware encoding when available" switch) does not use the pack at all: it
+> needs the bundled FFmpeg's `h264_nvenc` plus a graphics driver new enough for
+> that FFmpeg's NVENC API. The sidecar test-encodes one frame and reports the
+> outcome in `/health.acceleration.encoding` with an additive
+> `encoding_reason` (`driver-too-old`, `no-capable-device`,
+> `encoder-not-compiled`, `ffmpeg-missing`, `probe-timeout`, `probe-failed`)
+> and a diagnostics-only `encoding_detail` (the raw FFmpeg message).
+
 ## Build the pack
 
 ```powershell
@@ -150,6 +159,7 @@ The app returns to CPU transcription.
 | Download fails with a hash mismatch | Manifest/DLL mismatch on the host; rebuild the pack and re-upload both together. |
 | After install, `/health.acceleration.transcription` is still `cpu` | Restart the app (the sidecar reads `TAFSEER_CUDA_DIR` at startup). Check `logs\sidecar.log` for a CUDA load warning. |
 | `cudnn64_9.dll` or `msvcp140.dll` missing | The pack covers CUDA/cuDNN; install the Microsoft Visual C++ 2015–2022 Redistributable if the system lacks it. |
+| Step 4 "Hardware encoding" switch stays off after installing the pack | Expected if the driver is too old: the pack is transcription-only. Check `/health.acceleration.encoding_reason` (or the Encoding line in Settings → GPU acceleration / `logs\sidecar.log`, `hardware encoding unavailable: reason=…`). For `driver-too-old`, update the NVIDIA driver and click **Check again** in Step 4 — no restart needed. |
 | GPU out of memory / driver too old | Use the CPU fallback (automatic), switch to Cloud STT, or update the NVIDIA driver (CUDA 12-capable driver required). |
 
 ## Version bumps

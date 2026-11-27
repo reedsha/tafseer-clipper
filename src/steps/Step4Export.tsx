@@ -1,5 +1,5 @@
 import { L } from "@/lib/i18n";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import NumberFlow from "@number-flow/react";
 import { toast } from "sonner";
 import {
@@ -44,7 +44,12 @@ import {
   fileStem,
   resolveClipFileName,
 } from "@/lib/filenameTemplate";
-import { describeAcceleration, isGpuEncodingAvailable } from "@/lib/acceleration";
+import {
+  canRecheckEncoding,
+  describeAcceleration,
+  encodingUnavailableText,
+  isGpuEncodingAvailable,
+} from "@/lib/acceleration";
 import { openDirectory, openPathInShell } from "@/lib/media";
 import type { FramingMode, ProjectClip, Resolution } from "@/lib/projectTypes";
 import { FRAMING_LABELS } from "@/lib/projectTypes";
@@ -89,6 +94,18 @@ export function Step4Export() {
   /** Vendor-neutral acceleration state; hardware names stay in diagnostics. */
   const acceleration = describeAcceleration(sidecar.health);
   const encodingAvailable = isGpuEncodingAvailable(acceleration);
+  const [recheckingEncoding, setRecheckingEncoding] = useState(false);
+
+  /** Re-probe the encoder (`/health?refresh=1`), e.g. after a driver update. */
+  async function recheckEncoding() {
+    if (recheckingEncoding) return;
+    setRecheckingEncoding(true);
+    try {
+      await refreshHealth({ force: true });
+    } finally {
+      setRecheckingEncoding(false);
+    }
+  }
 
   // The batch lives in the render store so navigating between wizard steps
   // never aborts it; this component only renders the job for its own project.
@@ -467,11 +484,22 @@ export function Step4Export() {
                     {L("Hardware encoding when available")}
                   </p>
                   <p className="text-xs leading-relaxed text-muted-foreground">
-                    {encodingAvailabilityText(acceleration)}
                     {encodingAvailable
-                      ? " — if it isn't available, we render on the CPU instead."
-                      : " — rendering runs on the CPU. Turn on GPU acceleration in Settings."}
+                      ? `${encodingAvailabilityText(acceleration)} — if it isn't available, we render on the CPU instead.`
+                      : L(encodingUnavailableText(acceleration))}
                   </p>
+                  {!encodingAvailable && canRecheckEncoding(acceleration) && sidecar.status !== "offline" ? (
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="-ml-1.5 h-5 gap-1 text-muted-foreground hover:text-foreground"
+                      onClick={() => void recheckEncoding()}
+                      disabled={recheckingEncoding}
+                    >
+                      <RotateCw className={recheckingEncoding ? "size-3 animate-spin" : "size-3"} />
+                      {L("Check again")}
+                    </Button>
+                  ) : null}
                 </div>
                 <Switch
                   checked={useNvenc && encodingAvailable}

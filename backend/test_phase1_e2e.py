@@ -709,6 +709,9 @@ def run_http_checks(
                 and accel_report.get("gpu_detected") is True
             )
             and says_gpu == (accel_report.get("reason") is None)
+            # Additive encoding_reason: null exactly when encoding is "gpu".
+            and (accel_report.get("encoding") == "gpu")
+            == (accel_report.get("encoding_reason") is None)
         )
         check(
             "GET /health: acceleration block is self-consistent",
@@ -1941,6 +1944,102 @@ def run_unit_checks(source: Path, fonts_dir: Path) -> None:
             os.environ["TAFSEER_CUDA_DIR"] = previous_cuda_dir
         accel.clear_cache()
         shutil.rmtree(probe_dir, ignore_errors=True)
+
+    # ---- renderer: hardware-encoding probe says WHY it is unavailable ------ #
+    # Regression guard: the Step 4 switch stayed off after the GPU pack was
+    # installed and the UI pointed at the pack. The probe must classify the
+    # FFmpeg error (old driver vs. no encoder), and a timeout must not pin
+    # "unavailable" for the whole session.
+    classify_cases = {
+        "[h264_nvenc @ 0x1] Driver does not support the required nvenc API version. "
+        "Required: 13.0 Found: 12.1": "driver-too-old",
+        "[h264_nvenc @ 0x1] The minimum required Nvidia driver for nvenc is 570.0 or newer": (
+            "driver-too-old"
+        ),
+        "[h264_nvenc @ 0x1] OpenEncodeSessionEx failed: unsupported device (2)": "no-capable-device",
+        "[h264_nvenc @ 0x1] No capable devices found": "no-capable-device",
+        "[h264_nvenc @ 0x1] Cannot load nvcuda.dll": "no-capable-device",
+        "[h264_nvenc @ 0x1] Cannot load libcuda.so.1": "no-capable-device",
+        "something unexpected": "probe-failed",
+        "": "probe-failed",
+    }
+    misclassified = {
+        text: (renderer.classify_nvenc_failure(text), want)
+        for text, want in classify_cases.items()
+        if renderer.classify_nvenc_failure(text) != want
+    }
+    check(
+        "renderer: NVENC failures are classified (driver-too-old / no-capable-device)",
+        not misclassified,
+        f"misclassified={misclassified}",
+    )
+
+    real_run_probe = renderer._run_nvenc_probe
+    probe_calls = {"n": 0}
+    probe_script: list[dict] = []
+
+    def _scripted_probe() -> dict:
+        probe_calls["n"] += 1
+        return dict(probe_script.pop(0))
+
+    try:
+        renderer._run_nvenc_probe = _scripted_probe
+        renderer.clear_capability_cache()
+        probe_script[:] = [
+            {"ok": False, "reason": "probe-timeout", "detail": "slow", "cacheable": False},
+            {"ok": True, "reason": None, "detail": None, "cacheable": True},
+        ]
+        first = renderer.nvenc_probe()
+        shared = renderer.nvenc_probe()  # within the transient TTL: no re-probe
+        check(
+            "renderer: concurrent callers share one transient probe result",
+            first["reason"] == "probe-timeout" and shared == first and probe_calls["n"] == 1,
+            f"first={first} shared={shared} calls={probe_calls['n']}",
+        )
+        renderer._nvenc_probe_cache["_expires"] = 0.0  # TTL elapsed
+        second = renderer.nvenc_probe()
+        check(
+            "renderer: a probe timeout is retried, not cached for the session",
+            second["ok"] is True and probe_calls["n"] == 2 and renderer.nvenc_available() is True,
+            f"second={second} calls={probe_calls['n']}",
+        )
+        check(
+            "renderer: a definite probe result is cached until refresh",
+            probe_calls["n"] == 2,
+            f"calls={probe_calls['n']}",
+        )
+
+        renderer.clear_capability_cache()
+        probe_script[:] = [
+            {
+                "ok": False,
+                "reason": "driver-too-old",
+                "detail": "Driver does not support the required nvenc API version",
+                "cacheable": True,
+            }
+        ]
+        report = accel.acceleration_report()
+        check(
+            "accel: /health.acceleration carries encoding_reason + encoding_detail",
+            report["encoding"] == "cpu"
+            and report["encoding_reason"] == "driver-too-old"
+            and "nvenc API version" in (report["encoding_detail"] or ""),
+            f"encoding={report['encoding']} reason={report['encoding_reason']} "
+            f"detail={report['encoding_detail']}",
+        )
+        renderer.clear_capability_cache()
+        probe_script[:] = [{"ok": True, "reason": None, "detail": None, "cacheable": True}]
+        report = accel.acceleration_report()
+        check(
+            "accel: encoding_reason is null when hardware encoding works",
+            report["encoding"] == "gpu"
+            and report["encoding_reason"] is None
+            and report["encoding_detail"] is None,
+            f"encoding={report['encoding']} reason={report['encoding_reason']}",
+        )
+    finally:
+        renderer._run_nvenc_probe = real_run_probe
+        renderer.clear_capability_cache()
 
     engine = transcriber.WhisperTranscriber(model_size="tiny", device="cpu")
     check(
